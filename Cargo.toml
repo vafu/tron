@@ -11,6 +11,9 @@ bytemuck = { version = "1", features = ["derive"] }
 v4l = "0.14"
 industrial-io = "0.6"
 anyhow = "1"
+ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
+ndarray = "0.16"
+opencv = { version = "0.94", default-features = false, features = ["imgproc"] }
 
 [profile.dev]
 opt-level = 1

@@ -1,4 +1,4 @@
-use crate::types::HandLandmarks;
+use crate::types::{HandLandmarks, RectNorm};
 use bytemuck::{Pod, Zeroable};
 
 /// MediaPipe Hands keypoint topology.
@@ -52,8 +52,9 @@ impl SkeletonRenderer {
         let line_pipeline = make_pipeline(device, &layout, &shader, format, wgpu::PrimitiveTopology::LineList);
         let point_pipeline = make_pipeline(device, &layout, &shader, format, wgpu::PrimitiveTopology::TriangleList);
 
-        // Big enough for 2 verts per edge + 6 verts per point at 21 points.
-        let capacity = (EDGES.len() * 2) + (21 * 6);
+        // Lines: 2 verts per skeleton edge + 8 verts for ROI rect outline.
+        // Points: 6 verts per landmark.
+        let capacity = (EDGES.len() * 2) + 8 + (21 * 6);
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("skeleton-vbuf"),
             size: (capacity * std::mem::size_of::<LineVertex>()) as u64,
@@ -79,61 +80,89 @@ impl SkeletonRenderer {
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
-        lm: &HandLandmarks,
+        lm: Option<&HandLandmarks>,
+        roi: Option<&RectNorm>,
         clip: (f32, f32, f32, f32),
     ) {
         let (x0, y0, x1, y1) = clip;
         let to_ndc = |x: f32, y: f32| -> [f32; 2] {
-            // landmark x: 0..1 left→right; y: 0..1 top→bottom; clip y is NDC (up positive)
+            // landmark/ROI x,y are 0..1 in source-image coords (top-left origin).
+            // Map into the camera quad's NDC clip rect (y up).
             let nx = x0 + (x1 - x0) * x;
-            let ny = y1 + (y0 - y1) * y; // y inverted
+            let ny = y1 + (y0 - y1) * y;
             [nx, ny]
         };
 
         let edge_color = [0.20, 1.00, 0.55, 0.95];
         let point_color = [1.00, 0.85, 0.20, 1.00];
+        let roi_color = [1.00, 0.45, 0.20, 0.95];
 
         let mut verts: Vec<LineVertex> = Vec::with_capacity(self.capacity);
-        for &(a, b) in EDGES {
-            let pa = lm.points[a];
-            let pb = lm.points[b];
-            verts.push(LineVertex { pos: to_ndc(pa.x, pa.y), color: edge_color });
-            verts.push(LineVertex { pos: to_ndc(pb.x, pb.y), color: edge_color });
+
+        // ROI rectangle outline (4 line segments = 8 verts).
+        if let Some(r) = roi {
+            let tl = to_ndc(r.x, r.y);
+            let tr = to_ndc(r.x + r.w, r.y);
+            let br = to_ndc(r.x + r.w, r.y + r.h);
+            let bl = to_ndc(r.x, r.y + r.h);
+            verts.push(LineVertex { pos: tl, color: roi_color });
+            verts.push(LineVertex { pos: tr, color: roi_color });
+            verts.push(LineVertex { pos: tr, color: roi_color });
+            verts.push(LineVertex { pos: br, color: roi_color });
+            verts.push(LineVertex { pos: br, color: roi_color });
+            verts.push(LineVertex { pos: bl, color: roi_color });
+            verts.push(LineVertex { pos: bl, color: roi_color });
+            verts.push(LineVertex { pos: tl, color: roi_color });
         }
-        self.line_count = (EDGES.len() * 2) as u32;
+
+        // Skeleton edges.
+        if let Some(lm) = lm {
+            for &(a, b) in EDGES {
+                let pa = lm.points[a];
+                let pb = lm.points[b];
+                verts.push(LineVertex { pos: to_ndc(pa.x, pa.y), color: edge_color });
+                verts.push(LineVertex { pos: to_ndc(pb.x, pb.y), color: edge_color });
+            }
+        }
+
+        self.line_count = verts.len() as u32;
         self.point_offset = (verts.len() * std::mem::size_of::<LineVertex>()) as u64;
 
-        // Points as little squares (two triangles each), so we don't need POINT topology.
-        let r = 0.008;
-        for p in &lm.points {
-            let c = to_ndc(p.x, p.y);
-            let tl = [c[0] - r, c[1] + r];
-            let tr = [c[0] + r, c[1] + r];
-            let bl = [c[0] - r, c[1] - r];
-            let br = [c[0] + r, c[1] - r];
-            verts.push(LineVertex { pos: tl, color: point_color });
-            verts.push(LineVertex { pos: bl, color: point_color });
-            verts.push(LineVertex { pos: br, color: point_color });
-            verts.push(LineVertex { pos: tl, color: point_color });
-            verts.push(LineVertex { pos: br, color: point_color });
-            verts.push(LineVertex { pos: tr, color: point_color });
+        // Landmark points as little squares.
+        if let Some(lm) = lm {
+            let r = 0.008;
+            for p in &lm.points {
+                let c = to_ndc(p.x, p.y);
+                let tl = [c[0] - r, c[1] + r];
+                let tr = [c[0] + r, c[1] + r];
+                let bl = [c[0] - r, c[1] - r];
+                let br = [c[0] + r, c[1] - r];
+                verts.push(LineVertex { pos: tl, color: point_color });
+                verts.push(LineVertex { pos: bl, color: point_color });
+                verts.push(LineVertex { pos: br, color: point_color });
+                verts.push(LineVertex { pos: tl, color: point_color });
+                verts.push(LineVertex { pos: br, color: point_color });
+                verts.push(LineVertex { pos: tr, color: point_color });
+            }
+            self.point_count = (21 * 6) as u32;
+        } else {
+            self.point_count = 0;
         }
-        self.point_count = (21 * 6) as u32;
 
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
     }
 
     pub fn draw<'r>(&'r self, rp: &mut wgpu::RenderPass<'r>) {
-        if self.line_count == 0 {
-            return;
+        if self.line_count > 0 {
+            rp.set_pipeline(&self.line_pipeline);
+            rp.set_vertex_buffer(0, self.vbuf.slice(..self.point_offset));
+            rp.draw(0..self.line_count, 0..1);
         }
-        rp.set_pipeline(&self.line_pipeline);
-        rp.set_vertex_buffer(0, self.vbuf.slice(..self.point_offset));
-        rp.draw(0..self.line_count, 0..1);
-
-        rp.set_pipeline(&self.point_pipeline);
-        rp.set_vertex_buffer(0, self.vbuf.slice(self.point_offset..));
-        rp.draw(0..self.point_count, 0..1);
+        if self.point_count > 0 {
+            rp.set_pipeline(&self.point_pipeline);
+            rp.set_vertex_buffer(0, self.vbuf.slice(self.point_offset..));
+            rp.draw(0..self.point_count, 0..1);
+        }
     }
 }
 

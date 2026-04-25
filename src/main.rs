@@ -2,6 +2,7 @@
 // MockLandmarker is in place. Re-enable lints after phase B lands.
 #![allow(dead_code)]
 
+mod calib;
 mod camera;
 mod filter;
 mod gestures;
@@ -16,8 +17,9 @@ mod types;
 use anyhow::Result;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const RGB_W: u32 = 640;
@@ -65,6 +67,12 @@ impl ApplicationHandler for App {
                     g.resize(size);
                 }
             }
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, repeat, .. },
+                ..
+            } => {
+                handle_calib_key(code, repeat);
+            }
             WindowEvent::RedrawRequested => {
                 if let Some(g) = self.gfx.as_mut() {
                     match g.render() {
@@ -88,18 +96,51 @@ impl ApplicationHandler for App {
     }
 }
 
+fn handle_calib_key(code: KeyCode, _repeat: bool) {
+    const NUDGE_OFFSET: f32 = 0.005;
+    const NUDGE_SCALE: f32 = 0.01;
+    match code {
+        KeyCode::ArrowLeft  => calib::modify(|c| c.offset_x -= NUDGE_OFFSET),
+        KeyCode::ArrowRight => calib::modify(|c| c.offset_x += NUDGE_OFFSET),
+        KeyCode::ArrowUp    => calib::modify(|c| c.offset_y -= NUDGE_OFFSET),
+        KeyCode::ArrowDown  => calib::modify(|c| c.offset_y += NUDGE_OFFSET),
+        KeyCode::KeyA       => calib::modify(|c| c.scale_x  -= NUDGE_SCALE),
+        KeyCode::KeyD       => calib::modify(|c| c.scale_x  += NUDGE_SCALE),
+        KeyCode::KeyW       => calib::modify(|c| c.scale_y  -= NUDGE_SCALE),
+        KeyCode::KeyS       => calib::modify(|c| c.scale_y  += NUDGE_SCALE),
+        KeyCode::KeyR       => calib::reset(),
+        KeyCode::KeyP       => eprintln!("calib: {:?}", calib::current()),
+        _ => {}
+    }
+}
+
 fn main() -> Result<()> {
     let rgb_src = camera::spawn_rgb("/dev/video0", RGB_W, RGB_H)?;
     let ir_src = camera::spawn_ir("/dev/video2", IR_W, IR_H)?;
     let prox_src = proximity::spawn("prox", "proximity1")?;
 
-    // v1 pipeline — MockLandmarker so the app runs without any model file.
+    // Try the real MediaPipe model; fall back to mock if the file is missing
+    // or the load fails. Run `scripts/download_models.sh` to fetch it.
+    let lm: Box<dyn landmarker::HandLandmarker> = match landmarker::mediapipe::MediaPipeHandLandmarker::new("models/hand_landmark.onnx") {
+        Ok(m) => {
+            eprintln!("landmarker: MediaPipe (ort)");
+            Box::new(m)
+        }
+        Err(e) => {
+            eprintln!("landmarker: falling back to mock — {e:#}");
+            Box::new(landmarker::mock::MockLandmarker::new())
+        }
+    };
+
+    // ROI chain: IR blob (mapped to RGB coords via calib::IR_TO_RGB) → previous-
+    // frame tracking → full frame fallback.
     let pipe = pipeline::GesturePipeline {
         roi: Box::new(roi::CompositeRoiHinter(vec![
+            Box::new(roi::ir::IrRoiHinter::new()),
             Box::new(roi::track::TrackFromLastRoi::new()),
             Box::new(roi::FullFrameRoi),
         ])),
-        lm: Box::new(landmarker::mock::MockLandmarker::new()),
+        lm,
         filter: Box::new(filter::OneEuroFilter::default()),
         gestures: Box::new(gestures::RuleBasedClassifier::new()),
     };

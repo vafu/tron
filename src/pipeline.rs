@@ -30,12 +30,11 @@ pub struct GesturePipeline {
 }
 
 impl GesturePipeline {
-    pub fn step(&mut self, ctx: &FrameContext) -> Option<HandState> {
+    pub fn step(&mut self, ctx: &FrameContext) -> HandState {
         let roi = self.roi.hint(ctx);
-        let raw = self.lm.run(ctx, roi)?;
-        let smoothed = self.filter.apply(raw);
-        let gesture = self.gestures.classify(ctx, &smoothed);
-        Some(HandState { landmarks: smoothed, gesture })
+        let smoothed = self.lm.run(ctx, roi).map(|raw| self.filter.apply(raw));
+        let gesture = smoothed.as_ref().and_then(|lm| self.gestures.classify(ctx, lm));
+        HandState { roi, landmarks: smoothed, gesture }
     }
 }
 
@@ -75,13 +74,9 @@ pub fn spawn(
                         last: last.as_ref(),
                         now: Instant::now(),
                     };
-                    if let Some(state) = pipeline.step(&ctx) {
-                        last = Some(state.landmarks.clone());
-                        *publish.lock().unwrap() = Some(state);
-                    } else {
-                        last = None;
-                        *publish.lock().unwrap() = None;
-                    }
+                    let state = pipeline.step(&ctx);
+                    last = state.landmarks.clone();
+                    *publish.lock().unwrap() = Some(state);
                 } else {
                     thread::sleep(Duration::from_millis(2));
                 }

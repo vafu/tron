@@ -97,6 +97,7 @@ impl Gesture {
 
 #[derive(Clone)]
 pub struct HandState {
-    pub landmarks: HandLandmarks,
+    pub roi: Option<RectNorm>,
+    pub landmarks: Option<HandLandmarks>,
     pub gesture: Option<Gesture>,
 }

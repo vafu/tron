@@ -1,6 +1,7 @@
 use crate::pipeline::FrameContext;
 use crate::types::RectNorm;
 
+pub mod ir;
 pub mod track;
 
 pub trait RoiHinter: Send {

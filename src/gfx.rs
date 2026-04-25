@@ -185,10 +185,15 @@ pub struct Gfx {
 
     rgb: TexQuad,
     ir: TexQuad,
+    /// Centre pane: the actual image fed to the model. For now an RGB copy;
+    /// will hold the IR-fused image once that lands.
+    combined: TexQuad,
     bar_bg: SolidQuad,
     bar_fill: SolidQuad,
     skeleton: SkeletonRenderer,
     rgb_pane: (f32, f32, f32, f32),
+    ir_pane: (f32, f32, f32, f32),
+    combined_pane: (f32, f32, f32, f32),
 
     rgb_src: SharedImage,
     ir_src: SharedImage,
@@ -310,16 +315,22 @@ impl Gfx {
             ..Default::default()
         });
 
-        // Layout: top half split into RGB (left) and IR (right). Bottom strip = bar.
-        let rgb_rect = (-1.0, -0.5, 0.0, 1.0);
-        let ir_rect = (0.0, -0.5, 1.0, 1.0);
-        let bar_bg_rect = (-1.0, -1.0, 1.0, -0.5);
-        let bar_fill_rect = (-0.95, -0.9, -0.95, -0.6); // updated each frame
+        // Layout (NDC, y up):
+        //   top: small RGB and IR thumbnails
+        //   centre: combined pane (slightly larger), what the model sees
+        //   bottom: proximity bar
+        let rgb_rect      = (-0.65, 0.55, -0.05, 0.95);
+        let ir_rect       = ( 0.05, 0.55,  0.65, 0.95);
+        let combined_rect = (-0.70, -0.92, 0.70, 0.45);
+        let bar_bg_rect   = (-1.0, -1.0, 1.0, -0.97);
+        let bar_fill_rect = (-1.0, -1.0, -1.0, -0.97); // width updated each frame
 
         let rgb = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, rgb_rect);
         let ir = TexQuad::new(&device, &tex_bgl, &sampler, ir_size.0, ir_size.1, ir_rect);
+        let combined = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, combined_rect);
         rgb.fit(&queue, size);
         ir.fit(&queue, size);
+        combined.fit(&queue, size);
         let bar_bg = SolidQuad::new(&device, &solid_bgl, bar_bg_rect, [0.08, 0.08, 0.10, 1.0]);
         let bar_fill = SolidQuad::new(&device, &solid_bgl, bar_fill_rect, [0.20, 0.85, 0.45, 1.0]);
 
@@ -328,8 +339,9 @@ impl Gfx {
         Ok(Self {
             surface, device, queue, config, size, window,
             tex_pipeline, solid_pipeline, tex_bgl, solid_bgl, sampler,
-            rgb, ir, bar_bg, bar_fill,
-            skeleton, rgb_pane: rgb_rect,
+            rgb, ir, combined, bar_bg, bar_fill,
+            skeleton,
+            rgb_pane: rgb_rect, ir_pane: ir_rect, combined_pane: combined_rect,
             rgb_src, ir_src, prox_src, hand_src,
             prox_max: 1024,
         })
@@ -343,6 +355,7 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
         self.rgb.fit(&self.queue, size);
         self.ir.fit(&self.queue, size);
+        self.combined.fit(&self.queue, size);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -351,6 +364,11 @@ impl Gfx {
             if f.seq != self.rgb.last_seq {
                 self.rgb.upload(&self.queue, &f.data);
                 self.rgb.last_seq = f.seq;
+                // For now the "combined" pane mirrors the RGB feed. Once
+                // IR-fusion lands, the pipeline will produce a fused buffer
+                // and we'll upload that here instead.
+                self.combined.upload(&self.queue, &f.data);
+                self.combined.last_seq = f.seq;
             }
         }
         if let Some(f) = self.ir_src.lock().unwrap().as_ref() {
@@ -365,21 +383,24 @@ impl Gfx {
         if let Some(p) = prox {
             if p > self.prox_max { self.prox_max = p; }
             let norm = (p as f32 / self.prox_max as f32).clamp(0.0, 1.0);
-            let x0 = -0.95;
-            let x1 = x0 + 1.9 * norm;
-            let verts = quad(x0, -0.9, x1, -0.6);
+            let x0 = -1.0;
+            let x1 = x0 + 2.0 * norm;
+            let verts = quad(x0, -1.0, x1, -0.97);
             self.queue.write_buffer(&self.bar_fill.vbuf, 0, bytemuck::cast_slice(&verts));
         }
 
-        // Pull hand state, update skeleton mesh.
+        // Pull hand state, update skeleton + ROI mesh.
         let hand = self.hand_src.lock().unwrap().clone();
-        let mut have_hand = false;
+        let mut have_overlay = false;
         let mut gesture_label = "";
         if let Some(state) = &hand {
-            have_hand = true;
+            have_overlay = state.landmarks.is_some() || state.roi.is_some();
             gesture_label = state.gesture.map(|g| g.name()).unwrap_or("");
-            let clip = letterbox_rect(self.rgb_pane, self.rgb.w, self.rgb.h, self.size.width, self.size.height);
-            self.skeleton.update(&self.queue, &state.landmarks, clip);
+            // Landmarks + ROI are in RGB-image normalized coords; the combined
+            // pane shares those coords for now. Render over the combined pane
+            // so the user sees what the model actually consumes.
+            let clip = letterbox_rect(self.combined_pane, self.combined.w, self.combined.h, self.size.width, self.size.height);
+            self.skeleton.update(&self.queue, state.landmarks.as_ref(), state.roi.as_ref(), clip);
         }
 
         // Window title combines proximity + gesture.
@@ -421,6 +442,10 @@ impl Gfx {
             rp.set_vertex_buffer(0, self.ir.vbuf.slice(..));
             rp.draw(0..6, 0..1);
 
+            rp.set_bind_group(0, &self.combined.bind_group, &[]);
+            rp.set_vertex_buffer(0, self.combined.vbuf.slice(..));
+            rp.draw(0..6, 0..1);
+
             rp.set_pipeline(&self.solid_pipeline);
             rp.set_bind_group(0, &self.bar_bg.bind_group, &[]);
             rp.set_vertex_buffer(0, self.bar_bg.vbuf.slice(..));
@@ -429,7 +454,7 @@ impl Gfx {
             rp.set_vertex_buffer(0, self.bar_fill.vbuf.slice(..));
             rp.draw(0..6, 0..1);
 
-            if have_hand {
+            if have_overlay {
                 self.skeleton.draw(&mut rp);
             }
         }

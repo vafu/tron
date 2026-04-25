@@ -97,7 +97,20 @@ impl Gesture {
 
 #[derive(Clone)]
 pub struct HandState {
-    pub roi: Option<RectNorm>,
-    pub landmarks: Option<HandLandmarks>,
+    pub roi: RectNorm,
+    pub landmarks: HandLandmarks,
     pub gesture: Option<Gesture>,
+    /// The final refined RGB image that was sent to the landmarker.
+    pub debug_image: Option<Image>,
+}
+
+pub struct FrameContext {
+    pub rgb: Image,
+    pub ir:  Image,
+    /// Foreground IR signal (Current - Background).
+    pub ir_diff: Option<Image>,
+    pub ir_flashlight_on: bool,
+    pub proximity: Option<i64>,
+    pub last: Option<HandLandmarks>,
+    pub now: Instant,
 }

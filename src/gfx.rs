@@ -1,248 +1,93 @@
 use crate::camera::SharedImage;
-use crate::pipeline::SharedHand;
+use crate::pipeline::{SharedHand, SharedMask};
 use crate::proximity::SharedProx;
-use crate::skeleton_render::{letterbox_rect, SkeletonRenderer};
+use crate::skeleton_render::SkeletonRenderer;
+use crate::types::{Image, PixelFormat};
 use anyhow::{Context, Result};
-use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-struct Vertex {
-    pos: [f32; 2],
-    uv: [f32; 2],
-}
-
-const VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
-    array_stride: std::mem::size_of::<Vertex>() as u64,
-    step_mode: wgpu::VertexStepMode::Vertex,
-    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
-};
-
-fn quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Vertex; 6] {
-    // image origin at top-left, NDC y up. First row of texture should appear at y1.
-    let tl = Vertex { pos: [x0, y1], uv: [0.0, 0.0] };
-    let tr = Vertex { pos: [x1, y1], uv: [1.0, 0.0] };
-    let bl = Vertex { pos: [x0, y0], uv: [0.0, 1.0] };
-    let br = Vertex { pos: [x1, y0], uv: [1.0, 1.0] };
-    [tl, bl, br, tl, br, tr]
-}
-
-struct TexQuad {
-    texture: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
-    vbuf: wgpu::Buffer,
-    w: u32,
-    h: u32,
-    last_seq: u64,
-    /// NDC pane bounds (x0, y0, x1, y1) — area allocated to this quad.
-    pane: (f32, f32, f32, f32),
-}
-
-impl TexQuad {
-    fn new(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        w: u32,
-        h: u32,
-        rect: (f32, f32, f32, f32),
-    ) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cam-tex"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cam-bg"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
-            ],
-        });
-        let verts = quad(rect.0, rect.1, rect.2, rect.3);
-        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("cam-vbuf"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        Self { texture, bind_group, vbuf, w, h, last_seq: u64::MAX, pane: rect }
-    }
-
-    /// Recompute the vertex buffer to fit the image inside `pane` while
-    /// preserving its aspect ratio in physical pixels (letterbox/pillarbox).
-    fn fit(&self, queue: &wgpu::Queue, win: PhysicalSize<u32>) {
-        let win_w = win.width.max(1) as f32;
-        let win_h = win.height.max(1) as f32;
-        let (px0, py0, px1, py1) = self.pane;
-        // Pane size in physical pixels.
-        let pane_px_w = (px1 - px0) * 0.5 * win_w;
-        let pane_px_h = (py1 - py0) * 0.5 * win_h;
-        let pane_ar = pane_px_w / pane_px_h;
-        let img_ar = self.w as f32 / self.h as f32;
-        let (mut x0, mut y0, mut x1, mut y1) = self.pane;
-        if img_ar > pane_ar {
-            // image wider than pane → fit width, shrink height
-            let new_px_h = pane_px_w / img_ar;
-            let half_ndc = new_px_h / win_h; // half-extent in NDC
-            let cy = (py0 + py1) * 0.5;
-            y0 = cy - half_ndc;
-            y1 = cy + half_ndc;
-        } else {
-            // image taller than pane → fit height, shrink width
-            let new_px_w = pane_px_h * img_ar;
-            let half_ndc = new_px_w / win_w;
-            let cx = (px0 + px1) * 0.5;
-            x0 = cx - half_ndc;
-            x1 = cx + half_ndc;
-        }
-        let verts = quad(x0, y0, x1, y1);
-        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
-    }
-
-    fn upload(&mut self, queue: &wgpu::Queue, rgba: &[u8]) {
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(self.w * 4),
-                rows_per_image: Some(self.h),
-            },
-            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
-        );
-    }
-}
-
-struct SolidQuad {
-    bind_group: wgpu::BindGroup,
-    #[allow(dead_code)]
-    ubuf: wgpu::Buffer, // kept alive for the bind group
-    vbuf: wgpu::Buffer,
-}
-
-impl SolidQuad {
-    fn new(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        rect: (f32, f32, f32, f32),
-        color: [f32; 4],
-    ) -> Self {
-        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("solid-ubuf"),
-            contents: bytemuck::cast_slice(&color),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("solid-bg"),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: ubuf.as_entire_binding(),
-            }],
-        });
-        let verts = quad(rect.0, rect.1, rect.2, rect.3);
-        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("solid-vbuf"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        Self { bind_group, ubuf, vbuf }
-    }
-}
-
 pub struct Gfx {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+    pub window: Arc<Window>,
+    pub surface: wgpu::Surface<'static>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub config: wgpu::SurfaceConfiguration,
     pub size: PhysicalSize<u32>,
-    window: Arc<Window>,
 
     tex_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
-    #[allow(dead_code)]
-    tex_bgl: wgpu::BindGroupLayout,
-    #[allow(dead_code)]
-    solid_bgl: wgpu::BindGroupLayout,
-    #[allow(dead_code)]
-    sampler: wgpu::Sampler,
 
-    rgb: TexQuad,
-    ir: TexQuad,
-    /// Centre pane: the actual image fed to the model. For now an RGB copy;
-    /// will hold the IR-fused image once that lands.
-    combined: TexQuad,
-    bar_bg: SolidQuad,
-    bar_fill: SolidQuad,
+    /// Center pane: raw RGB camera, with skeleton overlay.
+    main_view: TexQuad,
+    /// Side pane: RGB darkened by IR mask (the "dimmed" debug image).
+    masked_view: TexQuad,
+    /// Side pane: grayscale IR foreground signal (the mask itself).
+    mask_view: TexQuad,
+
+    bar_bg: TexQuad,
+    bar_fill: TexQuad,
+
     skeleton: SkeletonRenderer,
-    rgb_pane: (f32, f32, f32, f32),
-    ir_pane: (f32, f32, f32, f32),
-    combined_pane: (f32, f32, f32, f32),
+
+    main_pane: (f32, f32, f32, f32),
 
     rgb_src: SharedImage,
+    #[allow(dead_code)]
     ir_src: SharedImage,
     prox_src: SharedProx,
     hand_src: SharedHand,
+    mask_src: SharedMask,
+
+    /// Scratch buffer for R8 → RGBA8 expansion when uploading the mask.
+    mask_rgba: Vec<u8>,
+
     prox_max: i64,
 }
 
 impl Gfx {
-    pub fn new(
+    pub async fn new(
         window: Arc<Window>,
         rgb_src: SharedImage,
         ir_src: SharedImage,
         prox_src: SharedProx,
         hand_src: SharedHand,
+        mask_src: SharedMask,
         rgb_size: (u32, u32),
         ir_size: (u32, u32),
     ) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone()).context("create surface")?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .context("no adapter")?;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-            },
-            None,
-        ))?;
+        let surface = instance.create_surface(window.clone())?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+            })
+            .await
+            .context("request adapter")?;
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
+            .await?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let format = caps.formats[0];
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width,
+            height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -250,13 +95,9 @@ impl Gfx {
         };
         surface.configure(&device, &config);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("tex-bgl"),
+            label: Some("tex_bgl"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -276,8 +117,9 @@ impl Gfx {
                 },
             ],
         });
+
         let solid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("solid-bgl"),
+            label: Some("solid_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -290,60 +132,56 @@ impl Gfx {
             }],
         });
 
-        let tex_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tex-pl"),
+        let tex_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tex_layout"),
             bind_group_layouts: &[&tex_bgl],
             push_constant_ranges: &[],
         });
-        let solid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("solid-pl"),
+        let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("solid_layout"),
             bind_group_layouts: &[&solid_bgl],
             push_constant_ranges: &[],
         });
 
-        let tex_pipeline = make_pipeline(&device, &tex_pl, &shader, "fs_tex", format);
-        let solid_pipeline = make_pipeline(&device, &solid_pl, &shader, "fs_solid", format);
+        let tex_pipeline = make_pipeline(&device, &tex_layout, &shader, "fs_tex", format);
+        let solid_pipeline = make_pipeline(&device, &solid_layout, &shader, "fs_solid", format);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("samp"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
-        // Layout (NDC, y up):
-        //   top: small RGB and IR thumbnails
-        //   centre: combined pane (slightly larger), what the model sees
-        //   bottom: proximity bar
-        let rgb_rect      = (-0.65, 0.55, -0.05, 0.95);
-        let ir_rect       = ( 0.05, 0.55,  0.65, 0.95);
-        let combined_rect = (-0.70, -0.92, 0.70, 0.45);
-        let bar_bg_rect   = (-1.0, -1.0, 1.0, -0.97);
-        let bar_fill_rect = (-1.0, -1.0, -1.0, -0.97); // width updated each frame
+        // UI Layout (normalized NDC -1..1):
+        //   Top row: helpers — IR-diff mask (left), masked RGB / pre-landmark (right).
+        //   Below:   main RGB + landmarks, full width.
+        let mask_rect   = (-0.95,  0.30, -0.05,  0.95);
+        let masked_rect = ( 0.05,  0.30,  0.95,  0.95);
+        let main_rect   = (-0.95, -0.90,  0.95,  0.20);
 
-        let rgb = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, rgb_rect);
-        let ir = TexQuad::new(&device, &tex_bgl, &sampler, ir_size.0, ir_size.1, ir_rect);
-        let combined = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, combined_rect);
-        rgb.fit(&queue, size);
-        ir.fit(&queue, size);
-        combined.fit(&queue, size);
-        let bar_bg = SolidQuad::new(&device, &solid_bgl, bar_bg_rect, [0.08, 0.08, 0.10, 1.0]);
-        let bar_fill = SolidQuad::new(&device, &solid_bgl, bar_fill_rect, [0.20, 0.85, 0.45, 1.0]);
+        let main_view   = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, main_rect);
+        let masked_view = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, masked_rect);
+        let mask_view   = TexQuad::new(&device, &tex_bgl, &sampler, ir_size.0, ir_size.1, mask_rect);
+        main_view.fit(&queue, size);
+        masked_view.fit(&queue, size);
+        mask_view.fit(&queue, size);
+
+        let bar_bg = TexQuad::solid(&device, &queue, &solid_bgl, [0.1, 0.1, 0.15, 1.0], (-1.0, -1.0, 1.0, -0.97));
+        let bar_fill = TexQuad::solid(&device, &queue, &solid_bgl, [0.2, 0.8, 0.4, 1.0], (-1.0, -1.0, -1.0, -0.97));
 
         let skeleton = SkeletonRenderer::new(&device, format);
 
         Ok(Self {
-            surface, device, queue, config, size, window,
-            tex_pipeline, solid_pipeline, tex_bgl, solid_bgl, sampler,
-            rgb, ir, combined, bar_bg, bar_fill,
+            window, surface, device, queue, config, size,
+            tex_pipeline, solid_pipeline,
+            main_view, masked_view, mask_view, bar_bg, bar_fill,
+            main_pane: main_rect,
+            rgb_src, ir_src, prox_src, hand_src, mask_src,
+            mask_rgba: Vec::new(),
             skeleton,
-            rgb_pane: rgb_rect, ir_pane: ir_rect, combined_pane: combined_rect,
-            rgb_src, ir_src, prox_src, hand_src,
-            prox_max: 1024,
+            prox_max: 1,
         })
     }
 
@@ -353,28 +191,51 @@ impl Gfx {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
-        self.rgb.fit(&self.queue, size);
-        self.ir.fit(&self.queue, size);
-        self.combined.fit(&self.queue, size);
+        self.main_view.fit(&self.queue, size);
+        self.masked_view.fit(&self.queue, size);
+        self.mask_view.fit(&self.queue, size);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // Pull latest camera frames
-        if let Some(f) = self.rgb_src.lock().unwrap().as_ref() {
-            if f.seq != self.rgb.last_seq {
-                self.rgb.upload(&self.queue, &f.data);
-                self.rgb.last_seq = f.seq;
-                // For now the "combined" pane mirrors the RGB feed. Once
-                // IR-fusion lands, the pipeline will produce a fused buffer
-                // and we'll upload that here instead.
-                self.combined.upload(&self.queue, &f.data);
-                self.combined.last_seq = f.seq;
+        // Pull latest data
+        let rgb_opt = self.rgb_src.lock().unwrap().clone();
+        let hand = self.hand_src.lock().unwrap().clone();
+        let mask_opt = self.mask_src.lock().unwrap().clone();
+
+        // Main pane: raw RGB camera (skeleton drawn on top later).
+        if let Some(f) = &rgb_opt {
+            if f.seq != self.main_view.last_seq {
+                self.main_view.upload(&self.queue, &f.data);
+                self.main_view.last_seq = f.seq;
             }
         }
-        if let Some(f) = self.ir_src.lock().unwrap().as_ref() {
-            if f.seq != self.ir.last_seq {
-                self.ir.upload(&self.queue, &f.data);
-                self.ir.last_seq = f.seq;
+
+        // Masked-RGB pane: pipeline's debug image (RGB darkened by IR mask).
+        // Falls back to raw RGB until the pipeline produces its first frame.
+        if let Some(state) = &hand {
+            if let Some(dbg) = &state.debug_image {
+                if dbg.seq != self.masked_view.last_seq {
+                    self.masked_view.upload(&self.queue, &dbg.data);
+                    self.masked_view.last_seq = dbg.seq;
+                }
+            }
+        } else if let Some(f) = &rgb_opt {
+            if f.seq != self.masked_view.last_seq {
+                self.masked_view.upload(&self.queue, &f.data);
+                self.masked_view.last_seq = f.seq;
+            }
+        }
+
+        // Mask pane: grayscale IR-diff. Texture is RGBA8 so expand R8 → RGBA8.
+        if let Some(m) = &mask_opt {
+            if m.seq != self.mask_view.last_seq {
+                let needed = (m.width * m.height) as usize * 4;
+                if self.mask_rgba.len() != needed {
+                    self.mask_rgba.resize(needed, 255);
+                }
+                expand_to_rgba(m, &mut self.mask_rgba);
+                self.mask_view.upload(&self.queue, &self.mask_rgba);
+                self.mask_view.last_seq = m.seq;
             }
         }
 
@@ -390,17 +251,13 @@ impl Gfx {
         }
 
         // Pull hand state, update skeleton + ROI mesh.
-        let hand = self.hand_src.lock().unwrap().clone();
         let mut have_overlay = false;
         let mut gesture_label = "";
         if let Some(state) = &hand {
-            have_overlay = state.landmarks.is_some() || state.roi.is_some();
+            have_overlay = true;
             gesture_label = state.gesture.map(|g| g.name()).unwrap_or("");
-            // Landmarks + ROI are in RGB-image normalized coords; the combined
-            // pane shares those coords for now. Render over the combined pane
-            // so the user sees what the model actually consumes.
-            let clip = letterbox_rect(self.combined_pane, self.combined.w, self.combined.h, self.size.width, self.size.height);
-            self.skeleton.update(&self.queue, state.landmarks.as_ref(), state.roi.as_ref(), clip);
+            let clip = letterbox_rect(self.main_pane, self.main_view.w, self.main_view.h, self.size.width, self.size.height);
+            self.skeleton.update(&self.queue, Some(&state.landmarks), Some(&state.roi), clip);
         }
 
         // Window title combines proximity + gesture.
@@ -434,17 +291,11 @@ impl Gfx {
             });
 
             rp.set_pipeline(&self.tex_pipeline);
-            rp.set_bind_group(0, &self.rgb.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.rgb.vbuf.slice(..));
-            rp.draw(0..6, 0..1);
-
-            rp.set_bind_group(0, &self.ir.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.ir.vbuf.slice(..));
-            rp.draw(0..6, 0..1);
-
-            rp.set_bind_group(0, &self.combined.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.combined.vbuf.slice(..));
-            rp.draw(0..6, 0..1);
+            for q in [&self.main_view, &self.masked_view, &self.mask_view] {
+                rp.set_bind_group(0, &q.bind_group, &[]);
+                rp.set_vertex_buffer(0, q.vbuf.slice(..));
+                rp.draw(0..6, 0..1);
+            }
 
             rp.set_pipeline(&self.solid_pipeline);
             rp.set_bind_group(0, &self.bar_bg.bind_group, &[]);
@@ -499,4 +350,229 @@ fn make_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+/// Expand a single-channel mask into a pre-sized RGBA8 buffer (gray, opaque).
+/// Accepts both R8 inputs and the legacy Rgba8 form (replicates the R channel).
+fn expand_to_rgba(src: &Image, dst: &mut [u8]) {
+    let n = (src.width * src.height) as usize;
+    match src.format {
+        PixelFormat::R8 => {
+            for i in 0..n {
+                let g = src.data[i];
+                let o = i * 4;
+                dst[o] = g; dst[o + 1] = g; dst[o + 2] = g; dst[o + 3] = 255;
+            }
+        }
+        PixelFormat::Rgba8 => {
+            for i in 0..n {
+                let g = src.data[i * 4];
+                let o = i * 4;
+                dst[o] = g; dst[o + 1] = g; dst[o + 2] = g; dst[o + 3] = 255;
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn fuse_images(rgb: &Image, ir: &Image, flashlight_on: bool) -> Vec<u8> {
+    let mut out = vec![0u8; rgb.data.len()];
+    let w = rgb.width as f32;
+    let h = rgb.height as f32;
+    let calib = crate::calib::current();
+    
+    for y in 0..rgb.height {
+        let ny = (y as f32 + 0.5) / h;
+        for x in 0..rgb.width {
+            let nx = (x as f32 + 0.5) / w;
+
+            let mut mask = 1.0f32;
+            if flashlight_on {
+                let nir_x = (nx - calib.offset_x) / calib.scale_x;
+                let nir_y = (ny - calib.offset_y) / calib.scale_y;
+
+                if nir_x >= 0.0 && nir_x < 1.0 && nir_y >= 0.0 && nir_y < 1.0 {
+                    let ix = (nir_x * ir.width as f32) as usize;
+                    let iy = (nir_y * ir.height as f32) as usize;
+                    let ix = ix.min(ir.width as usize - 1);
+                    let iy = iy.min(ir.height as usize - 1);
+
+                    let ii = match ir.format {
+                        PixelFormat::Rgba8 => (iy * ir.width as usize + ix) * 4,
+                        PixelFormat::R8 => iy * ir.width as usize + ix,
+                    };
+                    let ir_val = ir.data[ii] as f32 / 255.0;
+
+                    if calib.use_binary {
+                        mask = if ir_val > 0.4 { 1.0 } else { 0.05 };
+                    } else {
+                        mask = 0.2 + 0.8 * ir_val;
+                    }
+                } else {
+                    mask = if calib.use_binary { 0.05 } else { 0.2 };
+                }
+            }
+
+            let i = (y * rgb.width + x) as usize * 4;
+            out[i]     = (rgb.data[i] as f32 * mask) as u8;
+            out[i + 1] = (rgb.data[i + 1] as f32 * mask) as u8;
+            out[i + 2] = (rgb.data[i + 2] as f32 * mask) as u8;
+            out[i + 3] = 255;
+        }
+    }
+    out
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    pos: [f32; 2],
+    uv: [f32; 2],
+}
+
+const VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
+    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+};
+
+fn quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Vertex; 6] {
+    [
+        Vertex { pos: [x0, y1], uv: [0.0, 0.0] },
+        Vertex { pos: [x0, y0], uv: [0.0, 1.0] },
+        Vertex { pos: [x1, y0], uv: [1.0, 1.0] },
+        Vertex { pos: [x0, y1], uv: [0.0, 0.0] },
+        Vertex { pos: [x1, y0], uv: [1.0, 1.0] },
+        Vertex { pos: [x1, y1], uv: [1.0, 0.0] },
+    ]
+}
+
+struct TexQuad {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    vbuf: wgpu::Buffer,
+    w: u32,
+    h: u32,
+    rect: (f32, f32, f32, f32),
+    last_seq: u64,
+}
+
+impl TexQuad {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        w: u32,
+        h: u32,
+        rect: (f32, f32, f32, f32),
+    ) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        });
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (std::mem::size_of::<Vertex>() * 6) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { texture, bind_group, vbuf, w, h, rect, last_seq: 0 }
+    }
+
+    fn solid(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        color: [f32; 4],
+        rect: (f32, f32, f32, f32),
+    ) -> Self {
+        // Placeholder texture to satisfy the struct (fs_solid never samples it).
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&ubuf, 0, bytemuck::cast_slice(&color));
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+        });
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (std::mem::size_of::<Vertex>() * 6) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let verts = quad(rect.0, rect.1, rect.2, rect.3);
+        queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
+        Self { texture, bind_group, vbuf, w: 1, h: 1, rect, last_seq: 0 }
+    }
+
+    fn fit(&self, queue: &wgpu::Queue, win_size: PhysicalSize<u32>) {
+        let (x0, y0, x1, y1) = letterbox_rect(self.rect, self.w, self.h, win_size.width, win_size.height);
+        let verts = quad(x0, y0, x1, y1);
+        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
+    }
+
+    fn upload(&self, queue: &wgpu::Queue, data: &[u8]) {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(self.w * 4),
+                rows_per_image: Some(self.h),
+            },
+            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
+        );
+    }
+}
+
+fn letterbox_rect(pane: (f32, f32, f32, f32), tw: u32, th: u32, ww: u32, wh: u32) -> (f32, f32, f32, f32) {
+    let (px0, py0, px1, py1) = pane;
+    let pw = px1 - px0;
+    let ph = py1 - py0;
+    let pane_aspect = (pw * ww as f32) / (ph * wh as f32);
+    let tex_aspect = tw as f32 / th as f32;
+    if tex_aspect > pane_aspect {
+        let new_h = pw * (ww as f32 / wh as f32) / tex_aspect;
+        let pad = (ph - new_h) * 0.5;
+        (px0, py0 + pad, px1, py1 - pad)
+    } else {
+        let new_w = ph * (wh as f32 / ww as f32) * tex_aspect;
+        let pad = (pw - new_w) * 0.5;
+        (px0 + pad, py0, px1 - pad, py1)
+    }
 }

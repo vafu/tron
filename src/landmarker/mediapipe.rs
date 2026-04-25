@@ -1,12 +1,13 @@
 use super::HandLandmarker;
 use crate::pipeline::FrameContext;
 use crate::types::{HandLandmarks, Handedness, Image, PixelFormat, RectNorm, Vec3};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ndarray::Array4;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{Session, builder::GraphOptimizationLevel, SessionInputValue};
 use ort::value::Tensor;
 use std::path::Path;
 use std::time::Instant;
+use std::borrow::Cow;
 
 pub struct MediaPipeHandLandmarker {
     session: Session,
@@ -43,7 +44,7 @@ impl MediaPipeHandLandmarker {
             .dtype()
             .tensor_shape()
             .and_then(|s| {
-                let dims: &[i64] = s; // Shape derefs to &[i64]
+                let dims: &[i64] = s.as_ref();
                 if dims.len() >= 4 && dims[2] > 0 && dims[3] > 0 {
                     Some(dims[2] as u32)
                 } else {
@@ -52,15 +53,20 @@ impl MediaPipeHandLandmarker {
             })
             .ok_or_else(|| anyhow!("could not read input size from model"))?;
 
-        // Heuristically locate outputs. Landmarks tensor is the largest by element
-        // count (21*3 = 63 elements typically, sometimes [1,21,3]). Presence and
-        // handedness are scalars.
+        // Heuristically locate outputs.
         let mut landmarks_output = 0usize;
         let mut landmarks_size = 0usize;
         let mut presence_output = None;
         let mut handedness_output = None;
         for (i, o) in session.outputs().iter().enumerate() {
-            let elems = o.dtype().tensor_shape().map(|s| s.num_elements()).unwrap_or(0);
+            let elems = o
+                .dtype()
+                .tensor_shape()
+                .map(|s| {
+                    let dims: &[i64] = s.as_ref();
+                    dims.iter().product::<i64>() as usize
+                })
+                .unwrap_or(0);
             if elems > landmarks_size {
                 landmarks_size = elems;
                 landmarks_output = i;
@@ -86,43 +92,60 @@ impl MediaPipeHandLandmarker {
             handedness_output,
         );
 
-        Ok(Self { session, input_name, input_size, landmarks_output, presence_output, handedness_output, log_counter: 0 })
+        Ok(Self {
+            session,
+            input_name,
+            input_size,
+            landmarks_output,
+            presence_output,
+            handedness_output,
+            log_counter: 0,
+        })
     }
 }
 
 impl HandLandmarker for MediaPipeHandLandmarker {
     fn run(&mut self, ctx: &FrameContext, roi: Option<RectNorm>) -> Option<HandLandmarks> {
-        let img = ctx.rgb?;
-        if img.format != PixelFormat::Rgba8 {
+        if ctx.rgb.format != PixelFormat::Rgba8 {
             return None;
         }
         let roi = roi.unwrap_or(RectNorm::FULL);
         // Expand ROI to a square in source-image pixel space (covering the whole hand).
-        let crop = square_crop(&roi, img.width, img.height);
-        let input = preprocess(img, ctx.ir, &crop, self.input_size);
+        let crop = square_crop(&roi, ctx.rgb.width, ctx.rgb.height);
+        let input = preprocess(&ctx.rgb, &crop, self.input_size);
 
         let tensor = match Tensor::from_array(input) {
             Ok(t) => t,
-            Err(e) => { eprintln!("mediapipe tensor: {e}"); return None; }
+            Err(e) => {
+                eprintln!("mediapipe tensor: {e}");
+                return None;
+            }
         };
-        let inputs = ort::inputs![self.input_name.as_str() => tensor];
-        let outputs = match self.session.run(inputs) {
+        
+        let input_map: Vec<(Cow<'_, str>, SessionInputValue<'_>)> = vec![(self.input_name.as_str().into(), tensor.into())];
+        let outputs = match self.session.run(input_map) {
             Ok(v) => v,
-            Err(e) => { eprintln!("mediapipe run: {e}"); return None; }
+            Err(e) => {
+                eprintln!("mediapipe run: {e}");
+                return None;
+            }
         };
 
         // Landmarks tensor: indexable by usize.
         let lm_out = &outputs[self.landmarks_output];
         let (_shape, raw_slice) = match lm_out.try_extract_tensor::<f32>() {
             Ok(v) => v,
-            Err(e) => { eprintln!("mediapipe extract lm: {e}"); return None; }
+            Err(e) => {
+                eprintln!("mediapipe extract lm: {e}");
+                return None;
+            }
         };
-        if raw_slice.len() < 63 { return None; }
+        if raw_slice.len() < 63 {
+            return None;
+        }
         let raw: Vec<f32> = raw_slice.iter().copied().take(63).collect();
         let mut points = [Vec3::default(); 21];
         for i in 0..21 {
-            // MediaPipe outputs coords in INPUT-pixel space (or normalized; both
-            // common). Auto-detect: if max |x| < 2 we assume normalized.
             let x = raw[i * 3];
             let y = raw[i * 3 + 1];
             let z = raw[i * 3 + 2];
@@ -152,11 +175,16 @@ impl HandLandmarker for MediaPipeHandLandmarker {
             .map(|i| &outputs[i])
             .and_then(|v| v.try_extract_tensor::<f32>().ok())
             .and_then(|(_, s)| s.iter().copied().next())
-            .map(|s| if s > 0.5 { Handedness::Right } else { Handedness::Left })
+            .map(|s| {
+                if s > 0.5 {
+                    Handedness::Right
+                } else {
+                    Handedness::Left
+                }
+            })
             .unwrap_or(Handedness::Unknown);
 
-        // Presence gate: drop low-confidence detections so they don't poison
-        // the next-frame tracker (TrackFromLastRoi reads ctx.last).
+        // Presence gate: drop low-confidence detections
         if presence < 0.5 {
             self.log_counter = self.log_counter.wrapping_add(1);
             if self.log_counter % 30 == 0 {
@@ -165,7 +193,7 @@ impl HandLandmarker for MediaPipeHandLandmarker {
             return None;
         }
 
-        // Throttled diagnostics every ~30 frames (~1s at 30fps).
+        // Throttled diagnostics
         self.log_counter = self.log_counter.wrapping_add(1);
         if self.log_counter % 30 == 0 {
             let raw_max = max_abs(&raw);
@@ -175,7 +203,12 @@ impl HandLandmarker for MediaPipeHandLandmarker {
             );
         }
 
-        Some(HandLandmarks { points, presence, handedness, timestamp: Instant::now() })
+        Some(HandLandmarks {
+            points,
+            presence,
+            handedness,
+            timestamp: Instant::now(),
+        })
     }
 }
 
@@ -190,14 +223,11 @@ fn max_abs(v: &[f32]) -> f32 {
 /// Expand `roi` to a square (in source-image normalized coords) so the hand
 /// isn't squashed by the resize. Stays inside [0,1].
 fn square_crop(roi: &RectNorm, w: u32, h: u32) -> RectNorm {
-    let aspect = w as f32 / h as f32;
-    // ROI w/h are in normalized coords; convert to a uniform pixel space first.
     let cx = roi.x + roi.w * 0.5;
     let cy = roi.y + roi.h * 0.5;
     let half_px = (roi.w * w as f32).max(roi.h * h as f32) * 0.5;
     let half_x = (half_px / w as f32).clamp(0.0, 0.5);
     let half_y = (half_px / h as f32).clamp(0.0, 0.5);
-    let _ = aspect;
     RectNorm {
         x: (cx - half_x).clamp(0.0, 1.0),
         y: (cy - half_y).clamp(0.0, 1.0),
@@ -207,8 +237,7 @@ fn square_crop(roi: &RectNorm, w: u32, h: u32) -> RectNorm {
 }
 
 /// Crop, resize to size×size, normalize to [0,1], CHW.
-/// If `ir` is provided, use it as a mask to darken background (suppress far-field).
-fn preprocess(img: &Image, ir: Option<&Image>, crop: &RectNorm, size: u32) -> Array4<f32> {
+fn preprocess(img: &Image, crop: &RectNorm, size: u32) -> Array4<f32> {
     let mut out = Array4::<f32>::zeros((1, 3, size as usize, size as usize));
     let w = img.width as f32;
     let h = img.height as f32;
@@ -219,43 +248,16 @@ fn preprocess(img: &Image, ir: Option<&Image>, crop: &RectNorm, size: u32) -> Ar
     let stride = (img.width * 4) as usize;
     let s = size as f32;
 
-    let calib = crate::calib::current();
-
     for oy in 0..size {
-        let fy = cy0 + (oy as f32 + 0.5) * ch / s;
-        let sy = fy.clamp(0.0, h - 1.0) as usize;
-        let ny = fy / h;
-
+        let sy = (cy0 + (oy as f32 + 0.5) * ch / s) as i32;
+        let sy = sy.clamp(0, img.height as i32 - 1) as usize;
         for ox in 0..size {
-            let fx = cx0 + (ox as f32 + 0.5) * cw / s;
-            let sx = fx.clamp(0.0, w - 1.0) as usize;
-            let nx = fx / w;
-
-            let mut mask = 1.0f32;
-            if let Some(ir_img) = ir {
-                // Map RGB normalized coord -> IR normalized coord.
-                let nir_x = (nx - calib.offset_x) / calib.scale_x;
-                let nir_y = (ny - calib.offset_y) / calib.scale_y;
-
-                if nir_x >= 0.0 && nir_x < 1.0 && nir_y >= 0.0 && nir_y < 1.0 {
-                    let ix = (nir_x * ir_img.width as f32) as usize;
-                    let iy = (nir_y * ir_img.height as f32) as usize;
-                    let ii = match ir_img.format {
-                        PixelFormat::Rgba8 => (iy * ir_img.width as usize + ix) * 4,
-                        PixelFormat::R8 => iy * ir_img.width as usize + ix,
-                    };
-                    let ir_val = ir_img.data[ii] as f32 / 255.0;
-                    // Background suppression: 0.2 base brightness + 0.8 * IR intensity.
-                    mask = 0.2 + 0.8 * ir_val;
-                } else {
-                    mask = 0.2;
-                }
-            }
-
+            let sx = (cx0 + (ox as f32 + 0.5) * cw / s) as i32;
+            let sx = sx.clamp(0, img.width as i32 - 1) as usize;
             let i = sy * stride + sx * 4;
-            out[[0, 0, oy as usize, ox as usize]] = (img.data[i] as f32 / 255.0) * mask;
-            out[[0, 1, oy as usize, ox as usize]] = (img.data[i + 1] as f32 / 255.0) * mask;
-            out[[0, 2, oy as usize, ox as usize]] = (img.data[i + 2] as f32 / 255.0) * mask;
+            out[[0, 0, oy as usize, ox as usize]] = img.data[i] as f32 / 255.0;
+            out[[0, 1, oy as usize, ox as usize]] = img.data[i + 1] as f32 / 255.0;
+            out[[0, 2, oy as usize, ox as usize]] = img.data[i + 2] as f32 / 255.0;
         }
     }
     out

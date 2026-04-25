@@ -13,10 +13,11 @@ use std::sync::RwLock;
 /// 60/480 = 0.125. Live-tunable at runtime via keyboard (see `main.rs`); the
 /// final values can then be pasted back into `DEFAULT` for persistence.
 pub const DEFAULT: AffineCalib = AffineCalib {
-    scale_x: 1.0,
-    scale_y: 0.75,
-    offset_x: 0.0,
-    offset_y: 0.125,
+    scale_x: 1.22,
+    scale_y: 0.89,
+    offset_x: -0.12,
+    offset_y: 0.03,
+    use_binary: false,
 };
 
 static IR_TO_RGB: RwLock<AffineCalib> = RwLock::new(DEFAULT);
@@ -29,8 +30,8 @@ pub fn modify(f: impl FnOnce(&mut AffineCalib)) {
     let mut c = IR_TO_RGB.write().unwrap();
     f(&mut c);
     eprintln!(
-        "calib: scale=({:.3}, {:.3}) offset=({:.3}, {:.3})",
-        c.scale_x, c.scale_y, c.offset_x, c.offset_y
+        "calib: scale=({:.3}, {:.3}) offset=({:.3}, {:.3}) binary={}",
+        c.scale_x, c.scale_y, c.offset_x, c.offset_y, c.use_binary
     );
 }
 
@@ -45,6 +46,7 @@ pub struct AffineCalib {
     pub scale_y: f32,
     pub offset_x: f32,
     pub offset_y: f32,
+    pub use_binary: bool,
 }
 
 impl AffineCalib {

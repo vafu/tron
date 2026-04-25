@@ -32,6 +32,7 @@ struct App {
     ir_src: camera::SharedImage,
     prox_src: proximity::SharedProx,
     hand_src: pipeline::SharedHand,
+    mask_src: pipeline::SharedMask,
     window: Option<Arc<Window>>,
     gfx: Option<gfx::Gfx>,
 }
@@ -45,15 +46,16 @@ impl ApplicationHandler for App {
             .with_title("tron")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 600));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let g = gfx::Gfx::new(
+        let g = pollster::block_on(gfx::Gfx::new(
             window.clone(),
             self.rgb_src.clone(),
             self.ir_src.clone(),
             self.prox_src.clone(),
             self.hand_src.clone(),
+            self.mask_src.clone(),
             (RGB_W, RGB_H),
             (IR_W, IR_H),
-        )
+        ))
         .expect("init gfx");
         self.window = Some(window);
         self.gfx = Some(g);
@@ -108,6 +110,7 @@ fn handle_calib_key(code: KeyCode, _repeat: bool) {
         KeyCode::KeyD       => calib::modify(|c| c.scale_x  += NUDGE_SCALE),
         KeyCode::KeyW       => calib::modify(|c| c.scale_y  -= NUDGE_SCALE),
         KeyCode::KeyS       => calib::modify(|c| c.scale_y  += NUDGE_SCALE),
+        KeyCode::KeyB       => calib::modify(|c| c.use_binary = !c.use_binary),
         KeyCode::KeyR       => calib::reset(),
         KeyCode::KeyP       => eprintln!("calib: {:?}", calib::current()),
         _ => {}
@@ -121,7 +124,7 @@ fn main() -> Result<()> {
 
     // Try the real MediaPipe model; fall back to mock if the file is missing
     // or the load fails. Run `scripts/download_models.sh` to fetch it.
-    let lm: Box<dyn landmarker::HandLandmarker> = match landmarker::mediapipe::MediaPipeHandLandmarker::new("models/hand_landmark.onnx") {
+    let lm: Box<dyn landmarker::HandLandmarker> = match landmarker::mediapipe::MediaPipeHandLandmarker::new("models/hand_landmark/hand_landmark.onnx") {
         Ok(m) => {
             eprintln!("landmarker: MediaPipe (ort)");
             Box::new(m)
@@ -132,19 +135,27 @@ fn main() -> Result<()> {
         }
     };
 
-    // ROI chain: IR blob (mapped to RGB coords via calib::IR_TO_RGB) → previous-
-    // frame tracking → full frame fallback.
-    let pipe = pipeline::GesturePipeline {
-        roi: Box::new(roi::CompositeRoiHinter(vec![
-            Box::new(roi::ir::IrRoiHinter::new()),
+    // Refiners chain: 1. Subtract static BG from IR, 2. Mask RGB with IR
+    let refiners: Vec<Box<dyn pipeline::FrameContextRefiner>> = vec![
+        Box::new(pipeline::TemporalSubtractionRefiner::new()),
+        Box::new(pipeline::RgbMaskingRefiner::new()),
+    ];
+
+    let detector = roi::detector::PalmDetector::new("models/hand_detector/model.onnx").expect("load detector");
+
+    // ROI chain: 1. Neural Palm Detector (on IR diff, with stale-diff fallback), 2. Previous-frame track
+    let pipe = pipeline::GesturePipeline::new(
+        refiners,
+        Box::new(roi::CompositeRoiHinter::new(vec![
+            Box::new(detector),
             Box::new(roi::track::TrackFromLastRoi::new()),
-            Box::new(roi::FullFrameRoi),
         ])),
         lm,
-        filter: Box::new(filter::OneEuroFilter::default()),
-        gestures: Box::new(gestures::RuleBasedClassifier::new()),
-    };
-    let hand_src = pipeline::spawn(rgb_src.clone(), ir_src.clone(), prox_src.clone(), pipe);
+        Box::new(filter::OneEuroFilter::default()),
+        Box::new(gestures::RuleBasedClassifier::new()),
+    );
+    let pipeline::PipelineOutputs { hand: hand_src, mask: mask_src } =
+        pipeline::spawn(rgb_src.clone(), ir_src.clone(), prox_src.clone(), pipe);
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -153,6 +164,7 @@ fn main() -> Result<()> {
         ir_src,
         prox_src,
         hand_src,
+        mask_src,
         window: None,
         gfx: None,
     };

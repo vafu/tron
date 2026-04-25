@@ -99,7 +99,7 @@ impl HandLandmarker for MediaPipeHandLandmarker {
         let roi = roi.unwrap_or(RectNorm::FULL);
         // Expand ROI to a square in source-image pixel space (covering the whole hand).
         let crop = square_crop(&roi, img.width, img.height);
-        let input = preprocess(img, &crop, self.input_size);
+        let input = preprocess(img, ctx.ir, &crop, self.input_size);
 
         let tensor = match Tensor::from_array(input) {
             Ok(t) => t,
@@ -207,7 +207,8 @@ fn square_crop(roi: &RectNorm, w: u32, h: u32) -> RectNorm {
 }
 
 /// Crop, resize to size×size, normalize to [0,1], CHW.
-fn preprocess(img: &Image, crop: &RectNorm, size: u32) -> Array4<f32> {
+/// If `ir` is provided, use it as a mask to darken background (suppress far-field).
+fn preprocess(img: &Image, ir: Option<&Image>, crop: &RectNorm, size: u32) -> Array4<f32> {
     let mut out = Array4::<f32>::zeros((1, 3, size as usize, size as usize));
     let w = img.width as f32;
     let h = img.height as f32;
@@ -217,16 +218,44 @@ fn preprocess(img: &Image, crop: &RectNorm, size: u32) -> Array4<f32> {
     let ch = crop.h * h;
     let stride = (img.width * 4) as usize;
     let s = size as f32;
+
+    let calib = crate::calib::current();
+
     for oy in 0..size {
-        let sy = (cy0 + (oy as f32 + 0.5) * ch / s) as i32;
-        let sy = sy.clamp(0, img.height as i32 - 1) as usize;
+        let fy = cy0 + (oy as f32 + 0.5) * ch / s;
+        let sy = fy.clamp(0.0, h - 1.0) as usize;
+        let ny = fy / h;
+
         for ox in 0..size {
-            let sx = (cx0 + (ox as f32 + 0.5) * cw / s) as i32;
-            let sx = sx.clamp(0, img.width as i32 - 1) as usize;
+            let fx = cx0 + (ox as f32 + 0.5) * cw / s;
+            let sx = fx.clamp(0.0, w - 1.0) as usize;
+            let nx = fx / w;
+
+            let mut mask = 1.0f32;
+            if let Some(ir_img) = ir {
+                // Map RGB normalized coord -> IR normalized coord.
+                let nir_x = (nx - calib.offset_x) / calib.scale_x;
+                let nir_y = (ny - calib.offset_y) / calib.scale_y;
+
+                if nir_x >= 0.0 && nir_x < 1.0 && nir_y >= 0.0 && nir_y < 1.0 {
+                    let ix = (nir_x * ir_img.width as f32) as usize;
+                    let iy = (nir_y * ir_img.height as f32) as usize;
+                    let ii = match ir_img.format {
+                        PixelFormat::Rgba8 => (iy * ir_img.width as usize + ix) * 4,
+                        PixelFormat::R8 => iy * ir_img.width as usize + ix,
+                    };
+                    let ir_val = ir_img.data[ii] as f32 / 255.0;
+                    // Background suppression: 0.2 base brightness + 0.8 * IR intensity.
+                    mask = 0.2 + 0.8 * ir_val;
+                } else {
+                    mask = 0.2;
+                }
+            }
+
             let i = sy * stride + sx * 4;
-            out[[0, 0, oy as usize, ox as usize]] = img.data[i] as f32 / 255.0;
-            out[[0, 1, oy as usize, ox as usize]] = img.data[i + 1] as f32 / 255.0;
-            out[[0, 2, oy as usize, ox as usize]] = img.data[i + 2] as f32 / 255.0;
+            out[[0, 0, oy as usize, ox as usize]] = (img.data[i] as f32 / 255.0) * mask;
+            out[[0, 1, oy as usize, ox as usize]] = (img.data[i + 1] as f32 / 255.0) * mask;
+            out[[0, 2, oy as usize, ox as usize]] = (img.data[i + 2] as f32 / 255.0) * mask;
         }
     }
     out

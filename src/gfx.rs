@@ -257,7 +257,7 @@ impl Gfx {
             have_overlay = true;
             gesture_label = state.gesture.map(|g| g.name()).unwrap_or("");
             let clip = letterbox_rect(self.main_pane, self.main_view.w, self.main_view.h, self.size.width, self.size.height);
-            self.skeleton.update(&self.queue, Some(&state.landmarks), Some(&state.roi), clip);
+            self.skeleton.update(&self.queue, Some(&state.landmarks), Some(&state.roi), clip, (self.size.width, self.size.height));
         }
 
         // Window title combines proximity + gesture.

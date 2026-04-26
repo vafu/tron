@@ -26,6 +26,19 @@ pub struct Image {
     pub seq: u64,
 }
 
+impl Image {
+    pub fn pixel_count(&self) -> usize {
+        (self.width * self.height) as usize
+    }
+
+    /// Per-pixel grayscale value: the R channel for RGBA8, the byte itself for R8.
+    /// Lets callers stay format-agnostic when they only need luminance.
+    pub fn grey_iter(&self) -> impl Iterator<Item = u8> + '_ {
+        let stride = self.format.bytes_per_pixel();
+        self.data.iter().step_by(stride).copied()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RectNorm {
     pub x: f32,

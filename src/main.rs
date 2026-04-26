@@ -10,6 +10,7 @@ mod gfx;
 mod landmarker;
 mod pipeline;
 mod proximity;
+mod refiners;
 mod roi;
 mod skeleton_render;
 mod types;
@@ -135,10 +136,12 @@ fn main() -> Result<()> {
         }
     };
 
-    // Refiners chain: 1. Subtract static BG from IR, 2. Mask RGB with IR
-    let refiners: Vec<Box<dyn pipeline::FrameContextRefiner>> = vec![
-        Box::new(pipeline::TemporalSubtractionRefiner::new()),
-        Box::new(pipeline::RgbMaskingRefiner::new()),
+    // Refiners chain: detect flashlight state, subtract static IR background,
+    // then mask the RGB image with the resulting foreground signal.
+    let refiners: Vec<Box<dyn refiners::FrameContextRefiner>> = vec![
+        Box::new(refiners::FlashlightDetectorRefiner::new()),
+        Box::new(refiners::TemporalSubtractionRefiner::new()),
+        Box::new(refiners::RgbMaskingRefiner::new()),
     ];
 
     let detector = roi::detector::PalmDetector::new("models/hand_detector/model.onnx").expect("load detector");

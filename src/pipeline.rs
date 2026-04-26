@@ -3,8 +3,9 @@ use crate::filter::LandmarkFilter;
 use crate::gestures::GestureClassifier;
 use crate::landmarker::HandLandmarker;
 use crate::proximity::SharedProx;
+use crate::refiners::FrameContextRefiner;
 use crate::roi::RoiHinter;
-pub use crate::types::{HandLandmarks, HandState, Image, FrameContext};
+pub use crate::types::{FrameContext, HandLandmarks, HandState, Image};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,10 +22,6 @@ pub struct StepOutput {
     pub state: Option<HandState>,
     /// Final IR-diff grayscale image visible to the UI (post-refiner).
     pub ir_diff: Option<Image>,
-}
-
-pub trait FrameContextRefiner: Send {
-    fn refine(&mut self, ctx: &mut FrameContext);
 }
 
 pub struct GesturePipeline {
@@ -123,197 +120,39 @@ pub fn spawn(
         .spawn(move || {
             let mut last_rgb_seq: u64 = u64::MAX;
             let mut last: Option<HandLandmarks> = None;
-            let mut ir_avg_intensity: f32 = 0.0;
 
             loop {
-                let (rgb_img, ir_img, prox_v) = {
-                    let r = rgb.lock().unwrap().clone();
-                    let i = ir.lock().unwrap().clone();
-                    let p = *prox.lock().unwrap();
-                    (r, i, p)
-                };
+                let rgb_img = rgb.lock().unwrap().clone();
+                let ir_img = ir.lock().unwrap().clone();
+                let prox_v = *prox.lock().unwrap();
 
-                let advanced = match &rgb_img {
-                    Some(img) => img.seq != last_rgb_seq,
-                    None => false,
-                };
-
-                if advanced && rgb_img.is_some() && ir_img.is_some() {
-                    let rgb_img = rgb_img.unwrap();
-                    let ir_img = ir_img.unwrap();
-                    last_rgb_seq = rgb_img.seq;
-                    
-                    let mut flashlight_on = true;
-                    let mean = ir_mean(&ir_img);
-                    if ir_avg_intensity == 0.0 {
-                        ir_avg_intensity = mean;
-                    } else {
-                        ir_avg_intensity = ir_avg_intensity * 0.9 + mean * 0.1;
-                    }
-                    if mean < ir_avg_intensity * 0.95 {
-                        flashlight_on = false;
-                    }
-
-                    let ctx = FrameContext {
-                        rgb: rgb_img,
-                        ir: ir_img,
-                        ir_diff: None,
-                        ir_flashlight_on: flashlight_on,
-                        proximity: prox_v,
-                        last: last.clone(),
-                        now: Instant::now(),
-                    };
-
-                    let StepOutput { state, ir_diff } = pipeline.step(ctx);
-                    *publish_mask.lock().unwrap() = ir_diff;
-                    if let Some(state) = state {
-                        last = Some(state.landmarks.clone());
-                        *publish.lock().unwrap() = Some(state);
-                    } else {
-                        *publish.lock().unwrap() = None;
-                    }
-                } else {
+                let (Some(rgb_img), Some(ir_img)) = (rgb_img, ir_img) else {
                     thread::sleep(Duration::from_millis(2));
+                    continue;
+                };
+                if rgb_img.seq == last_rgb_seq {
+                    thread::sleep(Duration::from_millis(2));
+                    continue;
                 }
+                last_rgb_seq = rgb_img.seq;
+
+                let ctx = FrameContext {
+                    rgb: rgb_img,
+                    ir: ir_img,
+                    ir_diff: None,
+                    // Refiners decide the real value; this is just an init.
+                    ir_flashlight_on: true,
+                    proximity: prox_v,
+                    last: last.clone(),
+                    now: Instant::now(),
+                };
+
+                let StepOutput { state, ir_diff } = pipeline.step(ctx);
+                *publish_mask.lock().unwrap() = ir_diff;
+                last = state.as_ref().map(|s| s.landmarks.clone()).or(last);
+                *publish.lock().unwrap() = state;
             }
         })
         .expect("spawn gesture thread");
     PipelineOutputs { hand: out, mask }
-}
-
-fn ir_mean(img: &Image) -> f32 {
-    let mut sum: u64 = 0;
-    match img.format {
-        crate::types::PixelFormat::Rgba8 => {
-            for i in 0..(img.data.len() / 4) {
-                sum += img.data[i * 4] as u64;
-            }
-        }
-        crate::types::PixelFormat::R8 => {
-            for &g in &img.data {
-                sum += g as u64;
-            }
-        }
-    }
-    sum as f32 / (img.width * img.height) as f32
-}
-
-// --- Implementation of Refiners ---
-
-pub struct TemporalSubtractionRefiner {
-    last_bg: Option<opencv::core::Mat>,
-}
-
-impl TemporalSubtractionRefiner {
-    pub fn new() -> Self {
-        Self { last_bg: None }
-    }
-}
-
-impl FrameContextRefiner for TemporalSubtractionRefiner {
-    fn refine(&mut self, ctx: &mut FrameContext) {
-        use opencv::prelude::*;
-        use opencv::core::{Mat, CV_8UC1};
-
-        let w = ctx.ir.width as i32;
-        let h = ctx.ir.height as i32;
-        
-        let mut grey = vec![0u8; (w * h) as usize];
-        match ctx.ir.format {
-            crate::types::PixelFormat::Rgba8 => {
-                for (i, g) in grey.iter_mut().enumerate() {
-                    *g = ctx.ir.data[i * 4];
-                }
-            }
-            crate::types::PixelFormat::R8 => {
-                grey.copy_from_slice(&ctx.ir.data);
-            }
-        }
-        
-        let current = unsafe {
-            Mat::new_rows_cols_with_data_unsafe_def(h, w, CV_8UC1, grey.as_mut_ptr() as *mut _).unwrap()
-        }.clone();
-
-        if !ctx.ir_flashlight_on {
-            self.last_bg = Some(current);
-            ctx.ir_diff = None;
-            return;
-        }
-
-        if let Some(bg) = &self.last_bg {
-            let mut diff = Mat::default();
-            if opencv::core::subtract(&current, bg, &mut diff, &opencv::core::no_array(), -1).is_ok() {
-                let mut diff_data = vec![0u8; (w * h) as usize];
-                if let Ok(data) = diff.data_bytes() {
-                    diff_data.copy_from_slice(data);
-                }
-                ctx.ir_diff = Some(Image {
-                    data: diff_data,
-                    width: ctx.ir.width,
-                    height: ctx.ir.height,
-                    format: crate::types::PixelFormat::R8,
-                    timestamp: ctx.ir.timestamp,
-                    seq: ctx.ir.seq,
-                });
-            }
-        }
-    }
-}
-
-pub struct RgbMaskingRefiner {
-    last_diff: Option<Image>,
-}
-
-impl RgbMaskingRefiner {
-    pub fn new() -> Self {
-        Self { last_diff: None }
-    }
-}
-
-impl Default for RgbMaskingRefiner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FrameContextRefiner for RgbMaskingRefiner {
-    fn refine(&mut self, ctx: &mut FrameContext) {
-        if let Some(d) = &ctx.ir_diff {
-            self.last_diff = Some(d.clone());
-        }
-        let diff = match ctx.ir_diff.as_ref().or(self.last_diff.as_ref()) {
-            Some(d) => d,
-            None => return,
-        };
-        
-        let calib = crate::calib::current();
-        let w = ctx.rgb.width as f32;
-        let h = ctx.rgb.height as f32;
-        
-        for y in 0..ctx.rgb.height {
-            let ny = (y as f32 + 0.5) / h;
-            for x in 0..ctx.rgb.width {
-                let nx = (x as f32 + 0.5) / w;
-                
-                let nir_x = (nx - calib.offset_x) / calib.scale_x;
-                let nir_y = (ny - calib.offset_y) / calib.scale_y;
-                
-                let mut mask = 0.2f32;
-                if nir_x >= 0.0 && nir_x < 1.0 && nir_y >= 0.0 && nir_y < 1.0 {
-                    let ix = (nir_x * diff.width as f32) as usize;
-                    let iy = (nir_y * diff.height as f32) as usize;
-                    let ix = ix.min(diff.width as usize - 1);
-                    let iy = iy.min(diff.height as usize - 1);
-                    
-                    let ir_val = diff.data[iy * diff.width as usize + ix] as f32 / 255.0;
-                    mask = 0.2 + 0.8 * ir_val;
-                }
-                
-                let i = (y * ctx.rgb.width + x) as usize * 4;
-                ctx.rgb.data[i]     = (ctx.rgb.data[i] as f32 * mask) as u8;
-                ctx.rgb.data[i + 1] = (ctx.rgb.data[i + 1] as f32 * mask) as u8;
-                ctx.rgb.data[i + 2] = (ctx.rgb.data[i + 2] as f32 * mask) as u8;
-            }
-        }
-    }
 }

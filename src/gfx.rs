@@ -1,8 +1,8 @@
 use crate::camera::SharedImage;
 use crate::pipeline::{SharedHand, SharedMask};
 use crate::proximity::SharedProx;
-use crate::skeleton_render::SkeletonRenderer;
-use crate::types::{Image, PixelFormat};
+use crate::skeleton_render::{letterbox_rect, SkeletonRenderer};
+use crate::types::Image;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use winit::dpi::PhysicalSize;
@@ -26,8 +26,8 @@ pub struct Gfx {
     /// Side pane: grayscale IR foreground signal (the mask itself).
     mask_view: TexQuad,
 
-    bar_bg: TexQuad,
-    bar_fill: TexQuad,
+    bar_bg: SolidQuad,
+    bar_fill: SolidQuad,
 
     skeleton: SkeletonRenderer,
 
@@ -168,8 +168,8 @@ impl Gfx {
         masked_view.fit(&queue, size);
         mask_view.fit(&queue, size);
 
-        let bar_bg = TexQuad::solid(&device, &queue, &solid_bgl, [0.1, 0.1, 0.15, 1.0], (-1.0, -1.0, 1.0, -0.97));
-        let bar_fill = TexQuad::solid(&device, &queue, &solid_bgl, [0.2, 0.8, 0.4, 1.0], (-1.0, -1.0, -1.0, -0.97));
+        let bar_bg = SolidQuad::new(&device, &queue, &solid_bgl, [0.1, 0.1, 0.15, 1.0], (-1.0, -1.0, 1.0, -0.97));
+        let bar_fill = SolidQuad::new(&device, &queue, &solid_bgl, [0.2, 0.8, 0.4, 1.0], (-1.0, -1.0, -1.0, -0.97));
 
         let skeleton = SkeletonRenderer::new(&device, format);
 
@@ -244,10 +244,7 @@ impl Gfx {
         if let Some(p) = prox {
             if p > self.prox_max { self.prox_max = p; }
             let norm = (p as f32 / self.prox_max as f32).clamp(0.0, 1.0);
-            let x0 = -1.0;
-            let x1 = x0 + 2.0 * norm;
-            let verts = quad(x0, -1.0, x1, -0.97);
-            self.queue.write_buffer(&self.bar_fill.vbuf, 0, bytemuck::cast_slice(&verts));
+            self.bar_fill.set_rect(&self.queue, (-1.0, -1.0, -1.0 + 2.0 * norm, -0.97));
         }
 
         // Pull hand state, update skeleton + ROI mesh.
@@ -298,12 +295,11 @@ impl Gfx {
             }
 
             rp.set_pipeline(&self.solid_pipeline);
-            rp.set_bind_group(0, &self.bar_bg.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.bar_bg.vbuf.slice(..));
-            rp.draw(0..6, 0..1);
-            rp.set_bind_group(0, &self.bar_fill.bind_group, &[]);
-            rp.set_vertex_buffer(0, self.bar_fill.vbuf.slice(..));
-            rp.draw(0..6, 0..1);
+            for q in [&self.bar_bg, &self.bar_fill] {
+                rp.set_bind_group(0, &q.bind_group, &[]);
+                rp.set_vertex_buffer(0, q.vbuf.slice(..));
+                rp.draw(0..6, 0..1);
+            }
 
             if have_overlay {
                 self.skeleton.draw(&mut rp);
@@ -353,74 +349,14 @@ fn make_pipeline(
 }
 
 /// Expand a single-channel mask into a pre-sized RGBA8 buffer (gray, opaque).
-/// Accepts both R8 inputs and the legacy Rgba8 form (replicates the R channel).
 fn expand_to_rgba(src: &Image, dst: &mut [u8]) {
-    let n = (src.width * src.height) as usize;
-    match src.format {
-        PixelFormat::R8 => {
-            for i in 0..n {
-                let g = src.data[i];
-                let o = i * 4;
-                dst[o] = g; dst[o + 1] = g; dst[o + 2] = g; dst[o + 3] = 255;
-            }
-        }
-        PixelFormat::Rgba8 => {
-            for i in 0..n {
-                let g = src.data[i * 4];
-                let o = i * 4;
-                dst[o] = g; dst[o + 1] = g; dst[o + 2] = g; dst[o + 3] = 255;
-            }
-        }
+    for (i, g) in src.grey_iter().enumerate() {
+        let o = i * 4;
+        dst[o] = g;
+        dst[o + 1] = g;
+        dst[o + 2] = g;
+        dst[o + 3] = 255;
     }
-}
-
-#[allow(dead_code)]
-fn fuse_images(rgb: &Image, ir: &Image, flashlight_on: bool) -> Vec<u8> {
-    let mut out = vec![0u8; rgb.data.len()];
-    let w = rgb.width as f32;
-    let h = rgb.height as f32;
-    let calib = crate::calib::current();
-    
-    for y in 0..rgb.height {
-        let ny = (y as f32 + 0.5) / h;
-        for x in 0..rgb.width {
-            let nx = (x as f32 + 0.5) / w;
-
-            let mut mask = 1.0f32;
-            if flashlight_on {
-                let nir_x = (nx - calib.offset_x) / calib.scale_x;
-                let nir_y = (ny - calib.offset_y) / calib.scale_y;
-
-                if nir_x >= 0.0 && nir_x < 1.0 && nir_y >= 0.0 && nir_y < 1.0 {
-                    let ix = (nir_x * ir.width as f32) as usize;
-                    let iy = (nir_y * ir.height as f32) as usize;
-                    let ix = ix.min(ir.width as usize - 1);
-                    let iy = iy.min(ir.height as usize - 1);
-
-                    let ii = match ir.format {
-                        PixelFormat::Rgba8 => (iy * ir.width as usize + ix) * 4,
-                        PixelFormat::R8 => iy * ir.width as usize + ix,
-                    };
-                    let ir_val = ir.data[ii] as f32 / 255.0;
-
-                    if calib.use_binary {
-                        mask = if ir_val > 0.4 { 1.0 } else { 0.05 };
-                    } else {
-                        mask = 0.2 + 0.8 * ir_val;
-                    }
-                } else {
-                    mask = if calib.use_binary { 0.05 } else { 0.2 };
-                }
-            }
-
-            let i = (y * rgb.width + x) as usize * 4;
-            out[i]     = (rgb.data[i] as f32 * mask) as u8;
-            out[i + 1] = (rgb.data[i + 1] as f32 * mask) as u8;
-            out[i + 2] = (rgb.data[i + 2] as f32 * mask) as u8;
-            out[i + 3] = 255;
-        }
-    }
-    out
 }
 
 #[repr(C)]
@@ -494,47 +430,6 @@ impl TexQuad {
         Self { texture, bind_group, vbuf, w, h, rect, last_seq: 0 }
     }
 
-    fn solid(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        layout: &wgpu::BindGroupLayout,
-        color: [f32; 4],
-        rect: (f32, f32, f32, f32),
-    ) -> Self {
-        // Placeholder texture to satisfy the struct (fs_solid never samples it).
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&ubuf, 0, bytemuck::cast_slice(&color));
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
-        });
-        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (std::mem::size_of::<Vertex>() * 6) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let verts = quad(rect.0, rect.1, rect.2, rect.3);
-        queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
-        Self { texture, bind_group, vbuf, w: 1, h: 1, rect, last_seq: 0 }
-    }
-
     fn fit(&self, queue: &wgpu::Queue, win_size: PhysicalSize<u32>) {
         let (x0, y0, x1, y1) = letterbox_rect(self.rect, self.w, self.h, win_size.width, win_size.height);
         let verts = quad(x0, y0, x1, y1);
@@ -560,19 +455,48 @@ impl TexQuad {
     }
 }
 
-fn letterbox_rect(pane: (f32, f32, f32, f32), tw: u32, th: u32, ww: u32, wh: u32) -> (f32, f32, f32, f32) {
-    let (px0, py0, px1, py1) = pane;
-    let pw = px1 - px0;
-    let ph = py1 - py0;
-    let pane_aspect = (pw * ww as f32) / (ph * wh as f32);
-    let tex_aspect = tw as f32 / th as f32;
-    if tex_aspect > pane_aspect {
-        let new_h = pw * (ww as f32 / wh as f32) / tex_aspect;
-        let pad = (ph - new_h) * 0.5;
-        (px0, py0 + pad, px1, py1 - pad)
-    } else {
-        let new_w = ph * (wh as f32 / ww as f32) * tex_aspect;
-        let pad = (pw - new_w) * 0.5;
-        (px0 + pad, py0, px1 - pad, py1)
+/// A coloured rectangle in NDC. Renders with `fs_solid`, which reads its color
+/// from a 16-byte uniform.
+struct SolidQuad {
+    bind_group: wgpu::BindGroup,
+    vbuf: wgpu::Buffer,
+    rect: (f32, f32, f32, f32),
+}
+
+impl SolidQuad {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        color: [f32; 4],
+        rect: (f32, f32, f32, f32),
+    ) -> Self {
+        let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solid-color"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&ubuf, 0, bytemuck::cast_slice(&color));
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("solid-bg"),
+            layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+        });
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solid-vbuf"),
+            size: (std::mem::size_of::<Vertex>() * 6) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let verts = quad(rect.0, rect.1, rect.2, rect.3);
+        queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
+        Self { bind_group, vbuf, rect }
+    }
+
+    fn set_rect(&mut self, queue: &wgpu::Queue, rect: (f32, f32, f32, f32)) {
+        self.rect = rect;
+        let verts = quad(rect.0, rect.1, rect.2, rect.3);
+        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
     }
 }

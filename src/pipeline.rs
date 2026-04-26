@@ -51,35 +51,53 @@ impl GesturePipeline {
     pub fn step(&mut self, mut ctx: FrameContext) -> StepOutput {
         self.frame = self.frame.wrapping_add(1);
         let had_last = ctx.last.is_some();
+        let trace = self.frame % 30 == 0;
+        let t_step = Instant::now();
 
-        for r in &mut self.refiners {
+        // Per-refiner timings (only if tracing this frame).
+        let mut refiner_us: [u32; 8] = [0; 8];
+        for (i, r) in self.refiners.iter_mut().enumerate() {
+            let t = Instant::now();
             r.refine(&mut ctx);
+            if trace && i < refiner_us.len() {
+                refiner_us[i] = t.elapsed().as_micros() as u32;
+            }
         }
         let ir_diff = ctx.ir_diff.clone();
 
+        let t_roi = Instant::now();
         let (roi, _debug) = self.roi.hint(&ctx);
+        let roi_us = t_roi.elapsed().as_micros() as u32;
         let Some(roi) = roi else {
             self.transition(StepOutcome::NoRoi, had_last, &ctx);
+            if trace {
+                self.log_trace("no-roi", t_step.elapsed(), &refiner_us, roi_us, 0, 0, 0);
+            }
             return StepOutput { state: None, ir_diff };
         };
 
-        let raw = match self.lm.run(&ctx, Some(roi)) {
-            Some(r) => r,
-            None => {
-                self.transition(StepOutcome::NoLandmarks, had_last, &ctx);
-                if self.frame % 30 == 0 {
-                    eprintln!(
-                        "pipeline: lm gated frame={} roi=[{:.2},{:.2} {:.2}x{:.2}] had_last={}",
-                        self.frame, roi.x, roi.y, roi.w, roi.h, had_last
-                    );
-                }
-                return StepOutput { state: None, ir_diff };
+        let t_lm = Instant::now();
+        let raw = self.lm.run(&ctx, Some(roi));
+        let lm_us = t_lm.elapsed().as_micros() as u32;
+        let Some(raw) = raw else {
+            self.transition(StepOutcome::NoLandmarks, had_last, &ctx);
+            if trace {
+                self.log_trace("no-lm", t_step.elapsed(), &refiner_us, roi_us, lm_us, 0, 0);
             }
+            return StepOutput { state: None, ir_diff };
         };
+
+        let t_filter = Instant::now();
         let smoothed = self.filter.apply(raw);
+        let filter_us = t_filter.elapsed().as_micros() as u32;
+        let t_gest = Instant::now();
         let gesture = self.gestures.classify(&ctx, &smoothed);
+        let gest_us = t_gest.elapsed().as_micros() as u32;
 
         self.transition(StepOutcome::Ok, had_last, &ctx);
+        if trace {
+            self.log_trace("ok", t_step.elapsed(), &refiner_us, roi_us, lm_us, filter_us, gest_us);
+        }
         StepOutput {
             state: Some(HandState {
                 roi,
@@ -89,6 +107,38 @@ impl GesturePipeline {
             }),
             ir_diff,
         }
+    }
+
+    fn log_trace(
+        &self,
+        outcome: &str,
+        total: Duration,
+        refiners_us: &[u32; 8],
+        roi_us: u32,
+        lm_us: u32,
+        filter_us: u32,
+        gest_us: u32,
+    ) {
+        let n = self.refiners.len().min(refiners_us.len());
+        // Format active refiners as e.g. "[123,4500,8900]"
+        let mut refs = String::with_capacity(32);
+        refs.push('[');
+        for (i, us) in refiners_us[..n].iter().enumerate() {
+            if i > 0 { refs.push(','); }
+            refs.push_str(&format!("{}", us));
+        }
+        refs.push(']');
+        eprintln!(
+            "trace frame={} {} total={:.1}ms refiners={}us roi={:.1}ms lm={:.1}ms filter={}us gest={}us",
+            self.frame,
+            outcome,
+            total.as_secs_f32() * 1000.0,
+            refs,
+            roi_us as f32 / 1000.0,
+            lm_us as f32 / 1000.0,
+            filter_us,
+            gest_us,
+        );
     }
 
     fn transition(&mut self, now: StepOutcome, had_last: bool, ctx: &FrameContext) {
@@ -120,11 +170,15 @@ pub fn spawn(
         .spawn(move || {
             let mut last_rgb_seq: u64 = u64::MAX;
             let mut last: Option<HandLandmarks> = None;
+            let mut frame: u64 = 0;
+            let mut last_published = Instant::now();
 
             loop {
+                let t_lock = Instant::now();
                 let rgb_img = rgb.lock().unwrap().clone();
                 let ir_img = ir.lock().unwrap().clone();
                 let prox_v = *prox.lock().unwrap();
+                let lock_us = t_lock.elapsed().as_micros() as u32;
 
                 let (Some(rgb_img), Some(ir_img)) = (rgb_img, ir_img) else {
                     thread::sleep(Duration::from_millis(2));
@@ -134,7 +188,12 @@ pub fn spawn(
                     thread::sleep(Duration::from_millis(2));
                     continue;
                 }
+                // Frame age — how stale was this frame when we picked it up?
+                let frame_age_ms = rgb_img.timestamp.elapsed().as_secs_f32() * 1000.0;
+                let interval_ms = last_published.elapsed().as_secs_f32() * 1000.0;
+                last_published = Instant::now();
                 last_rgb_seq = rgb_img.seq;
+                frame = frame.wrapping_add(1);
 
                 let ctx = FrameContext {
                     rgb: rgb_img,
@@ -151,6 +210,13 @@ pub fn spawn(
                 *publish_mask.lock().unwrap() = ir_diff;
                 last = state.as_ref().map(|s| s.landmarks.clone()).or(last);
                 *publish.lock().unwrap() = state;
+
+                if frame % 30 == 0 {
+                    eprintln!(
+                        "spawn: frame={} interval={:.1}ms input_age={:.1}ms lock={}us",
+                        frame, interval_ms, frame_age_ms, lock_us
+                    );
+                }
             }
         })
         .expect("spawn gesture thread");

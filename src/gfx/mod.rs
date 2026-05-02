@@ -1,7 +1,7 @@
 use crate::camera::SharedImage;
 use crate::pipeline::{SharedHand, SharedMask};
 use crate::proximity::SharedProx;
-use crate::skeleton_render::{letterbox_rect, SkeletonRenderer};
+use crate::skeleton_render::{SkeletonRenderer, letterbox_rect};
 use crate::types::Image;
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -157,28 +157,63 @@ impl Gfx {
         // UI Layout (normalized NDC -1..1):
         //   Top row: helpers — IR-diff mask (left), masked RGB / pre-landmark (right).
         //   Below:   main RGB + landmarks, full width.
-        let mask_rect   = (-0.95,  0.30, -0.05,  0.95);
-        let masked_rect = ( 0.05,  0.30,  0.95,  0.95);
-        let main_rect   = (-0.95, -0.90,  0.95,  0.20);
+        let mask_rect = (-0.95, 0.30, -0.05, 0.95);
+        let masked_rect = (0.05, 0.30, 0.95, 0.95);
+        let main_rect = (-0.95, -0.90, 0.95, 0.20);
 
-        let main_view   = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, main_rect);
-        let masked_view = TexQuad::new(&device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, masked_rect);
-        let mask_view   = TexQuad::new(&device, &tex_bgl, &sampler, ir_size.0, ir_size.1, mask_rect);
+        let main_view = TexQuad::new(
+            &device, &tex_bgl, &sampler, rgb_size.0, rgb_size.1, main_rect,
+        );
+        let masked_view = TexQuad::new(
+            &device,
+            &tex_bgl,
+            &sampler,
+            rgb_size.0,
+            rgb_size.1,
+            masked_rect,
+        );
+        let mask_view = TexQuad::new(&device, &tex_bgl, &sampler, ir_size.0, ir_size.1, mask_rect);
         main_view.fit(&queue, size);
         masked_view.fit(&queue, size);
         mask_view.fit(&queue, size);
 
-        let bar_bg = SolidQuad::new(&device, &queue, &solid_bgl, [0.1, 0.1, 0.15, 1.0], (-1.0, -1.0, 1.0, -0.97));
-        let bar_fill = SolidQuad::new(&device, &queue, &solid_bgl, [0.2, 0.8, 0.4, 1.0], (-1.0, -1.0, -1.0, -0.97));
+        let bar_bg = SolidQuad::new(
+            &device,
+            &queue,
+            &solid_bgl,
+            [0.1, 0.1, 0.15, 1.0],
+            (-1.0, -1.0, 1.0, -0.97),
+        );
+        let bar_fill = SolidQuad::new(
+            &device,
+            &queue,
+            &solid_bgl,
+            [0.2, 0.8, 0.4, 1.0],
+            (-1.0, -1.0, -1.0, -0.97),
+        );
 
         let skeleton = SkeletonRenderer::new(&device, format);
 
         Ok(Self {
-            window, surface, device, queue, config, size,
-            tex_pipeline, solid_pipeline,
-            main_view, masked_view, mask_view, bar_bg, bar_fill,
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            size,
+            tex_pipeline,
+            solid_pipeline,
+            main_view,
+            masked_view,
+            mask_view,
+            bar_bg,
+            bar_fill,
             main_pane: main_rect,
-            rgb_src, ir_src, prox_src, hand_src, mask_src,
+            rgb_src,
+            ir_src,
+            prox_src,
+            hand_src,
+            mask_src,
             mask_rgba: Vec::new(),
             skeleton,
             prox_max: 1,
@@ -186,7 +221,9 @@ impl Gfx {
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 { return; }
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
         self.size = size;
         self.config.width = size.width;
         self.config.height = size.height;
@@ -242,9 +279,12 @@ impl Gfx {
         // Update prox bar fill
         let prox = *self.prox_src.lock().unwrap();
         if let Some(p) = prox {
-            if p > self.prox_max { self.prox_max = p; }
+            if p > self.prox_max {
+                self.prox_max = p;
+            }
             let norm = (p as f32 / self.prox_max as f32).clamp(0.0, 1.0);
-            self.bar_fill.set_rect(&self.queue, (-1.0, -1.0, -1.0 + 2.0 * norm, -0.97));
+            self.bar_fill
+                .set_rect(&self.queue, (-1.0, -1.0, -1.0 + 2.0 * norm, -0.97));
         }
 
         // Pull hand state, update skeleton + ROI mesh.
@@ -253,8 +293,20 @@ impl Gfx {
         if let Some(state) = &hand {
             have_overlay = true;
             gesture_label = state.gesture.map(|g| g.name()).unwrap_or("");
-            let clip = letterbox_rect(self.main_pane, self.main_view.w, self.main_view.h, self.size.width, self.size.height);
-            self.skeleton.update(&self.queue, Some(&state.landmarks), Some(&state.roi), clip, (self.size.width, self.size.height));
+            let clip = letterbox_rect(
+                self.main_pane,
+                self.main_view.w,
+                self.main_view.h,
+                self.size.width,
+                self.size.height,
+            );
+            self.skeleton.update(
+                &self.queue,
+                Some(&state.landmarks),
+                Some(&state.roi),
+                clip,
+                (self.size.width, self.size.height),
+            );
         }
 
         // Window title combines proximity + gesture.
@@ -267,10 +319,12 @@ impl Gfx {
         self.window.set_title(&title);
 
         let frame = self.surface.get_current_texture()?;
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("enc"),
-        });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rp"),
@@ -278,7 +332,12 @@ impl Gfx {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.03,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -374,12 +433,30 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
 
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Vertex; 6] {
     [
-        Vertex { pos: [x0, y1], uv: [0.0, 0.0] },
-        Vertex { pos: [x0, y0], uv: [0.0, 1.0] },
-        Vertex { pos: [x1, y0], uv: [1.0, 1.0] },
-        Vertex { pos: [x0, y1], uv: [0.0, 0.0] },
-        Vertex { pos: [x1, y0], uv: [1.0, 1.0] },
-        Vertex { pos: [x1, y1], uv: [1.0, 0.0] },
+        Vertex {
+            pos: [x0, y1],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x0, y0],
+            uv: [0.0, 1.0],
+        },
+        Vertex {
+            pos: [x1, y0],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0, y1],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1, y0],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x1, y1],
+            uv: [1.0, 0.0],
+        },
     ]
 }
 
@@ -404,7 +481,11 @@ impl TexQuad {
     ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -417,8 +498,14 @@ impl TexQuad {
             label: None,
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
             ],
         });
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -427,11 +514,20 @@ impl TexQuad {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { texture, bind_group, vbuf, w, h, rect, last_seq: 0 }
+        Self {
+            texture,
+            bind_group,
+            vbuf,
+            w,
+            h,
+            rect,
+            last_seq: 0,
+        }
     }
 
     fn fit(&self, queue: &wgpu::Queue, win_size: PhysicalSize<u32>) {
-        let (x0, y0, x1, y1) = letterbox_rect(self.rect, self.w, self.h, win_size.width, win_size.height);
+        let (x0, y0, x1, y1) =
+            letterbox_rect(self.rect, self.w, self.h, win_size.width, win_size.height);
         let verts = quad(x0, y0, x1, y1);
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
     }
@@ -450,7 +546,11 @@ impl TexQuad {
                 bytes_per_row: Some(self.w * 4),
                 rows_per_image: Some(self.h),
             },
-            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: self.w,
+                height: self.h,
+                depth_or_array_layers: 1,
+            },
         );
     }
 }
@@ -481,7 +581,10 @@ impl SolidQuad {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("solid-bg"),
             layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubuf.as_entire_binding(),
+            }],
         });
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("solid-vbuf"),
@@ -491,7 +594,11 @@ impl SolidQuad {
         });
         let verts = quad(rect.0, rect.1, rect.2, rect.3);
         queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
-        Self { bind_group, vbuf, rect }
+        Self {
+            bind_group,
+            vbuf,
+            rect,
+        }
     }
 
     fn set_rect(&mut self, queue: &wgpu::Queue, rect: (f32, f32, f32, f32)) {

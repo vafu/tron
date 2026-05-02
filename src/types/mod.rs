@@ -48,7 +48,12 @@ pub struct RectNorm {
 }
 
 impl RectNorm {
-    pub const FULL: RectNorm = RectNorm { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    pub const FULL: RectNorm = RectNorm {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
 
     pub fn padded(self, frac: f32) -> Self {
         let dx = self.w * frac;
@@ -119,7 +124,7 @@ pub struct HandState {
 
 pub struct FrameContext {
     pub rgb: Image,
-    pub ir:  Image,
+    pub ir: Image,
     /// Foreground IR signal (Current - Background).
     pub ir_diff: Option<Image>,
     pub ir_flashlight_on: bool,

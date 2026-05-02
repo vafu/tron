@@ -1,22 +1,25 @@
+use super::{CameraBackend, SharedImage, StreamConfig, StreamFormat};
 use crate::types::{Image, PixelFormat};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
+use v4l::FourCC;
 use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
-use v4l::FourCC;
 
-pub type SharedImage = Arc<Mutex<Option<Image>>>;
+pub struct Backend;
 
-pub fn spawn_rgb(path: &str, width: u32, height: u32) -> Result<SharedImage> {
-    spawn(path, width, height, FourCC::new(b"YUYV"), Decoder::Yuyv)
-}
-
-pub fn spawn_ir(path: &str, width: u32, height: u32) -> Result<SharedImage> {
-    spawn(path, width, height, FourCC::new(b"GREY"), Decoder::Grey)
+impl CameraBackend for Backend {
+    fn spawn_stream(&self, config: StreamConfig) -> Result<SharedImage> {
+        let (fourcc, decoder) = match config.format {
+            StreamFormat::Rgb => (FourCC::new(b"YUYV"), Decoder::Yuyv),
+            StreamFormat::Ir => (FourCC::new(b"GREY"), Decoder::Grey),
+        };
+        spawn(config, fourcc, decoder)
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -25,42 +28,32 @@ enum Decoder {
     Grey,
 }
 
-fn spawn(
-    path: &str,
-    width: u32,
-    height: u32,
-    fourcc: FourCC,
-    decoder: Decoder,
-) -> Result<SharedImage> {
-    let path = path.to_string();
+fn spawn(config: StreamConfig, fourcc: FourCC, decoder: Decoder) -> Result<SharedImage> {
     let shared: SharedImage = Arc::new(Mutex::new(None));
     let out = shared.clone();
+    let path = config.path.clone();
 
     thread::Builder::new()
         .name(format!("cap:{path}"))
         .spawn(move || {
-            if let Err(e) = run(&path, width, height, fourcc, decoder, shared) {
-                eprintln!("camera {path} thread exited: {e:#}");
+            if let Err(e) = run(&config, fourcc, decoder, shared) {
+                eprintln!("camera {} thread exited: {e:#}", config.path);
             }
         })?;
     Ok(out)
 }
 
-fn run(
-    path: &str,
-    width: u32,
-    height: u32,
-    fourcc: FourCC,
-    decoder: Decoder,
-    shared: SharedImage,
-) -> Result<()> {
-    let dev = Device::with_path(path).with_context(|| format!("open {path}"))?;
+fn run(config: &StreamConfig, fourcc: FourCC, decoder: Decoder, shared: SharedImage) -> Result<()> {
+    let dev = Device::with_path(&config.path).with_context(|| format!("open {}", config.path))?;
     let mut fmt = dev.format()?;
-    fmt.width = width;
-    fmt.height = height;
+    fmt.width = config.width;
+    fmt.height = config.height;
     fmt.fourcc = fourcc;
     let fmt = dev.set_format(&fmt)?;
-    eprintln!("{path}: negotiated {}x{} {}", fmt.width, fmt.height, fmt.fourcc);
+    eprintln!(
+        "{}: negotiated {}x{} {}",
+        config.path, fmt.width, fmt.height, fmt.fourcc
+    );
 
     let w = fmt.width;
     let h = fmt.height;
@@ -98,7 +91,7 @@ fn yuyv_to_rgba(yuyv: &[u8], rgba: &mut [u8]) {
         let (r0, g0, b0) = yuv_to_rgb(y0, u, v);
         let (r1, g1, b1) = yuv_to_rgb(y1, u, v);
         let o = i * 8;
-        rgba[o]     = r0;
+        rgba[o] = r0;
         rgba[o + 1] = g0;
         rgba[o + 2] = b0;
         rgba[o + 3] = 255;

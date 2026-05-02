@@ -1,6 +1,10 @@
 use crate::types::{HandLandmarks, Vec3};
 use std::time::Instant;
 
+/// Landmark post-processing stage.
+///
+/// Filters should preserve the landmark coordinate contract and only adjust
+/// temporal stability, confidence, or equivalent post-inference attributes.
 pub trait LandmarkFilter: Send {
     fn apply(&mut self, lm: HandLandmarks) -> HandLandmarks;
 }
@@ -31,7 +35,12 @@ struct State {
 
 impl OneEuroFilter {
     pub fn new(min_cutoff: f32, beta: f32, d_cutoff: f32) -> Self {
-        Self { min_cutoff, beta, d_cutoff, state: None }
+        Self {
+            min_cutoff,
+            beta,
+            d_cutoff,
+            state: None,
+        }
     }
 }
 
@@ -46,7 +55,11 @@ impl LandmarkFilter for OneEuroFilter {
         let now = lm.timestamp;
         let s = match self.state.as_mut() {
             None => {
-                self.state = Some(State { last: now, x: lm.points, dx: [Vec3::default(); 21] });
+                self.state = Some(State {
+                    last: now,
+                    x: lm.points,
+                    dx: [Vec3::default(); 21],
+                });
                 return lm;
             }
             Some(s) => s,

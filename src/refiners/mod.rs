@@ -8,6 +8,10 @@
 use crate::pipeline::FrameContext;
 use crate::types::{Image, PixelFormat};
 
+/// Input/refinement stage.
+///
+/// Implementations can add derived images, sensor state, masks, or calibrated
+/// views to `FrameContext` before ROI acquisition and landmark extraction.
 pub trait FrameContextRefiner: Send {
     fn refine(&mut self, ctx: &mut FrameContext);
 }
@@ -67,7 +71,7 @@ impl Default for TemporalSubtractionRefiner {
 
 impl FrameContextRefiner for TemporalSubtractionRefiner {
     fn refine(&mut self, ctx: &mut FrameContext) {
-        use opencv::core::{Mat, CV_8UC1};
+        use opencv::core::{CV_8UC1, Mat};
         use opencv::prelude::*;
 
         let w = ctx.ir.width as i32;
@@ -158,7 +162,7 @@ impl FrameContextRefiner for RgbMaskingRefiner {
                 };
 
                 let i = (y * ctx.rgb.width + x) as usize * 4;
-                ctx.rgb.data[i]     = (ctx.rgb.data[i] as f32 * mask) as u8;
+                ctx.rgb.data[i] = (ctx.rgb.data[i] as f32 * mask) as u8;
                 ctx.rgb.data[i + 1] = (ctx.rgb.data[i + 1] as f32 * mask) as u8;
                 ctx.rgb.data[i + 2] = (ctx.rgb.data[i + 2] as f32 * mask) as u8;
             }

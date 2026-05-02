@@ -1,13 +1,14 @@
 use super::HandLandmarker;
+use crate::inference::{OrtConfig, load_ort_session};
 use crate::pipeline::FrameContext;
 use crate::types::{HandLandmarks, Handedness, Image, PixelFormat, RectNorm, Vec3};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use ndarray::Array4;
-use ort::session::{Session, builder::GraphOptimizationLevel, SessionInputValue};
+use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
+use std::borrow::Cow;
 use std::path::Path;
 use std::time::Instant;
-use std::borrow::Cow;
 
 pub struct MediaPipeHandLandmarker {
     session: Session,
@@ -24,15 +25,8 @@ pub struct MediaPipeHandLandmarker {
 
 impl MediaPipeHandLandmarker {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self> {
-        let session = Session::builder()
-            .map_err(ort_err)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(ort_err)?
-            .with_intra_threads(num_cpus::get().min(4))
-            .map_err(ort_err)?
-            .commit_from_file(model_path.as_ref())
-            .map_err(ort_err)
-            .with_context(|| format!("load {}", model_path.as_ref().display()))?;
+        let session =
+            load_ort_session(model_path.as_ref(), OrtConfig::cpu(num_cpus::get().min(4)))?;
 
         let input = session
             .inputs()
@@ -121,8 +115,9 @@ impl HandLandmarker for MediaPipeHandLandmarker {
                 return None;
             }
         };
-        
-        let input_map: Vec<(Cow<'_, str>, SessionInputValue<'_>)> = vec![(self.input_name.as_str().into(), tensor.into())];
+
+        let input_map: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
+            vec![(self.input_name.as_str().into(), tensor.into())];
         let outputs = match self.session.run(input_map) {
             Ok(v) => v,
             Err(e) => {
@@ -210,10 +205,6 @@ impl HandLandmarker for MediaPipeHandLandmarker {
             timestamp: Instant::now(),
         })
     }
-}
-
-fn ort_err<E: std::fmt::Display>(e: E) -> anyhow::Error {
-    anyhow!("ort: {e}")
 }
 
 fn max_abs(v: &[f32]) -> f32 {

@@ -7,6 +7,7 @@ mod camera;
 mod filter;
 mod gestures;
 mod gfx;
+mod inference;
 mod landmarker;
 mod pipeline;
 mod proximity;
@@ -71,7 +72,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, repeat, .. },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: ElementState::Pressed,
+                        repeat,
+                        ..
+                    },
                 ..
             } => {
                 handle_calib_key(code, repeat);
@@ -99,42 +106,60 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Defaults to `info`. Set `RUST_LOG=tron=trace` for span timings, or any
+/// other env_logger-style filter. `with_span_events(CLOSE)` makes the fmt
+/// subscriber print a line whenever a span exits, including `time.busy`/idle.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_span_events(fmt::format::FmtSpan::CLOSE)
+        .with_target(false)
+        .compact()
+        .init();
+}
+
 fn handle_calib_key(code: KeyCode, _repeat: bool) {
     const NUDGE_OFFSET: f32 = 0.005;
     const NUDGE_SCALE: f32 = 0.01;
     match code {
-        KeyCode::ArrowLeft  => calib::modify(|c| c.offset_x -= NUDGE_OFFSET),
+        KeyCode::ArrowLeft => calib::modify(|c| c.offset_x -= NUDGE_OFFSET),
         KeyCode::ArrowRight => calib::modify(|c| c.offset_x += NUDGE_OFFSET),
-        KeyCode::ArrowUp    => calib::modify(|c| c.offset_y -= NUDGE_OFFSET),
-        KeyCode::ArrowDown  => calib::modify(|c| c.offset_y += NUDGE_OFFSET),
-        KeyCode::KeyA       => calib::modify(|c| c.scale_x  -= NUDGE_SCALE),
-        KeyCode::KeyD       => calib::modify(|c| c.scale_x  += NUDGE_SCALE),
-        KeyCode::KeyW       => calib::modify(|c| c.scale_y  -= NUDGE_SCALE),
-        KeyCode::KeyS       => calib::modify(|c| c.scale_y  += NUDGE_SCALE),
-        KeyCode::KeyB       => calib::modify(|c| c.use_binary = !c.use_binary),
-        KeyCode::KeyR       => calib::reset(),
-        KeyCode::KeyP       => eprintln!("calib: {:?}", calib::current()),
+        KeyCode::ArrowUp => calib::modify(|c| c.offset_y -= NUDGE_OFFSET),
+        KeyCode::ArrowDown => calib::modify(|c| c.offset_y += NUDGE_OFFSET),
+        KeyCode::KeyA => calib::modify(|c| c.scale_x -= NUDGE_SCALE),
+        KeyCode::KeyD => calib::modify(|c| c.scale_x += NUDGE_SCALE),
+        KeyCode::KeyW => calib::modify(|c| c.scale_y -= NUDGE_SCALE),
+        KeyCode::KeyS => calib::modify(|c| c.scale_y += NUDGE_SCALE),
+        KeyCode::KeyB => calib::modify(|c| c.use_binary = !c.use_binary),
+        KeyCode::KeyR => calib::reset(),
+        KeyCode::KeyP => eprintln!("calib: {:?}", calib::current()),
         _ => {}
     }
 }
 
 fn main() -> Result<()> {
+    init_tracing();
     let rgb_src = camera::spawn_rgb("/dev/video0", RGB_W, RGB_H)?;
     let ir_src = camera::spawn_ir("/dev/video2", IR_W, IR_H)?;
     let prox_src = proximity::spawn("prox", "proximity1")?;
 
     // Try the real MediaPipe model; fall back to mock if the file is missing
     // or the load fails. Run `scripts/download_models.sh` to fetch it.
-    let lm: Box<dyn landmarker::HandLandmarker> = match landmarker::mediapipe::MediaPipeHandLandmarker::new("models/hand_landmark/hand_landmark.onnx") {
-        Ok(m) => {
-            eprintln!("landmarker: MediaPipe (ort)");
-            Box::new(m)
-        }
-        Err(e) => {
-            eprintln!("landmarker: falling back to mock — {e:#}");
-            Box::new(landmarker::mock::MockLandmarker::new())
-        }
-    };
+    let lm: Box<dyn landmarker::HandLandmarker> =
+        match landmarker::mediapipe::MediaPipeHandLandmarker::new(
+            "models/hand_landmark/hand_landmark.onnx",
+        ) {
+            Ok(m) => {
+                eprintln!("landmarker: MediaPipe (ort)");
+                Box::new(m)
+            }
+            Err(e) => {
+                eprintln!("landmarker: falling back to mock — {e:#}");
+                Box::new(landmarker::mock::MockLandmarker::new())
+            }
+        };
 
     // Refiners chain: detect flashlight state, subtract static IR background,
     // then mask the RGB image with the resulting foreground signal.
@@ -144,7 +169,8 @@ fn main() -> Result<()> {
         Box::new(refiners::RgbMaskingRefiner::new()),
     ];
 
-    let detector = roi::detector::PalmDetector::new("models/hand_detector/model.onnx").expect("load detector");
+    let detector =
+        roi::detector::PalmDetector::new("models/hand_detector/model.onnx").expect("load detector");
 
     // ROI chain: 1. Neural Palm Detector (on IR diff, with stale-diff fallback), 2. Previous-frame track
     let pipe = pipeline::GesturePipeline::new(
@@ -157,8 +183,10 @@ fn main() -> Result<()> {
         Box::new(filter::OneEuroFilter::default()),
         Box::new(gestures::RuleBasedClassifier::new()),
     );
-    let pipeline::PipelineOutputs { hand: hand_src, mask: mask_src } =
-        pipeline::spawn(rgb_src.clone(), ir_src.clone(), prox_src.clone(), pipe);
+    let pipeline::PipelineOutputs {
+        hand: hand_src,
+        mask: mask_src,
+    } = pipeline::spawn(rgb_src.clone(), ir_src.clone(), prox_src.clone(), pipe);
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

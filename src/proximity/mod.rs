@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -11,13 +11,11 @@ pub fn spawn(device: &str, channel: &str) -> Result<SharedProx> {
     let shared: SharedProx = Arc::new(Mutex::new(None));
     let out = shared.clone();
 
-    thread::Builder::new()
-        .name("prox".into())
-        .spawn(move || {
-            if let Err(e) = run(&device, &channel, shared) {
-                eprintln!("proximity thread exited: {e:#}");
-            }
-        })?;
+    thread::Builder::new().name("prox".into()).spawn(move || {
+        if let Err(e) = run(&device, &channel, shared) {
+            eprintln!("proximity thread exited: {e:#}");
+        }
+    })?;
     Ok(out)
 }
 

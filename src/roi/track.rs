@@ -16,7 +16,11 @@ pub struct TrackFromLastRoi {
 
 impl TrackFromLastRoi {
     pub fn new() -> Self {
-        Self { pad: 0.25, min_side: 0.08, had_last: false }
+        Self {
+            pad: 0.25,
+            min_side: 0.08,
+            had_last: false,
+        }
     }
 }
 
@@ -59,10 +63,18 @@ fn landmarks_bbox(lm: &HandLandmarks) -> RectNorm {
     let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
     let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
     for p in &lm.points {
-        if p.x < min_x { min_x = p.x; }
-        if p.y < min_y { min_y = p.y; }
-        if p.x > max_x { max_x = p.x; }
-        if p.y > max_y { max_y = p.y; }
+        if p.x < min_x {
+            min_x = p.x;
+        }
+        if p.y < min_y {
+            min_y = p.y;
+        }
+        if p.x > max_x {
+            max_x = p.x;
+        }
+        if p.y > max_y {
+            max_y = p.y;
+        }
     }
     RectNorm {
         x: min_x.clamp(0.0, 1.0),

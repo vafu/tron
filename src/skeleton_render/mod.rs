@@ -4,11 +4,27 @@ use std::time::Instant;
 
 /// MediaPipe Hands keypoint topology.
 const EDGES: &[(usize, usize)] = &[
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (5, 9), (9, 10), (10, 11), (11, 12),
-    (9, 13), (13, 14), (14, 15), (15, 16),
-    (13, 17), (0, 17), (17, 18), (18, 19), (19, 20),
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+    (0, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),
+    (5, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),
+    (9, 13),
+    (13, 14),
+    (14, 15),
+    (15, 16),
+    (13, 17),
+    (0, 17),
+    (17, 18),
+    (18, 19),
+    (19, 20),
 ];
 
 const JOINT_R_PX: f32 = 22.0;
@@ -151,7 +167,10 @@ impl SkeletonRenderer {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skeleton-bg"),
             layout: &bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubuf.as_entire_binding(),
+            }],
         });
 
         Self {
@@ -177,7 +196,14 @@ impl SkeletonRenderer {
         win_size: (u32, u32),
     ) {
         let t = self.start.elapsed().as_secs_f32();
-        queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&U { time: t, _pad: [0.0; 3] }));
+        queue.write_buffer(
+            &self.ubuf,
+            0,
+            bytemuck::bytes_of(&U {
+                time: t,
+                _pad: [0.0; 3],
+            }),
+        );
 
         let (x0, y0, x1, y1) = clip;
         let to_ndc = |x: f32, y: f32| -> [f32; 2] {
@@ -255,12 +281,42 @@ fn push_bone(
     let ap = [a[0] + perp_x_ndc, a[1] + perp_y_ndc];
     let bp = [b[0] + perp_x_ndc, b[1] + perp_y_ndc];
     let bm = [b[0] - perp_x_ndc, b[1] - perp_y_ndc];
-    out.push(V { pos: am, uv: [0.0, -1.0], kind, intensity });
-    out.push(V { pos: bm, uv: [1.0, -1.0], kind, intensity });
-    out.push(V { pos: bp, uv: [1.0,  1.0], kind, intensity });
-    out.push(V { pos: am, uv: [0.0, -1.0], kind, intensity });
-    out.push(V { pos: bp, uv: [1.0,  1.0], kind, intensity });
-    out.push(V { pos: ap, uv: [0.0,  1.0], kind, intensity });
+    out.push(V {
+        pos: am,
+        uv: [0.0, -1.0],
+        kind,
+        intensity,
+    });
+    out.push(V {
+        pos: bm,
+        uv: [1.0, -1.0],
+        kind,
+        intensity,
+    });
+    out.push(V {
+        pos: bp,
+        uv: [1.0, 1.0],
+        kind,
+        intensity,
+    });
+    out.push(V {
+        pos: am,
+        uv: [0.0, -1.0],
+        kind,
+        intensity,
+    });
+    out.push(V {
+        pos: bp,
+        uv: [1.0, 1.0],
+        kind,
+        intensity,
+    });
+    out.push(V {
+        pos: ap,
+        uv: [0.0, 1.0],
+        kind,
+        intensity,
+    });
 }
 
 fn push_joint(out: &mut Vec<V>, c: [f32; 2], r_px: f32, ndcx: f32, ndcy: f32, intensity: f32) {
@@ -270,12 +326,42 @@ fn push_joint(out: &mut Vec<V>, c: [f32; 2], r_px: f32, ndcx: f32, ndcy: f32, in
     let tr = [c[0] + rx, c[1] + ry];
     let bl = [c[0] - rx, c[1] - ry];
     let br = [c[0] + rx, c[1] - ry];
-    out.push(V { pos: tl, uv: [-1.0,  1.0], kind: 0.0, intensity });
-    out.push(V { pos: bl, uv: [-1.0, -1.0], kind: 0.0, intensity });
-    out.push(V { pos: br, uv: [ 1.0, -1.0], kind: 0.0, intensity });
-    out.push(V { pos: tl, uv: [-1.0,  1.0], kind: 0.0, intensity });
-    out.push(V { pos: br, uv: [ 1.0, -1.0], kind: 0.0, intensity });
-    out.push(V { pos: tr, uv: [ 1.0,  1.0], kind: 0.0, intensity });
+    out.push(V {
+        pos: tl,
+        uv: [-1.0, 1.0],
+        kind: 0.0,
+        intensity,
+    });
+    out.push(V {
+        pos: bl,
+        uv: [-1.0, -1.0],
+        kind: 0.0,
+        intensity,
+    });
+    out.push(V {
+        pos: br,
+        uv: [1.0, -1.0],
+        kind: 0.0,
+        intensity,
+    });
+    out.push(V {
+        pos: tl,
+        uv: [-1.0, 1.0],
+        kind: 0.0,
+        intensity,
+    });
+    out.push(V {
+        pos: br,
+        uv: [1.0, -1.0],
+        kind: 0.0,
+        intensity,
+    });
+    out.push(V {
+        pos: tr,
+        uv: [1.0, 1.0],
+        kind: 0.0,
+        intensity,
+    });
 }
 
 /// Compute the NDC rect the image actually occupies inside `pane` after

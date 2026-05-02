@@ -1,11 +1,16 @@
 use crate::pipeline::FrameContext;
 use crate::types::{Image, RectNorm};
 
-pub mod track;
 pub mod detector;
+pub mod track;
 
+/// ROI acquisition/tracking stage.
+///
+/// A hinter may run a detector, track from previous landmarks, fuse sensors, or
+/// delegate to a future learned tracker. Coordinates are normalized in the RGB
+/// image space expected by the landmarker.
 pub trait RoiHinter: Send {
-    /// Returns (roi_hint, debug_visualization)
+    /// Returns `(roi_hint, debug_visualization)`.
     fn hint(&mut self, ctx: &FrameContext) -> (Option<RectNorm>, Option<Image>);
 }
 
@@ -18,7 +23,11 @@ pub struct CompositeRoiHinter {
 
 impl CompositeRoiHinter {
     pub fn new(hinters: Vec<Box<dyn RoiHinter>>) -> Self {
-        Self { hinters, last_winner: -2, frame: 0 }
+        Self {
+            hinters,
+            last_winner: -2,
+            frame: 0,
+        }
     }
 }
 
@@ -44,10 +53,12 @@ impl RoiHinter for CompositeRoiHinter {
             }
         }
         if self.last_winner != -1 {
-            eprintln!("roi: winner {}->none frame={}", self.last_winner, self.frame);
+            eprintln!(
+                "roi: winner {}->none frame={}",
+                self.last_winner, self.frame
+            );
             self.last_winner = -1;
         }
         (None, first_debug)
     }
 }
-

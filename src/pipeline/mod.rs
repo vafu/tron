@@ -24,18 +24,32 @@ pub struct StepOutput {
     pub ir_diff: Option<Image>,
 }
 
+/// Orchestrates one frame through replaceable stages:
+///
+/// 1. `FrameContextRefiner`: enrich or mutate frame inputs before inference.
+/// 2. `RoiHinter`: acquire or track the hand crop.
+/// 3. `HandLandmarker`: extract landmarks from the selected crop.
+/// 4. `LandmarkFilter`: smooth or otherwise post-process landmarks.
+/// 5. `GestureClassifier`: classify the final landmark state.
+///
+/// Keep device I/O, model runtime setup, and rendering outside this type; this
+/// layer should remain a small composition root for tracking/extraction logic.
 pub struct GesturePipeline {
     pub refiners: Vec<Box<dyn FrameContextRefiner>>,
-    pub roi:      Box<dyn RoiHinter>,
-    pub lm:       Box<dyn HandLandmarker>,
-    pub filter:   Box<dyn LandmarkFilter>,
+    pub roi: Box<dyn RoiHinter>,
+    pub lm: Box<dyn HandLandmarker>,
+    pub filter: Box<dyn LandmarkFilter>,
     pub gestures: Box<dyn GestureClassifier>,
     last_outcome: StepOutcome,
     frame: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum StepOutcome { Ok, NoRoi, NoLandmarks }
+enum StepOutcome {
+    Ok,
+    NoRoi,
+    NoLandmarks,
+}
 
 impl GesturePipeline {
     pub fn new(
@@ -45,7 +59,15 @@ impl GesturePipeline {
         filter: Box<dyn LandmarkFilter>,
         gestures: Box<dyn GestureClassifier>,
     ) -> Self {
-        Self { refiners, roi, lm, filter, gestures, last_outcome: StepOutcome::Ok, frame: 0 }
+        Self {
+            refiners,
+            roi,
+            lm,
+            filter,
+            gestures,
+            last_outcome: StepOutcome::Ok,
+            frame: 0,
+        }
     }
 
     pub fn step(&mut self, mut ctx: FrameContext) -> StepOutput {
@@ -73,7 +95,10 @@ impl GesturePipeline {
             if trace {
                 self.log_trace("no-roi", t_step.elapsed(), &refiner_us, roi_us, 0, 0, 0);
             }
-            return StepOutput { state: None, ir_diff };
+            return StepOutput {
+                state: None,
+                ir_diff,
+            };
         };
 
         let t_lm = Instant::now();
@@ -84,7 +109,10 @@ impl GesturePipeline {
             if trace {
                 self.log_trace("no-lm", t_step.elapsed(), &refiner_us, roi_us, lm_us, 0, 0);
             }
-            return StepOutput { state: None, ir_diff };
+            return StepOutput {
+                state: None,
+                ir_diff,
+            };
         };
 
         let t_filter = Instant::now();
@@ -96,7 +124,15 @@ impl GesturePipeline {
 
         self.transition(StepOutcome::Ok, had_last, &ctx);
         if trace {
-            self.log_trace("ok", t_step.elapsed(), &refiner_us, roi_us, lm_us, filter_us, gest_us);
+            self.log_trace(
+                "ok",
+                t_step.elapsed(),
+                &refiner_us,
+                roi_us,
+                lm_us,
+                filter_us,
+                gest_us,
+            );
         }
         StepOutput {
             state: Some(HandState {
@@ -124,7 +160,9 @@ impl GesturePipeline {
         let mut refs = String::with_capacity(32);
         refs.push('[');
         for (i, us) in refiners_us[..n].iter().enumerate() {
-            if i > 0 { refs.push(','); }
+            if i > 0 {
+                refs.push(',');
+            }
             refs.push_str(&format!("{}", us));
         }
         refs.push(']');
@@ -143,11 +181,22 @@ impl GesturePipeline {
 
     fn transition(&mut self, now: StepOutcome, had_last: bool, ctx: &FrameContext) {
         if now != self.last_outcome {
-            let from = match self.last_outcome { StepOutcome::Ok => "ok", StepOutcome::NoRoi => "no-roi", StepOutcome::NoLandmarks => "no-lm" };
-            let to   = match now                { StepOutcome::Ok => "ok", StepOutcome::NoRoi => "no-roi", StepOutcome::NoLandmarks => "no-lm" };
+            let from = match self.last_outcome {
+                StepOutcome::Ok => "ok",
+                StepOutcome::NoRoi => "no-roi",
+                StepOutcome::NoLandmarks => "no-lm",
+            };
+            let to = match now {
+                StepOutcome::Ok => "ok",
+                StepOutcome::NoRoi => "no-roi",
+                StepOutcome::NoLandmarks => "no-lm",
+            };
             eprintln!(
                 "pipeline: {from}->{to} frame={} had_last={} flashlight={} ir_diff={}",
-                self.frame, had_last, ctx.ir_flashlight_on, ctx.ir_diff.is_some()
+                self.frame,
+                had_last,
+                ctx.ir_flashlight_on,
+                ctx.ir_diff.is_some()
             );
             self.last_outcome = now;
         }

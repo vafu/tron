@@ -1,6 +1,11 @@
 use crate::pipeline::FrameContext;
 use crate::types::{Gesture, HandLandmarks, Vec3};
 
+/// Gesture classification stage.
+///
+/// Classifiers consume fully processed landmarks and may use any contextual
+/// sensor state in `FrameContext`; replacing rules with a learned model should
+/// only require swapping this trait object in `main.rs`.
 pub trait GestureClassifier: Send {
     fn classify(&mut self, ctx: &FrameContext, lm: &HandLandmarks) -> Option<Gesture>;
 }
@@ -14,7 +19,9 @@ pub struct RuleBasedClassifier {
 
 impl RuleBasedClassifier {
     pub fn new() -> Self {
-        Self { pinch_threshold: 0.20 }
+        Self {
+            pinch_threshold: 0.20,
+        }
     }
 }
 

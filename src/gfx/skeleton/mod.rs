@@ -1,6 +1,12 @@
-use crate::types::{HandLandmarks, RectNorm};
+use crate::types::{Gesture, HandLandmarks, RectNorm};
 use bytemuck::{Pod, Zeroable};
 use std::time::Instant;
+
+mod geometry;
+mod label;
+
+use geometry::{push_bone, push_joint};
+use label::push_label;
 
 /// MediaPipe Hands keypoint topology.
 const EDGES: &[(usize, usize)] = &[
@@ -30,6 +36,9 @@ const EDGES: &[(usize, usize)] = &[
 const JOINT_R_PX: f32 = 22.0;
 const BONE_HALF_W_PX: f32 = 7.0;
 const ROI_HALF_W_PX: f32 = 1.8;
+const LABEL_SCALE_PX: f32 = 3.0;
+const LABEL_PAD_PX: f32 = 6.0;
+const MAX_LABEL_CHARS: usize = 16;
 
 /// Per-landmark radius multiplier — bigger near the palm, smaller toward the
 /// tips, so the rendered hand looks like a natural skeleton with vertebrae of
@@ -54,11 +63,11 @@ const JOINT_RADIUS_SCALE: [f32; 21] = [
 struct V {
     pos: [f32; 2],
     uv: [f32; 2],
-    /// 0 = joint ring, 1 = bone, 2 = ROI line.
+    /// 0 = joint ring, 1 = bone, 2 = ROI line, 3 = label cell.
     kind: f32,
     /// Per-vertex brightness multiplier.
     intensity: f32,
-    /// 0 = default cyan, 1 = red alert.
+    /// 0 = default cyan, 1 = red alert, 2 = green pinch.
     alert: f32,
 }
 
@@ -89,10 +98,7 @@ pub struct SkeletonRenderer {
 
 impl SkeletonRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("skeleton-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("skeleton-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -152,8 +158,8 @@ impl SkeletonRenderer {
             cache: None,
         });
 
-        // 21 joints + 21 bones + 4 ROI bones, 6 verts each.
-        let capacity = (21 + 21 + 4) * 6;
+        // 21 joints + 21 bones + 4 ROI bones, plus a tiny bitmap gesture label.
+        let capacity = (21 + 21 + 4) * 6 + MAX_LABEL_CHARS * 5 * 7 * 6;
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("skeleton-vbuf"),
             size: (capacity * std::mem::size_of::<V>()) as u64,
@@ -196,7 +202,8 @@ impl SkeletonRenderer {
         roi: Option<&RectNorm>,
         clip: (f32, f32, f32, f32),
         win_size: (u32, u32),
-        red_alert: bool,
+        gesture: Option<Gesture>,
+        gesture_label: Option<&str>,
     ) {
         let t = self.start.elapsed().as_secs_f32();
         queue.write_buffer(
@@ -218,6 +225,11 @@ impl SkeletonRenderer {
         // pixel→NDC: 1 px in NDC = 2 / win_dim
         let ndcx = 2.0 / win_size.0 as f32;
         let ndcy = 2.0 / win_size.1 as f32;
+        let alert = match gesture {
+            Some(Gesture::Fist) => 1.0,
+            Some(Gesture::Pinch) => 2.0,
+            _ => 0.0,
+        };
 
         let mut verts: Vec<V> = Vec::with_capacity(self.capacity);
 
@@ -236,8 +248,11 @@ impl SkeletonRenderer {
                     ndcy,
                     2.0,
                     0.85,
-                    red_alert,
+                    alert,
                 );
+            }
+            if let Some(label) = gesture_label.filter(|s| !s.is_empty() && *s != "?") {
+                push_label(&mut verts, label, tr, ndcx, ndcy, alert);
             }
         }
 
@@ -255,13 +270,13 @@ impl SkeletonRenderer {
                     ndcy,
                     1.0,
                     1.0,
-                    red_alert,
+                    alert,
                 );
             }
             for (i, p) in lm.points.iter().enumerate() {
                 let c = to_ndc(p.x, p.y);
                 let r = JOINT_R_PX * JOINT_RADIUS_SCALE[i];
-                push_joint(&mut verts, c, r, ndcx, ndcy, 1.0, red_alert);
+                push_joint(&mut verts, c, r, ndcx, ndcy, 1.0, alert);
             }
         }
 
@@ -280,132 +295,6 @@ impl SkeletonRenderer {
         rp.set_vertex_buffer(0, self.vbuf.slice(..));
         rp.draw(0..self.count, 0..1);
     }
-}
-
-fn push_bone(
-    out: &mut Vec<V>,
-    a: [f32; 2],
-    b: [f32; 2],
-    half_w_px: f32,
-    ndcx: f32,
-    ndcy: f32,
-    kind: f32,
-    intensity: f32,
-    alert: bool,
-) {
-    // Compute perpendicular in pixel space so thickness is uniform regardless
-    // of bone orientation, then convert back to NDC.
-    let dx_px = (b[0] - a[0]) / ndcx;
-    let dy_px = (b[1] - a[1]) / ndcy;
-    let len = (dx_px * dx_px + dy_px * dy_px).sqrt().max(1e-6);
-    let perp_x_ndc = (-dy_px / len * half_w_px) * ndcx;
-    let perp_y_ndc = (dx_px / len * half_w_px) * ndcy;
-
-    let am = [a[0] - perp_x_ndc, a[1] - perp_y_ndc];
-    let ap = [a[0] + perp_x_ndc, a[1] + perp_y_ndc];
-    let bp = [b[0] + perp_x_ndc, b[1] + perp_y_ndc];
-    let bm = [b[0] - perp_x_ndc, b[1] - perp_y_ndc];
-    out.push(V {
-        pos: am,
-        uv: [0.0, -1.0],
-        kind,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: bm,
-        uv: [1.0, -1.0],
-        kind,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: bp,
-        uv: [1.0, 1.0],
-        kind,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: am,
-        uv: [0.0, -1.0],
-        kind,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: bp,
-        uv: [1.0, 1.0],
-        kind,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: ap,
-        uv: [0.0, 1.0],
-        kind,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-}
-
-fn push_joint(
-    out: &mut Vec<V>,
-    c: [f32; 2],
-    r_px: f32,
-    ndcx: f32,
-    ndcy: f32,
-    intensity: f32,
-    alert: bool,
-) {
-    let rx = r_px * ndcx;
-    let ry = r_px * ndcy;
-    let tl = [c[0] - rx, c[1] + ry];
-    let tr = [c[0] + rx, c[1] + ry];
-    let bl = [c[0] - rx, c[1] - ry];
-    let br = [c[0] + rx, c[1] - ry];
-    out.push(V {
-        pos: tl,
-        uv: [-1.0, 1.0],
-        kind: 0.0,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: bl,
-        uv: [-1.0, -1.0],
-        kind: 0.0,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: br,
-        uv: [1.0, -1.0],
-        kind: 0.0,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: tl,
-        uv: [-1.0, 1.0],
-        kind: 0.0,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: br,
-        uv: [1.0, -1.0],
-        kind: 0.0,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
-    out.push(V {
-        pos: tr,
-        uv: [1.0, 1.0],
-        kind: 0.0,
-        intensity,
-        alert: if alert { 1.0 } else { 0.0 },
-    });
 }
 
 /// Compute the NDC rect the image actually occupies inside `pane` after
@@ -438,91 +327,3 @@ pub fn letterbox_rect(
     }
     (x0, y0, x1, y1)
 }
-
-const SHADER: &str = r#"
-struct U { time: f32, p1: f32, p2: f32, p3: f32 };
-@group(0) @binding(0) var<uniform> u: U;
-
-struct VsIn {
-  @location(0) pos: vec2<f32>,
-  @location(1) uv: vec2<f32>,
-  @location(2) kind: f32,
-  @location(3) intensity: f32,
-  @location(4) alert: f32,
-};
-struct VsOut {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-  @location(1) kind: f32,
-  @location(2) intensity: f32,
-  @location(3) alert: f32,
-};
-
-@vertex
-fn vs(in: VsIn) -> VsOut {
-  var o: VsOut;
-  o.pos = vec4<f32>(in.pos, 0.0, 1.0);
-  o.uv = in.uv;
-  o.kind = in.kind;
-  o.intensity = in.intensity;
-  o.alert = in.alert;
-  return o;
-}
-
-// Tron palette: cyan body, white-hot core.
-const CYAN: vec3<f32> = vec3<f32>(0.40, 0.92, 1.10);
-const RED:  vec3<f32> = vec3<f32>(1.80, 0.04, 0.02);
-const HOT:  vec3<f32> = vec3<f32>(1.00, 1.00, 1.00);
-const HOT_RED: vec3<f32> = vec3<f32>(1.00, 0.25, 0.10);
-
-fn body_color(alert: f32) -> vec3<f32> {
-  return mix(CYAN, RED, clamp(alert, 0.0, 1.0));
-}
-
-fn hot_color(alert: f32) -> vec3<f32> {
-  return mix(HOT, HOT_RED, clamp(alert, 0.0, 1.0));
-}
-
-@fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
-  let kind = i32(in.kind + 0.5);
-
-  if (kind == 0) {
-    // Joint — neon ring with a fat hot center and soft outer halo.
-    let r = length(in.uv);
-    let breathe = 0.85 + 0.15 * sin(u.time * 3.6);
-    // Thicker ring: lower exponent → wider band around its peak.
-    let ring = exp(-pow((r - 0.58) * 4.5, 2.0));
-    // Beefy hot pip — fills more of the inner disc.
-    let pip = exp(-pow(r * 4.5, 2.0));
-    // Soft outer halo trailing off past the ring.
-    let halo = exp(-r * 2.0) * 0.55 * smoothstep(1.05, 0.5, r);
-    let core = clamp(ring + pip, 0.0, 1.0);
-    let lum = (core + halo) * breathe * in.intensity;
-    let col = mix(body_color(in.alert), hot_color(in.alert), smoothstep(0.40, 1.0, core));
-    return vec4<f32>(col * lum, clamp(lum, 0.0, 1.0));
-  }
-
-  if (kind == 1) {
-    // Bone — bright core line + perpendicular halo, with a travelling pulse.
-    let d = abs(in.uv.y);
-    let core = smoothstep(0.18, 0.0, d);
-    let halo = exp(-pow(d * 2.1, 2.0)) * 0.55;
-    // Pulse that races down the bone.
-    let pulse_pos = fract(u.time * 0.55);
-    let pulse_d = abs(in.uv.x - pulse_pos);
-    let pulse = exp(-pow(pulse_d * 7.0, 2.0)) * smoothstep(1.0, 0.0, d) * 0.85;
-    let lum = (core + halo + pulse) * in.intensity;
-    let col = mix(body_color(in.alert), hot_color(in.alert), smoothstep(0.45, 1.0, core + pulse * 0.6));
-    return vec4<f32>(col * lum, clamp(lum, 0.0, 1.0));
-  }
-
-  // ROI — thin cyan glow, faint and breathing slowly.
-  let d = abs(in.uv.y);
-  let core = smoothstep(0.55, 0.0, d);
-  let halo = exp(-pow(d * 1.6, 2.0)) * 0.35;
-  let breathe = 0.7 + 0.3 * sin(u.time * 1.4);
-  let lum = (core * 0.6 + halo) * in.intensity * breathe;
-  return vec4<f32>(body_color(in.alert) * lum, clamp(lum, 0.0, 1.0));
-}
-"#;

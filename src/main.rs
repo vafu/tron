@@ -13,7 +13,6 @@ mod pipeline;
 mod proximity;
 mod refiners;
 mod roi;
-mod skeleton_render;
 mod types;
 
 use anyhow::Result;
@@ -220,7 +219,8 @@ impl ApplicationHandler for App {
 /// profiling spans in Perfetto output.
 fn init_tracing(perfetto_path: Option<PathBuf>) -> Result<()> {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,tron=info"));
 
     let fmt_layer = fmt::layer().with_target(true).compact();
 

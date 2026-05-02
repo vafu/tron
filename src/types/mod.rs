@@ -120,13 +120,25 @@ pub struct GestureFeatures {
     pub curled: u8,
     pub thumb_up: bool,
     pub fist_score: f32,
+    pub index_curl: f32,
+    pub middle_curl: f32,
+    pub ring_curl: f32,
+    pub pinky_curl: f32,
 }
 
 impl GestureFeatures {
     pub fn summary(self) -> String {
         format!(
-            "pinch={:.2} ext={} curl={} fist={:.2} thumb_up={}",
-            self.pinch, self.extended, self.curled, self.fist_score, self.thumb_up
+            "pinch={:.2} ext={} curl={} fist={:.2} c=[{:.2},{:.2},{:.2},{:.2}] thumb_up={}",
+            self.pinch,
+            self.extended,
+            self.curled,
+            self.fist_score,
+            self.index_curl,
+            self.middle_curl,
+            self.ring_curl,
+            self.pinky_curl,
+            self.thumb_up
         )
     }
 }

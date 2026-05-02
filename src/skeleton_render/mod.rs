@@ -58,13 +58,15 @@ struct V {
     kind: f32,
     /// Per-vertex brightness multiplier.
     intensity: f32,
+    /// 0 = default cyan, 1 = red alert.
+    alert: f32,
 }
 
 const LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
     array_stride: std::mem::size_of::<V>() as u64,
     step_mode: wgpu::VertexStepMode::Vertex,
     attributes: &wgpu::vertex_attr_array![
-        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32
+        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32, 4 => Float32
     ],
 };
 
@@ -194,6 +196,7 @@ impl SkeletonRenderer {
         roi: Option<&RectNorm>,
         clip: (f32, f32, f32, f32),
         win_size: (u32, u32),
+        red_alert: bool,
     ) {
         let t = self.start.elapsed().as_secs_f32();
         queue.write_buffer(
@@ -224,7 +227,17 @@ impl SkeletonRenderer {
             let br = to_ndc(r.x + r.w, r.y + r.h);
             let bl = to_ndc(r.x, r.y + r.h);
             for (a, b) in [(tl, tr), (tr, br), (br, bl), (bl, tl)] {
-                push_bone(&mut verts, a, b, ROI_HALF_W_PX, ndcx, ndcy, 2.0, 0.85);
+                push_bone(
+                    &mut verts,
+                    a,
+                    b,
+                    ROI_HALF_W_PX,
+                    ndcx,
+                    ndcy,
+                    2.0,
+                    0.85,
+                    red_alert,
+                );
             }
         }
 
@@ -233,12 +246,22 @@ impl SkeletonRenderer {
             for &(a, b) in EDGES {
                 let pa = to_ndc(lm.points[a].x, lm.points[a].y);
                 let pb = to_ndc(lm.points[b].x, lm.points[b].y);
-                push_bone(&mut verts, pa, pb, BONE_HALF_W_PX, ndcx, ndcy, 1.0, 1.0);
+                push_bone(
+                    &mut verts,
+                    pa,
+                    pb,
+                    BONE_HALF_W_PX,
+                    ndcx,
+                    ndcy,
+                    1.0,
+                    1.0,
+                    red_alert,
+                );
             }
             for (i, p) in lm.points.iter().enumerate() {
                 let c = to_ndc(p.x, p.y);
                 let r = JOINT_R_PX * JOINT_RADIUS_SCALE[i];
-                push_joint(&mut verts, c, r, ndcx, ndcy, 1.0);
+                push_joint(&mut verts, c, r, ndcx, ndcy, 1.0, red_alert);
             }
         }
 
@@ -268,6 +291,7 @@ fn push_bone(
     ndcy: f32,
     kind: f32,
     intensity: f32,
+    alert: bool,
 ) {
     // Compute perpendicular in pixel space so thickness is uniform regardless
     // of bone orientation, then convert back to NDC.
@@ -286,40 +310,54 @@ fn push_bone(
         uv: [0.0, -1.0],
         kind,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: bm,
         uv: [1.0, -1.0],
         kind,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: bp,
         uv: [1.0, 1.0],
         kind,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: am,
         uv: [0.0, -1.0],
         kind,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: bp,
         uv: [1.0, 1.0],
         kind,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: ap,
         uv: [0.0, 1.0],
         kind,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
 }
 
-fn push_joint(out: &mut Vec<V>, c: [f32; 2], r_px: f32, ndcx: f32, ndcy: f32, intensity: f32) {
+fn push_joint(
+    out: &mut Vec<V>,
+    c: [f32; 2],
+    r_px: f32,
+    ndcx: f32,
+    ndcy: f32,
+    intensity: f32,
+    alert: bool,
+) {
     let rx = r_px * ndcx;
     let ry = r_px * ndcy;
     let tl = [c[0] - rx, c[1] + ry];
@@ -331,36 +369,42 @@ fn push_joint(out: &mut Vec<V>, c: [f32; 2], r_px: f32, ndcx: f32, ndcy: f32, in
         uv: [-1.0, 1.0],
         kind: 0.0,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: bl,
         uv: [-1.0, -1.0],
         kind: 0.0,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: br,
         uv: [1.0, -1.0],
         kind: 0.0,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: tl,
         uv: [-1.0, 1.0],
         kind: 0.0,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: br,
         uv: [1.0, -1.0],
         kind: 0.0,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
     out.push(V {
         pos: tr,
         uv: [1.0, 1.0],
         kind: 0.0,
         intensity,
+        alert: if alert { 1.0 } else { 0.0 },
     });
 }
 
@@ -404,12 +448,14 @@ struct VsIn {
   @location(1) uv: vec2<f32>,
   @location(2) kind: f32,
   @location(3) intensity: f32,
+  @location(4) alert: f32,
 };
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
   @location(1) kind: f32,
   @location(2) intensity: f32,
+  @location(3) alert: f32,
 };
 
 @vertex
@@ -419,12 +465,23 @@ fn vs(in: VsIn) -> VsOut {
   o.uv = in.uv;
   o.kind = in.kind;
   o.intensity = in.intensity;
+  o.alert = in.alert;
   return o;
 }
 
 // Tron palette: cyan body, white-hot core.
 const CYAN: vec3<f32> = vec3<f32>(0.40, 0.92, 1.10);
+const RED:  vec3<f32> = vec3<f32>(1.80, 0.04, 0.02);
 const HOT:  vec3<f32> = vec3<f32>(1.00, 1.00, 1.00);
+const HOT_RED: vec3<f32> = vec3<f32>(1.00, 0.25, 0.10);
+
+fn body_color(alert: f32) -> vec3<f32> {
+  return mix(CYAN, RED, clamp(alert, 0.0, 1.0));
+}
+
+fn hot_color(alert: f32) -> vec3<f32> {
+  return mix(HOT, HOT_RED, clamp(alert, 0.0, 1.0));
+}
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
@@ -442,7 +499,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let halo = exp(-r * 2.0) * 0.55 * smoothstep(1.05, 0.5, r);
     let core = clamp(ring + pip, 0.0, 1.0);
     let lum = (core + halo) * breathe * in.intensity;
-    let col = mix(CYAN, HOT, smoothstep(0.40, 1.0, core));
+    let col = mix(body_color(in.alert), hot_color(in.alert), smoothstep(0.40, 1.0, core));
     return vec4<f32>(col * lum, clamp(lum, 0.0, 1.0));
   }
 
@@ -456,7 +513,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let pulse_d = abs(in.uv.x - pulse_pos);
     let pulse = exp(-pow(pulse_d * 7.0, 2.0)) * smoothstep(1.0, 0.0, d) * 0.85;
     let lum = (core + halo + pulse) * in.intensity;
-    let col = mix(CYAN, HOT, smoothstep(0.45, 1.0, core + pulse * 0.6));
+    let col = mix(body_color(in.alert), hot_color(in.alert), smoothstep(0.45, 1.0, core + pulse * 0.6));
     return vec4<f32>(col * lum, clamp(lum, 0.0, 1.0));
   }
 
@@ -466,6 +523,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   let halo = exp(-pow(d * 1.6, 2.0)) * 0.35;
   let breathe = 0.7 + 0.3 * sin(u.time * 1.4);
   let lum = (core * 0.6 + halo) * in.intensity * breathe;
-  return vec4<f32>(CYAN * lum, clamp(lum, 0.0, 1.0));
+  return vec4<f32>(body_color(in.alert) * lum, clamp(lum, 0.0, 1.0));
 }
 "#;

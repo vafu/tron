@@ -1,10 +1,10 @@
 use super::RoiHinter;
 use crate::calib;
 use crate::inference::{OrtConfig, load_ort_session};
-use crate::types::{FrameContext, Image, RectNorm};
+use crate::types::{FrameContext, Image, PixelFormat, RectNorm};
 use anyhow::{Context, Result, anyhow};
 use ndarray::Array4;
-use opencv::core::{CV_8UC1, CV_32F, Mat, Point, Scalar};
+use opencv::core::{CV_8UC1, Mat, Point, Scalar};
 use opencv::imgproc;
 use opencv::prelude::*;
 use ort::session::{Session, SessionInputValue};
@@ -19,11 +19,18 @@ pub struct PalmDetector {
     anchors: Vec<Anchor>,
     pad: f32,
     frame: u64,
+    source: DetectorSource,
     /// Most recent IR-diff seen — reused when the current frame has none
     /// (e.g. flashlight just toggled off). Without this, the detector falls
     /// through to the next hinter on every flashlight-off frame and the ROI
     /// geometry flips between detector- and tracker-sized rects.
     last_diff: Option<Image>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum DetectorSource {
+    Rgb,
+    IrForeground,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +41,14 @@ struct Anchor {
 
 impl PalmDetector {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Result<Self> {
+        Self::with_source(model_path, DetectorSource::Rgb)
+    }
+
+    pub fn new_ir<P: AsRef<Path>>(model_path: P) -> Result<Self> {
+        Self::with_source(model_path, DetectorSource::IrForeground)
+    }
+
+    pub fn with_source<P: AsRef<Path>>(model_path: P, source: DetectorSource) -> Result<Self> {
         let session = load_ort_session(model_path.as_ref(), OrtConfig::cpu(1))
             .with_context(|| format!("load palm detector {}", model_path.as_ref().display()))?;
 
@@ -64,54 +79,40 @@ impl PalmDetector {
             anchors,
             pad: 0.20,
             frame: 0,
+            source,
             last_diff: None,
         })
     }
 
-    fn run_model(&mut self, signal: &Mat) -> Result<Option<RectNorm>> {
+    fn run_model(&mut self, signal: &ModelInput) -> Result<Option<RectNorm>> {
         let w = signal.cols() as f32;
         let h = signal.rows() as f32;
         let scale = (self.input_size as f32 / w).min(self.input_size as f32 / h);
         let nw = (w * scale) as i32;
         let nh = (h * scale) as i32;
-
-        let mut resized = Mat::default();
-        imgproc::resize(
-            signal,
-            &mut resized,
-            opencv::core::Size::new(nw, nh),
-            0.0,
-            0.0,
-            imgproc::INTER_LINEAR,
-        )?;
-
-        let mut letterboxed = Mat::new_rows_cols_with_default(
-            self.input_size as i32,
-            self.input_size as i32,
-            CV_8UC1,
-            Scalar::all(0.0),
-        )?;
         let dx = (self.input_size as i32 - nw) / 2;
         let dy = (self.input_size as i32 - nh) / 2;
-        {
-            let mut roi = Mat::roi_mut(&mut letterboxed, opencv::core::Rect::new(dx, dy, nw, nh))?;
-            resized.copy_to(&mut roi)?;
-        }
-
-        let mut float_mat = Mat::default();
-        letterboxed.convert_to(&mut float_mat, CV_32F, 1.0 / 127.5, -1.0)?;
 
         let mut input =
             Array4::<f32>::zeros((1, 3, self.input_size as usize, self.input_size as usize));
-        let data_slice = float_mat.data_bytes()?;
-        for y in 0..self.input_size as usize {
-            for x in 0..self.input_size as usize {
-                let offset = (y * self.input_size as usize + x) * 4;
-                let bytes = &data_slice[offset..offset + 4];
-                let val = f32::from_ne_bytes(bytes.try_into()?);
-                input[[0, 0, y, x]] = val;
-                input[[0, 1, y, x]] = val;
-                input[[0, 2, y, x]] = val;
+        for oy in 0..self.input_size as i32 {
+            let ly = oy - dy;
+            if !(0..nh).contains(&ly) {
+                continue;
+            }
+            let sy = ((ly as f32 + 0.5) / scale).floor().clamp(0.0, h - 1.0) as usize;
+            for ox in 0..self.input_size as i32 {
+                let lx = ox - dx;
+                if !(0..nw).contains(&lx) {
+                    continue;
+                }
+                let sx = ((lx as f32 + 0.5) / scale).floor().clamp(0.0, w - 1.0) as usize;
+                let px = signal.sample_rgb(sx, sy);
+                let y = oy as usize;
+                let x = ox as usize;
+                input[[0, 0, y, x]] = px[0] as f32 / 127.5 - 1.0;
+                input[[0, 1, y, x]] = px[1] as f32 / 127.5 - 1.0;
+                input[[0, 2, y, x]] = px[2] as f32 / 127.5 - 1.0;
             }
         }
 
@@ -204,60 +205,139 @@ impl PalmDetector {
 impl RoiHinter for PalmDetector {
     fn hint(&mut self, ctx: &FrameContext) -> (Option<RectNorm>, Option<Image>) {
         self.frame = self.frame.wrapping_add(1);
-        if let Some(d) = &ctx.ir_diff {
-            self.last_diff = Some(d.clone());
-        }
-        let signal_img = match ctx.ir_diff.as_ref().or(self.last_diff.as_ref()) {
-            Some(d) => d,
-            None => {
-                if self.frame % 30 == 0 {
-                    eprintln!(
-                        "palm: skipped — no ir_diff (flashlight={})",
-                        ctx.ir_flashlight_on
-                    );
-                }
-                return (None, None);
-            }
-        };
-
-        let w = signal_img.width as i32;
-        let h = signal_img.height as i32;
-        let mat = unsafe {
-            Mat::new_rows_cols_with_data_unsafe_def(
-                h,
-                w,
-                CV_8UC1,
-                signal_img.data.as_ptr() as *mut _,
-            )
-            .unwrap()
-        };
-
-        match self.run_model(&mat) {
-            Ok(Some(rect)) => {
-                let mapped = calib::current().map_rect(rect).padded(self.pad);
-                (Some(mapped), None)
-            }
-            Ok(None) => match find_blob_fallback(&mat) {
-                Ok(Some(rect)) => {
-                    let mapped = calib::current().map_rect(rect).padded(self.pad);
-                    if self.frame % 30 == 0 {
-                        eprintln!(
-                            "palm: model rejected, blob fallback rect=[{:.2},{:.2} {:.2}x{:.2}]",
-                            mapped.x, mapped.y, mapped.w, mapped.h
-                        );
-                    }
-                    (Some(mapped), None)
-                }
-                _ => {
-                    if self.frame % 30 == 0 {
-                        eprintln!("palm: no detection (model rejected, blob empty)");
-                    }
-                    (None, None)
+        let input = match self.source {
+            DetectorSource::Rgb => match ModelInput::from_rgb(&ctx.rgb) {
+                Ok(input) => input,
+                Err(e) => {
+                    eprintln!("palm rgb input error: {e}");
+                    return (None, None);
                 }
             },
+            DetectorSource::IrForeground => {
+                if let Some(d) = &ctx.ir_diff {
+                    self.last_diff = Some(d.clone());
+                }
+                let signal_img = match ctx.ir_diff.as_ref().or(self.last_diff.as_ref()) {
+                    Some(d) => d,
+                    None => {
+                        if self.frame % 30 == 0 {
+                            eprintln!(
+                                "palm: skipped — no ir_diff (flashlight={})",
+                                ctx.ir_flashlight_on
+                            );
+                        }
+                        return (None, None);
+                    }
+                };
+                match ModelInput::from_ir(signal_img) {
+                    Ok(input) => input,
+                    Err(e) => {
+                        eprintln!("palm ir input error: {e}");
+                        return (None, None);
+                    }
+                }
+            }
+        };
+
+        match self.run_model(&input) {
+            Ok(Some(rect)) => {
+                let mapped = match self.source {
+                    DetectorSource::Rgb => rect.padded(self.pad),
+                    DetectorSource::IrForeground => {
+                        calib::current().map_rect(rect).padded(self.pad)
+                    }
+                };
+                (Some(mapped), None)
+            }
+            Ok(None) => {
+                if let DetectorSource::IrForeground = self.source {
+                    if let Ok(mat) = input.grayscale_mat() {
+                        match find_blob_fallback(&mat) {
+                            Ok(Some(rect)) => {
+                                let mapped = calib::current().map_rect(rect).padded(self.pad);
+                                if self.frame % 30 == 0 {
+                                    eprintln!(
+                                        "palm: model rejected, blob fallback rect=[{:.2},{:.2} {:.2}x{:.2}]",
+                                        mapped.x, mapped.y, mapped.w, mapped.h
+                                    );
+                                }
+                                return (Some(mapped), None);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if self.frame % 30 == 0 {
+                    eprintln!("palm: no detection");
+                }
+                (None, None)
+            }
             Err(e) => {
                 eprintln!("palm detector error: {e}");
                 (None, None)
+            }
+        }
+    }
+}
+
+enum ModelInput {
+    Image(Image),
+}
+
+impl ModelInput {
+    fn from_ir(img: &Image) -> Result<Self> {
+        Ok(Self::Image(img.clone()))
+    }
+
+    fn from_rgb(img: &Image) -> Result<Self> {
+        if img.format != PixelFormat::Rgba8 {
+            return Err(anyhow!("expected RGBA8 rgb image"));
+        }
+        Ok(Self::Image(img.clone()))
+    }
+
+    fn image(&self) -> &Image {
+        let Self::Image(img) = self;
+        img
+    }
+
+    fn rows(&self) -> i32 {
+        self.image().height as i32
+    }
+
+    fn cols(&self) -> i32 {
+        self.image().width as i32
+    }
+
+    fn channels(&self) -> i32 {
+        self.image().format.bytes_per_pixel() as i32
+    }
+
+    fn grayscale_mat(&self) -> Result<Mat> {
+        let img = self.image();
+        let mut grey: Vec<u8> = img.grey_iter().collect();
+        let mat = unsafe {
+            Mat::new_rows_cols_with_data_unsafe_def(
+                img.height as i32,
+                img.width as i32,
+                CV_8UC1,
+                grey.as_mut_ptr() as *mut _,
+            )?
+        }
+        .clone();
+        Ok(mat)
+    }
+
+    fn sample_rgb(&self, x: usize, y: usize) -> [u8; 3] {
+        let img = self.image();
+        match img.format {
+            PixelFormat::Rgba8 => {
+                let i = (y * img.width as usize + x) * 4;
+                [img.data[i], img.data[i + 1], img.data[i + 2]]
+            }
+            PixelFormat::R8 => {
+                let g = img.data[y * img.width as usize + x];
+                [g, g, g]
             }
         }
     }

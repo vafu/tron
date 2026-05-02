@@ -1,8 +1,8 @@
 use crate::camera::SharedImage;
-use crate::pipeline::{SharedHand, SharedMask};
+use crate::pipeline::{SharedHand, SharedMask, SharedPointer};
 use crate::proximity::SharedProx;
 use crate::skeleton_render::{SkeletonRenderer, letterbox_rect};
-use crate::types::Image;
+use crate::types::{Gesture, Image};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use winit::dpi::PhysicalSize;
@@ -30,6 +30,8 @@ pub struct Gfx {
     bar_fill: SolidQuad,
 
     skeleton: SkeletonRenderer,
+    cube: CubeRenderer,
+    depth: DepthTexture,
 
     main_pane: (f32, f32, f32, f32),
 
@@ -39,11 +41,13 @@ pub struct Gfx {
     prox_src: SharedProx,
     hand_src: SharedHand,
     mask_src: SharedMask,
+    pointer_src: SharedPointer,
 
     /// Scratch buffer for R8 → RGBA8 expansion when uploading the mask.
     mask_rgba: Vec<u8>,
 
     prox_max: i64,
+    last_grab_pos: Option<[f32; 2]>,
 }
 
 impl Gfx {
@@ -54,6 +58,7 @@ impl Gfx {
         prox_src: SharedProx,
         hand_src: SharedHand,
         mask_src: SharedMask,
+        pointer_src: SharedPointer,
         rgb_size: (u32, u32),
         ir_size: (u32, u32),
     ) -> Result<Self> {
@@ -193,6 +198,8 @@ impl Gfx {
         );
 
         let skeleton = SkeletonRenderer::new(&device, format);
+        let cube = CubeRenderer::new(&device, format);
+        let depth = DepthTexture::new(&device, size);
 
         Ok(Self {
             window,
@@ -208,15 +215,19 @@ impl Gfx {
             mask_view,
             bar_bg,
             bar_fill,
+            cube,
+            depth,
             main_pane: main_rect,
             rgb_src,
             ir_src,
             prox_src,
             hand_src,
             mask_src,
+            pointer_src,
             mask_rgba: Vec::new(),
             skeleton,
             prox_max: 1,
+            last_grab_pos: None,
         })
     }
 
@@ -231,6 +242,7 @@ impl Gfx {
         self.main_view.fit(&self.queue, size);
         self.masked_view.fit(&self.queue, size);
         self.mask_view.fit(&self.queue, size);
+        self.depth = DepthTexture::new(&self.device, size);
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -238,6 +250,7 @@ impl Gfx {
         let rgb_opt = self.rgb_src.lock().unwrap().clone();
         let hand = self.hand_src.lock().unwrap().clone();
         let mask_opt = self.mask_src.lock().unwrap().clone();
+        let pointer = *self.pointer_src.lock().unwrap();
 
         // Main pane: raw RGB camera (skeleton drawn on top later).
         if let Some(f) = &rgb_opt {
@@ -306,6 +319,7 @@ impl Gfx {
                 Some(&state.roi),
                 clip,
                 (self.size.width, self.size.height),
+                state.gesture == Some(Gesture::Fist),
             );
         }
 
@@ -318,6 +332,24 @@ impl Gfx {
         };
         self.window.set_title(&title);
 
+        if let Some(pointer) = pointer {
+            if pointer.grabbed {
+                let pos = [pointer.position.x, pointer.position.y];
+                if let Some(last) = self.last_grab_pos {
+                    let dx = pos[0] - last[0];
+                    let dy = pos[1] - last[1];
+                    self.cube.rotate(-dx * 8.0, -dy * 8.0);
+                }
+                self.last_grab_pos = Some(pos);
+            } else {
+                self.last_grab_pos = None;
+            }
+        } else {
+            self.last_grab_pos = None;
+        }
+        self.cube
+            .update(&self.queue, self.size.width, self.size.height);
+
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -327,7 +359,7 @@ impl Gfx {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("rp"),
+                label: Some("rp-2d"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -359,7 +391,49 @@ impl Gfx {
                 rp.set_vertex_buffer(0, q.vbuf.slice(..));
                 rp.draw(0..6, 0..1);
             }
+        }
 
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rp-cube"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.cube.draw(&mut rp);
+        }
+
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rp-overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.cube.draw_overlay(&mut rp);
             if have_overlay {
                 self.skeleton.draw(&mut rp);
             }
@@ -367,6 +441,278 @@ impl Gfx {
         self.queue.submit(Some(enc.finish()));
         frame.present();
         Ok(())
+    }
+}
+
+struct DepthTexture {
+    view: wgpu::TextureView,
+}
+
+impl DepthTexture {
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
+    fn new(device: &wgpu::Device, size: PhysicalSize<u32>) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d {
+                width: size.width.max(1),
+                height: size.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Self::FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        Self {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CubeVertex {
+    pos: [f32; 3],
+    color: [f32; 3],
+}
+
+const CUBE_VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
+    array_stride: std::mem::size_of::<CubeVertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+};
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CubeUniform {
+    mvp: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CubeEdgeVertex {
+    pos: [f32; 2],
+    uv: [f32; 2],
+    kind: f32,
+    color: [f32; 3],
+    intensity: f32,
+}
+
+const CUBE_EDGE_VERTEX_LAYOUT: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
+    array_stride: std::mem::size_of::<CubeEdgeVertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![
+        0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x3, 4 => Float32
+    ],
+};
+
+struct CubeRenderer {
+    pipeline: wgpu::RenderPipeline,
+    edge_pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    ubuf: wgpu::Buffer,
+    vbuf: wgpu::Buffer,
+    ibuf: wgpu::Buffer,
+    edge_vbuf: wgpu::Buffer,
+    index_count: u32,
+    edge_count: u32,
+    edge_capacity: usize,
+    rot_x: f32,
+    rot_y: f32,
+}
+
+impl CubeRenderer {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cube-shader"),
+            source: wgpu::ShaderSource::Wgsl(CUBE_SHADER.into()),
+        });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cube-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cube-layout"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cube-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs",
+                buffers: &[CUBE_VERTEX_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DepthTexture::FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cube-edge-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_edge",
+                buffers: &[CUBE_EDGE_VERTEX_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_edge",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cube-ubuf"),
+            size: std::mem::size_of::<CubeUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cube-bg"),
+            layout: &bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubuf.as_entire_binding(),
+            }],
+        });
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cube-vbuf"),
+            size: (CUBE_VERTICES.len() * std::mem::size_of::<CubeVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ibuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cube-ibuf"),
+            size: (CUBE_INDICES.len() * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let edge_capacity = (12 + 8) * 6;
+        let edge_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cube-edge-vbuf"),
+            size: (edge_capacity * std::mem::size_of::<CubeEdgeVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            edge_pipeline,
+            bind_group,
+            ubuf,
+            vbuf,
+            ibuf,
+            edge_vbuf,
+            index_count: CUBE_INDICES.len() as u32,
+            edge_count: 0,
+            edge_capacity,
+            rot_x: 0.35,
+            rot_y: -0.45,
+        }
+    }
+
+    fn rotate(&mut self, dx: f32, dy: f32) {
+        self.rot_y += dx;
+        self.rot_x = (self.rot_x + dy).clamp(-1.4, 1.4);
+    }
+
+    fn update(&mut self, queue: &wgpu::Queue, width: u32, height: u32) {
+        queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(CUBE_VERTICES));
+        queue.write_buffer(&self.ibuf, 0, bytemuck::cast_slice(CUBE_INDICES));
+
+        let aspect = width.max(1) as f32 / height.max(1) as f32;
+        let proj = perspective(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+        let view = translation(0.0, 0.0, -4.0);
+        let model = mat4_mul(rotation_y(self.rot_y), rotation_x(self.rot_x));
+        let mvp = mat4_mul(mat4_mul(proj, view), model);
+        queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&CubeUniform { mvp }));
+
+        let mut verts = Vec::with_capacity(self.edge_capacity);
+        build_cube_overlay(&mut verts, mvp, width.max(1), height.max(1));
+        self.edge_count = verts.len() as u32;
+        if !verts.is_empty() {
+            queue.write_buffer(&self.edge_vbuf, 0, bytemuck::cast_slice(&verts));
+        }
+    }
+
+    fn draw<'r>(&'r self, rp: &mut wgpu::RenderPass<'r>) {
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind_group, &[]);
+        rp.set_vertex_buffer(0, self.vbuf.slice(..));
+        rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+        rp.draw_indexed(0..self.index_count, 0, 0..1);
+    }
+
+    fn draw_overlay<'r>(&'r self, rp: &mut wgpu::RenderPass<'r>) {
+        if self.edge_count == 0 {
+            return;
+        }
+        rp.set_pipeline(&self.edge_pipeline);
+        rp.set_bind_group(0, &self.bind_group, &[]);
+        rp.set_vertex_buffer(0, self.edge_vbuf.slice(..));
+        rp.draw(0..self.edge_count, 0..1);
     }
 }
 
@@ -607,3 +953,314 @@ impl SolidQuad {
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
     }
 }
+
+const CUBE_VERTICES: &[CubeVertex] = &[
+    CubeVertex {
+        pos: [-0.7, -0.7, 0.7],
+        color: [0.1, 0.9, 1.0],
+    },
+    CubeVertex {
+        pos: [0.7, -0.7, 0.7],
+        color: [0.9, 1.0, 1.0],
+    },
+    CubeVertex {
+        pos: [0.7, 0.7, 0.7],
+        color: [0.2, 0.6, 1.0],
+    },
+    CubeVertex {
+        pos: [-0.7, 0.7, 0.7],
+        color: [0.0, 0.4, 0.9],
+    },
+    CubeVertex {
+        pos: [-0.7, -0.7, -0.7],
+        color: [0.0, 0.3, 0.8],
+    },
+    CubeVertex {
+        pos: [0.7, -0.7, -0.7],
+        color: [0.0, 0.8, 0.9],
+    },
+    CubeVertex {
+        pos: [0.7, 0.7, -0.7],
+        color: [0.7, 0.9, 1.0],
+    },
+    CubeVertex {
+        pos: [-0.7, 0.7, -0.7],
+        color: [0.0, 0.6, 1.0],
+    },
+];
+
+const CUBE_INDICES: &[u16] = &[
+    0, 1, 2, 0, 2, 3, 1, 5, 6, 1, 6, 2, 5, 4, 7, 5, 7, 6, 4, 0, 3, 4, 3, 7, 3, 2, 6, 3, 6, 7, 4, 5,
+    1, 4, 1, 0,
+];
+
+const CUBE_EDGES: &[(usize, usize)] = &[
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
+
+fn build_cube_overlay(out: &mut Vec<CubeEdgeVertex>, mvp: [[f32; 4]; 4], win_w: u32, win_h: u32) {
+    let mut projected = [ProjectedPoint::default(); 8];
+    for (i, v) in CUBE_VERTICES.iter().enumerate() {
+        projected[i] = project_point(mvp, v.pos);
+    }
+
+    let ndcx = 2.0 / win_w as f32;
+    let ndcy = 2.0 / win_h as f32;
+    let edge_color = [0.35, 1.0, 1.2];
+    for &(a, b) in CUBE_EDGES {
+        push_cube_edge(
+            out,
+            projected[a].pos,
+            projected[b].pos,
+            8.5,
+            ndcx,
+            ndcy,
+            edge_color,
+            1.15,
+        );
+    }
+
+    for p in projected {
+        let radius = 13.0 + (1.0 - p.depth).clamp(0.0, 1.0) * 25.0;
+        push_cube_corner(out, p.pos, radius, ndcx, ndcy, edge_color, 1.2);
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProjectedPoint {
+    pos: [f32; 2],
+    depth: f32,
+}
+
+fn project_point(m: [[f32; 4]; 4], p: [f32; 3]) -> ProjectedPoint {
+    let x = m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0];
+    let y = m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1];
+    let z = m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2];
+    let w = m[0][3] * p[0] + m[1][3] * p[1] + m[2][3] * p[2] + m[3][3];
+    let inv_w = if w.abs() > 1e-5 { 1.0 / w } else { 1.0 };
+    ProjectedPoint {
+        pos: [x * inv_w, y * inv_w],
+        depth: (z * inv_w).clamp(0.0, 1.0),
+    }
+}
+
+fn push_cube_edge(
+    out: &mut Vec<CubeEdgeVertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    half_w_px: f32,
+    ndcx: f32,
+    ndcy: f32,
+    color: [f32; 3],
+    intensity: f32,
+) {
+    let dx_px = (b[0] - a[0]) / ndcx;
+    let dy_px = (b[1] - a[1]) / ndcy;
+    let len = (dx_px * dx_px + dy_px * dy_px).sqrt().max(1e-6);
+    let perp_x_ndc = (-dy_px / len * half_w_px) * ndcx;
+    let perp_y_ndc = (dx_px / len * half_w_px) * ndcy;
+    let am = [a[0] - perp_x_ndc, a[1] - perp_y_ndc];
+    let ap = [a[0] + perp_x_ndc, a[1] + perp_y_ndc];
+    let bp = [b[0] + perp_x_ndc, b[1] + perp_y_ndc];
+    let bm = [b[0] - perp_x_ndc, b[1] - perp_y_ndc];
+    for (pos, uv) in [
+        (am, [0.0, -1.0]),
+        (bm, [1.0, -1.0]),
+        (bp, [1.0, 1.0]),
+        (am, [0.0, -1.0]),
+        (bp, [1.0, 1.0]),
+        (ap, [0.0, 1.0]),
+    ] {
+        out.push(CubeEdgeVertex {
+            pos,
+            uv,
+            kind: 1.0,
+            color,
+            intensity,
+        });
+    }
+}
+
+fn push_cube_corner(
+    out: &mut Vec<CubeEdgeVertex>,
+    c: [f32; 2],
+    r_px: f32,
+    ndcx: f32,
+    ndcy: f32,
+    color: [f32; 3],
+    intensity: f32,
+) {
+    let rx = r_px * ndcx;
+    let ry = r_px * ndcy;
+    let tl = [c[0] - rx, c[1] + ry];
+    let tr = [c[0] + rx, c[1] + ry];
+    let bl = [c[0] - rx, c[1] - ry];
+    let br = [c[0] + rx, c[1] - ry];
+    for (pos, uv) in [
+        (tl, [-1.0, 1.0]),
+        (bl, [-1.0, -1.0]),
+        (br, [1.0, -1.0]),
+        (tl, [-1.0, 1.0]),
+        (br, [1.0, -1.0]),
+        (tr, [1.0, 1.0]),
+    ] {
+        out.push(CubeEdgeVertex {
+            pos,
+            uv,
+            kind: 0.0,
+            color,
+            intensity,
+        });
+    }
+}
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
+    let f = 1.0 / (fovy * 0.5).tan();
+    [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, far / (near - far), -1.0],
+        [0.0, 0.0, (far * near) / (near - far), 0.0],
+    ]
+}
+
+fn translation(x: f32, y: f32, z: f32) -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [x, y, z, 1.0],
+    ]
+}
+
+fn rotation_x(a: f32) -> [[f32; 4]; 4] {
+    let (s, c) = a.sin_cos();
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, c, s, 0.0],
+        [0.0, -s, c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn rotation_y(a: f32) -> [[f32; 4]; 4] {
+    let (s, c) = a.sin_cos();
+    [
+        [c, 0.0, -s, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [s, 0.0, c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0; 4]; 4];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c][r] =
+                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
+        }
+    }
+    out
+}
+
+const CUBE_SHADER: &str = r#"
+struct U { mvp: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+
+struct VsIn {
+  @location(0) pos: vec3<f32>,
+  @location(1) color: vec3<f32>,
+};
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) color: vec3<f32>,
+  @location(1) local: vec3<f32>,
+};
+
+@vertex
+fn vs(in: VsIn) -> VsOut {
+  var out: VsOut;
+  out.pos = u.mvp * vec4<f32>(in.pos, 1.0);
+  out.color = in.color;
+  out.local = in.pos;
+  return out;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+  let a = abs(in.local);
+  let near_x = smoothstep(0.46, 0.66, a.x);
+  let near_y = smoothstep(0.46, 0.66, a.y);
+  let near_z = smoothstep(0.46, 0.66, a.z);
+  let edge = clamp(near_x * near_y + near_x * near_z + near_y * near_z, 0.0, 1.0);
+  let pulse = 0.82 + 0.18 * sin((in.local.x + in.local.y + in.local.z) * 9.0);
+  let face = vec3<f32>(0.02, 0.10, 0.14);
+  let tron = vec3<f32>(0.25, 1.05, 1.25) * (1.25 + edge * 1.8 * pulse);
+  let hot = vec3<f32>(1.0, 1.0, 1.0) * edge * 0.9;
+  let color = mix(face, tron + hot, edge);
+  return vec4<f32>(color, 0.94);
+}
+
+struct EdgeIn {
+  @location(0) pos: vec2<f32>,
+  @location(1) uv: vec2<f32>,
+  @location(2) kind: f32,
+  @location(3) color: vec3<f32>,
+  @location(4) intensity: f32,
+};
+
+struct EdgeOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) kind: f32,
+  @location(2) color: vec3<f32>,
+  @location(3) intensity: f32,
+};
+
+@vertex
+fn vs_edge(in: EdgeIn) -> EdgeOut {
+  var out: EdgeOut;
+  out.pos = vec4<f32>(in.pos, 0.0, 1.0);
+  out.uv = in.uv;
+  out.kind = in.kind;
+  out.color = in.color;
+  out.intensity = in.intensity;
+  return out;
+}
+
+@fragment
+fn fs_edge(in: EdgeOut) -> @location(0) vec4<f32> {
+  let kind = i32(in.kind + 0.5);
+  if (kind == 0) {
+    let r = length(in.uv);
+    let ring = exp(-pow((r - 0.58) * 4.2, 2.0));
+    let pip = exp(-pow(r * 4.2, 2.0));
+    let halo = exp(-r * 2.0) * 0.65 * smoothstep(1.08, 0.45, r);
+    let core = clamp(ring + pip, 0.0, 1.0);
+    let lum = (core + halo) * in.intensity;
+    let col = mix(in.color, vec3<f32>(1.0, 1.0, 1.0), smoothstep(0.45, 1.0, core));
+    return vec4<f32>(col * lum, clamp(lum, 0.0, 1.0));
+  }
+
+  let d = abs(in.uv.y);
+  let core = smoothstep(0.22, 0.0, d);
+  let halo = exp(-pow(d * 2.0, 2.0)) * 0.55;
+  let pulse = exp(-pow(abs(in.uv.x - 0.5) * 4.2, 2.0)) * 0.35;
+  let lum = (core + halo + pulse) * in.intensity;
+  let col = mix(in.color, vec3<f32>(1.0, 1.0, 1.0), smoothstep(0.35, 1.0, core + pulse));
+  return vec4<f32>(col * lum, clamp(lum, 0.0, 1.0));
+}
+"#;

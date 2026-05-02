@@ -1,3 +1,2 @@
-/target
-.claude/
-/models/*.onnx
+target/
+notes/.zk/notebook.db

@@ -35,6 +35,7 @@ struct App {
     prox_src: proximity::SharedProx,
     hand_src: pipeline::SharedHand,
     mask_src: pipeline::SharedMask,
+    pointer_src: pipeline::SharedPointer,
     window: Option<Arc<Window>>,
     gfx: Option<gfx::Gfx>,
 }
@@ -55,6 +56,7 @@ impl ApplicationHandler for App {
             self.prox_src.clone(),
             self.hand_src.clone(),
             self.mask_src.clone(),
+            self.pointer_src.clone(),
             (RGB_W, RGB_H),
             (IR_W, IR_H),
         ))
@@ -161,18 +163,17 @@ fn main() -> Result<()> {
             }
         };
 
-    // Refiners chain: detect flashlight state, subtract static IR background,
-    // then mask the RGB image with the resulting foreground signal.
+    // IR remains available as an auxiliary/debug signal, but the default
+    // tracking path now feeds raw RGB into ROI + landmark stages.
     let refiners: Vec<Box<dyn refiners::FrameContextRefiner>> = vec![
         Box::new(refiners::FlashlightDetectorRefiner::new()),
         Box::new(refiners::TemporalSubtractionRefiner::new()),
-        Box::new(refiners::RgbMaskingRefiner::new()),
     ];
 
     let detector =
         roi::detector::PalmDetector::new("models/hand_detector/model.onnx").expect("load detector");
 
-    // ROI chain: 1. Neural Palm Detector (on IR diff, with stale-diff fallback), 2. Previous-frame track
+    // ROI chain: 1. Neural Palm Detector on RGB, 2. Previous-frame track.
     let pipe = pipeline::GesturePipeline::new(
         refiners,
         Box::new(roi::CompositeRoiHinter::new(vec![
@@ -186,6 +187,7 @@ fn main() -> Result<()> {
     let pipeline::PipelineOutputs {
         hand: hand_src,
         mask: mask_src,
+        pointer: pointer_src,
     } = pipeline::spawn(rgb_src.clone(), ir_src.clone(), prox_src.clone(), pipe);
 
     let event_loop = EventLoop::new()?;
@@ -196,6 +198,7 @@ fn main() -> Result<()> {
         prox_src,
         hand_src,
         mask_src,
+        pointer_src,
         window: None,
         gfx: None,
     };

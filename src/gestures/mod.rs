@@ -38,6 +38,7 @@ impl GestureClassifier for RuleBasedClassifier {
         }
         let p = &lm.points;
         let palm = palm_size(p).max(1e-3);
+        let palm_center = palm_center(p);
 
         let pinch = dist(p[4], p[8]) / palm;
         let index_ext = is_extended(p, 5, 6, 7, 8);
@@ -45,16 +46,27 @@ impl GestureClassifier for RuleBasedClassifier {
         let ring_ext = is_extended(p, 13, 14, 15, 16);
         let pinky_ext = is_extended(p, 17, 18, 19, 20);
         let thumb_ext = is_thumb_extended(p);
+        let index_curled = is_curled(p, 5, 8, palm);
+        let middle_curled = is_curled(p, 9, 12, palm);
+        let ring_curled = is_curled(p, 13, 16, palm);
+        let pinky_curled = is_curled(p, 17, 20, palm);
 
         let extended = [index_ext, middle_ext, ring_ext, pinky_ext];
         let n_ext = extended.iter().filter(|x| **x).count();
+        let curled = [index_curled, middle_curled, ring_curled, pinky_curled];
+        let n_curled = curled.iter().filter(|x| **x).count();
+        let is_thumbs_up = n_curled >= 3 && is_thumb_up(p, palm);
+        let is_closed_fist = n_curled >= 4 || (n_ext == 0 && !is_thumbs_up);
+        let index_available_for_pinch =
+            index_ext || dist(p[8], palm_center) > dist(p[5], palm_center) + palm * 0.35;
+        let is_pinch = pinch < self.pinch_threshold && index_available_for_pinch && !is_closed_fist;
 
         // Pinch dominates: thumb tip and index tip touching.
-        if pinch < self.pinch_threshold && !middle_ext && !ring_ext && !pinky_ext {
+        if is_pinch {
             return Some(Gesture::Pinch);
         }
         // Thumbs up: only thumb extended, others curled, thumb roughly above wrist.
-        if thumb_ext && n_ext == 0 && p[4].y < p[0].y {
+        if thumb_ext && is_thumbs_up {
             return Some(Gesture::ThumbsUp);
         }
         // Point: only index extended.
@@ -65,8 +77,10 @@ impl GestureClassifier for RuleBasedClassifier {
         if n_ext == 4 {
             return Some(Gesture::Open);
         }
-        // Fist: none extended.
-        if n_ext == 0 && !thumb_ext {
+        // Fist: fingers curled toward the palm. The curl rule is intentionally
+        // looser than the extension rule because real model outputs often keep
+        // fingertip distances noisy when the hand is closed.
+        if is_closed_fist {
             return Some(Gesture::Fist);
         }
         Some(Gesture::Unknown)
@@ -96,4 +110,30 @@ fn is_thumb_extended(p: &[Vec3; 21]) -> bool {
     // Thumb runs ~lateral; use distance from wrist with a slightly looser threshold.
     let wrist = p[0];
     dist(p[4], wrist) > dist(p[2], wrist) * 1.10
+}
+
+fn is_thumb_up(p: &[Vec3; 21], palm: f32) -> bool {
+    // Image y grows downward. Require a distinctly vertical thumb, not just a
+    // thumb that happens to sit slightly above the wrist in a closed fist.
+    p[4].y < p[2].y - palm * 0.20 && p[4].y < p[0].y - palm * 0.25
+}
+
+fn is_curled(p: &[Vec3; 21], mcp: usize, tip: usize, palm: f32) -> bool {
+    let center = palm_center(p);
+    dist(p[tip], center) < dist(p[mcp], center) + palm * 0.75
+}
+
+fn palm_center(p: &[Vec3; 21]) -> Vec3 {
+    let ids = [0, 5, 9, 13, 17];
+    let mut c = Vec3::default();
+    for i in ids {
+        c.x += p[i].x;
+        c.y += p[i].y;
+        c.z += p[i].z;
+    }
+    Vec3 {
+        x: c.x / ids.len() as f32,
+        y: c.y / ids.len() as f32,
+        z: c.z / ids.len() as f32,
+    }
 }

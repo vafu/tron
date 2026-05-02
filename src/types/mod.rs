@@ -122,6 +122,17 @@ pub struct HandState {
     pub debug_image: Option<Image>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PointerState {
+    /// Normalized pointer position in the active tracking coordinate space.
+    /// The current RGB-first demo uses image-normalized x/y and reserves z for
+    /// future depth fusion.
+    pub position: Vec3,
+    pub grabbed: bool,
+    pub confidence: f32,
+    pub timestamp: Instant,
+}
+
 pub struct FrameContext {
     pub rgb: Image,
     pub ir: Image,

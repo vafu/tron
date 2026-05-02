@@ -5,21 +5,26 @@ use crate::landmarker::HandLandmarker;
 use crate::proximity::SharedProx;
 use crate::refiners::FrameContextRefiner;
 use crate::roi::RoiHinter;
-pub use crate::types::{FrameContext, HandLandmarks, HandState, Image};
+pub use crate::types::{
+    FrameContext, Gesture, HandLandmarks, HandState, Image, PointerState, Vec3,
+};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 pub type SharedHand = Arc<Mutex<Option<HandState>>>;
 pub type SharedMask = Arc<Mutex<Option<Image>>>;
+pub type SharedPointer = Arc<Mutex<Option<PointerState>>>;
 
 pub struct PipelineOutputs {
     pub hand: SharedHand,
     pub mask: SharedMask,
+    pub pointer: SharedPointer,
 }
 
 pub struct StepOutput {
     pub state: Option<HandState>,
+    pub pointer: Option<PointerState>,
     /// Final IR-diff grayscale image visible to the UI (post-refiner).
     pub ir_diff: Option<Image>,
 }
@@ -97,6 +102,7 @@ impl GesturePipeline {
             }
             return StepOutput {
                 state: None,
+                pointer: None,
                 ir_diff,
             };
         };
@@ -111,6 +117,7 @@ impl GesturePipeline {
             }
             return StepOutput {
                 state: None,
+                pointer: None,
                 ir_diff,
             };
         };
@@ -121,6 +128,7 @@ impl GesturePipeline {
         let t_gest = Instant::now();
         let gesture = self.gestures.classify(&ctx, &smoothed);
         let gest_us = t_gest.elapsed().as_micros() as u32;
+        let pointer = Some(pointer_from_landmarks(&smoothed, gesture));
 
         self.transition(StepOutcome::Ok, had_last, &ctx);
         if trace {
@@ -141,6 +149,7 @@ impl GesturePipeline {
                 gesture,
                 debug_image: Some(ctx.rgb.clone()),
             }),
+            pointer,
             ir_diff,
         }
     }
@@ -203,6 +212,37 @@ impl GesturePipeline {
     }
 }
 
+fn pointer_from_landmarks(lm: &HandLandmarks, gesture: Option<Gesture>) -> PointerState {
+    let grabbed = gesture == Some(Gesture::Fist);
+    let position = if grabbed {
+        let thumb = lm.points[4];
+        let index = lm.points[8];
+        Vec3 {
+            x: (thumb.x + index.x) * 0.5,
+            y: (thumb.y + index.y) * 0.5,
+            z: 0.0,
+        }
+    } else {
+        let mut sum = Vec3::default();
+        for p in &lm.points {
+            sum.x += p.x;
+            sum.y += p.y;
+        }
+        Vec3 {
+            x: sum.x / lm.points.len() as f32,
+            y: sum.y / lm.points.len() as f32,
+            z: 0.0,
+        }
+    };
+
+    PointerState {
+        position,
+        grabbed,
+        confidence: lm.presence,
+        timestamp: lm.timestamp,
+    }
+}
+
 pub fn spawn(
     rgb: SharedImage,
     ir: SharedImage,
@@ -211,8 +251,10 @@ pub fn spawn(
 ) -> PipelineOutputs {
     let out: SharedHand = Arc::new(Mutex::new(None));
     let mask: SharedMask = Arc::new(Mutex::new(None));
+    let pointer: SharedPointer = Arc::new(Mutex::new(None));
     let publish = out.clone();
     let publish_mask = mask.clone();
+    let publish_pointer = pointer.clone();
 
     thread::Builder::new()
         .name("gesture".into())
@@ -255,8 +297,13 @@ pub fn spawn(
                     now: Instant::now(),
                 };
 
-                let StepOutput { state, ir_diff } = pipeline.step(ctx);
+                let StepOutput {
+                    state,
+                    pointer,
+                    ir_diff,
+                } = pipeline.step(ctx);
                 *publish_mask.lock().unwrap() = ir_diff;
+                *publish_pointer.lock().unwrap() = pointer;
                 last = state.as_ref().map(|s| s.landmarks.clone()).or(last);
                 *publish.lock().unwrap() = state;
 
@@ -269,5 +316,9 @@ pub fn spawn(
             }
         })
         .expect("spawn gesture thread");
-    PipelineOutputs { hand: out, mask }
+    PipelineOutputs {
+        hand: out,
+        mask,
+        pointer,
+    }
 }

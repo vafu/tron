@@ -20,11 +20,21 @@ pub struct PalmDetector {
     pad: f32,
     frame: u64,
     source: DetectorSource,
+    last_timing_log: std::time::Instant,
+    timing: DetectorTiming,
     /// Most recent IR-diff seen — reused when the current frame has none
     /// (e.g. flashlight just toggled off). Without this, the detector falls
     /// through to the next hinter on every flashlight-off frame and the ROI
     /// geometry flips between detector- and tracker-sized rects.
     last_diff: Option<Image>,
+}
+
+#[derive(Default)]
+struct DetectorTiming {
+    frames: u32,
+    prep_us: u64,
+    run_us: u64,
+    decode_us: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +90,8 @@ impl PalmDetector {
             pad: 0.20,
             frame: 0,
             source,
+            last_timing_log: std::time::Instant::now(),
+            timing: DetectorTiming::default(),
             last_diff: None,
         })
     }
@@ -93,37 +105,52 @@ impl PalmDetector {
         let dx = (self.input_size as i32 - nw) / 2;
         let dy = (self.input_size as i32 - nh) / 2;
 
-        let mut input =
-            Array4::<f32>::zeros((1, 3, self.input_size as usize, self.input_size as usize));
-        for oy in 0..self.input_size as i32 {
-            let ly = oy - dy;
-            if !(0..nh).contains(&ly) {
-                continue;
-            }
-            let sy = ((ly as f32 + 0.5) / scale).floor().clamp(0.0, h - 1.0) as usize;
-            for ox in 0..self.input_size as i32 {
-                let lx = ox - dx;
-                if !(0..nw).contains(&lx) {
+        let t_prep = std::time::Instant::now();
+        let mut input;
+        {
+            let _span =
+                tracing::debug_span!("roi.palm_detector.prep", source = ?self.source).entered();
+            input =
+                Array4::<f32>::zeros((1, 3, self.input_size as usize, self.input_size as usize));
+            for oy in 0..self.input_size as i32 {
+                let ly = oy - dy;
+                if !(0..nh).contains(&ly) {
                     continue;
                 }
-                let sx = ((lx as f32 + 0.5) / scale).floor().clamp(0.0, w - 1.0) as usize;
-                let px = signal.sample_rgb(sx, sy);
-                let y = oy as usize;
-                let x = ox as usize;
-                input[[0, 0, y, x]] = px[0] as f32 / 127.5 - 1.0;
-                input[[0, 1, y, x]] = px[1] as f32 / 127.5 - 1.0;
-                input[[0, 2, y, x]] = px[2] as f32 / 127.5 - 1.0;
+                let sy = ((ly as f32 + 0.5) / scale).floor().clamp(0.0, h - 1.0) as usize;
+                for ox in 0..self.input_size as i32 {
+                    let lx = ox - dx;
+                    if !(0..nw).contains(&lx) {
+                        continue;
+                    }
+                    let sx = ((lx as f32 + 0.5) / scale).floor().clamp(0.0, w - 1.0) as usize;
+                    let px = signal.sample_rgb(sx, sy);
+                    let y = oy as usize;
+                    let x = ox as usize;
+                    input[[0, 0, y, x]] = px[0] as f32 / 127.5 - 1.0;
+                    input[[0, 1, y, x]] = px[1] as f32 / 127.5 - 1.0;
+                    input[[0, 2, y, x]] = px[2] as f32 / 127.5 - 1.0;
+                }
             }
         }
+        self.timing.prep_us += t_prep.elapsed().as_micros() as u64;
 
         let tensor = Tensor::from_array(input)?;
         let input_map: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
             vec![(self.input_name.as_str().into(), tensor.into())];
-        let outputs = self
-            .session
-            .run(input_map)
-            .map_err(|e| anyhow!("ort run: {e}"))?;
+        let t_run = std::time::Instant::now();
+        let outputs = {
+            let _span =
+                tracing::debug_span!("roi.palm_detector.ort", source = ?self.source).entered();
+            self.session
+                .run(input_map)
+                .map_err(|e| anyhow!("ort run: {e}"))?
+        };
+        self.timing.run_us += t_run.elapsed().as_micros() as u64;
 
+        let t_decode = std::time::Instant::now();
+        let _span =
+            tracing::debug_span!("roi.palm_detector.decode", source = ?self.source).entered();
         let scores_out = outputs
             .iter()
             .find(|o| {
@@ -148,6 +175,8 @@ impl PalmDetector {
             .1
             .try_extract_tensor::<f32>()
             .map_err(|e| anyhow!("ort extract: {e}"))?;
+        self.timing.decode_us += t_decode.elapsed().as_micros() as u64;
+        self.timing.frames += 1;
 
         let scores: &[f32] = &raw_scores;
         let boxes: &[f32] = &raw_boxes;
@@ -200,6 +229,24 @@ impl PalmDetector {
 
         Ok(None)
     }
+
+    fn log_timing(&mut self) {
+        if self.last_timing_log.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        let n = self.timing.frames.max(1) as f32;
+        tracing::debug!(
+            target: "tron::roi",
+            source = ?self.source,
+            fps = self.timing.frames as f32 / self.last_timing_log.elapsed().as_secs_f32(),
+            prep_ms = self.timing.prep_us as f32 / n / 1000.0,
+            ort_ms = self.timing.run_us as f32 / n / 1000.0,
+            decode_ms = self.timing.decode_us as f32 / n / 1000.0,
+            "palm detector timing"
+        );
+        self.last_timing_log = std::time::Instant::now();
+        self.timing = DetectorTiming::default();
+    }
 }
 
 impl RoiHinter for PalmDetector {
@@ -239,7 +286,10 @@ impl RoiHinter for PalmDetector {
             }
         };
 
-        match self.run_model(&input) {
+        let model_result = self.run_model(&input);
+        self.log_timing();
+
+        match model_result {
             Ok(Some(rect)) => {
                 let mapped = match self.source {
                     DetectorSource::Rgb => rect.padded(self.pad),

@@ -106,7 +106,10 @@ impl HandLandmarker for MediaPipeHandLandmarker {
         let roi = roi.unwrap_or(RectNorm::FULL);
         // Expand ROI to a square in source-image pixel space (covering the whole hand).
         let crop = square_crop(&roi, ctx.rgb.width, ctx.rgb.height);
-        let input = preprocess(&ctx.rgb, &crop, self.input_size);
+        let input = {
+            let _span = tracing::debug_span!("landmarker.mediapipe.prep").entered();
+            preprocess(&ctx.rgb, &crop, self.input_size)
+        };
 
         let tensor = match Tensor::from_array(input) {
             Ok(t) => t,
@@ -118,15 +121,19 @@ impl HandLandmarker for MediaPipeHandLandmarker {
 
         let input_map: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
             vec![(self.input_name.as_str().into(), tensor.into())];
-        let outputs = match self.session.run(input_map) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("mediapipe run: {e}");
-                return None;
+        let outputs = {
+            let _span = tracing::debug_span!("landmarker.mediapipe.ort").entered();
+            match self.session.run(input_map) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("mediapipe run: {e}");
+                    return None;
+                }
             }
         };
 
         // Landmarks tensor: indexable by usize.
+        let _span = tracing::debug_span!("landmarker.mediapipe.decode").entered();
         let lm_out = &outputs[self.landmarks_output];
         let (_shape, raw_slice) = match lm_out.try_extract_tensor::<f32>() {
             Ok(v) => v,

@@ -76,6 +76,7 @@ impl GesturePipeline {
     }
 
     pub fn step(&mut self, mut ctx: FrameContext) -> StepOutput {
+        let _step_span = tracing::debug_span!("pipeline.step", frame = self.frame).entered();
         self.frame = self.frame.wrapping_add(1);
         let had_last = ctx.last.is_some();
         let trace = self.frame % 30 == 0;
@@ -85,7 +86,10 @@ impl GesturePipeline {
         let mut refiner_us: [u32; 8] = [0; 8];
         for (i, r) in self.refiners.iter_mut().enumerate() {
             let t = Instant::now();
-            r.refine(&mut ctx);
+            {
+                let _span = tracing::debug_span!("pipeline.refiner", index = i).entered();
+                r.refine(&mut ctx);
+            }
             if trace && i < refiner_us.len() {
                 refiner_us[i] = t.elapsed().as_micros() as u32;
             }
@@ -93,7 +97,10 @@ impl GesturePipeline {
         let ir_diff = ctx.ir_diff.clone();
 
         let t_roi = Instant::now();
-        let (roi, _debug) = self.roi.hint(&ctx);
+        let (roi, _debug) = {
+            let _span = tracing::debug_span!("pipeline.roi").entered();
+            self.roi.hint(&ctx)
+        };
         let roi_us = t_roi.elapsed().as_micros() as u32;
         let Some(roi) = roi else {
             self.transition(StepOutcome::NoRoi, had_last, &ctx);
@@ -108,7 +115,10 @@ impl GesturePipeline {
         };
 
         let t_lm = Instant::now();
-        let raw = self.lm.run(&ctx, Some(roi));
+        let raw = {
+            let _span = tracing::debug_span!("pipeline.landmarker").entered();
+            self.lm.run(&ctx, Some(roi))
+        };
         let lm_us = t_lm.elapsed().as_micros() as u32;
         let Some(raw) = raw else {
             self.transition(StepOutcome::NoLandmarks, had_last, &ctx);
@@ -123,10 +133,17 @@ impl GesturePipeline {
         };
 
         let t_filter = Instant::now();
-        let smoothed = self.filter.apply(raw);
+        let smoothed = {
+            let _span = tracing::debug_span!("pipeline.filter").entered();
+            self.filter.apply(raw)
+        };
         let filter_us = t_filter.elapsed().as_micros() as u32;
         let t_gest = Instant::now();
-        let gesture = self.gestures.classify(&ctx, &smoothed);
+        let classification = {
+            let _span = tracing::debug_span!("pipeline.gesture_classifier").entered();
+            self.gestures.classify(&ctx, &smoothed)
+        };
+        let gesture = classification.gesture;
         let gest_us = t_gest.elapsed().as_micros() as u32;
         let pointer = Some(pointer_from_landmarks(&smoothed, gesture));
 
@@ -147,6 +164,7 @@ impl GesturePipeline {
                 roi,
                 landmarks: smoothed,
                 gesture,
+                gesture_features: classification.features,
                 debug_image: Some(ctx.rgb.clone()),
             }),
             pointer,
@@ -266,9 +284,14 @@ pub fn spawn(
 
             loop {
                 let t_lock = Instant::now();
-                let rgb_img = rgb.lock().unwrap().clone();
-                let ir_img = ir.lock().unwrap().clone();
-                let prox_v = *prox.lock().unwrap();
+                let (rgb_img, ir_img, prox_v) = {
+                    let _span = tracing::debug_span!("pipeline.input_lock").entered();
+                    (
+                        rgb.lock().unwrap().clone(),
+                        ir.lock().unwrap().clone(),
+                        *prox.lock().unwrap(),
+                    )
+                };
                 let lock_us = t_lock.elapsed().as_micros() as u32;
 
                 let (Some(rgb_img), Some(ir_img)) = (rgb_img, ir_img) else {
@@ -302,10 +325,13 @@ pub fn spawn(
                     pointer,
                     ir_diff,
                 } = pipeline.step(ctx);
-                *publish_mask.lock().unwrap() = ir_diff;
-                *publish_pointer.lock().unwrap() = pointer;
-                last = state.as_ref().map(|s| s.landmarks.clone()).or(last);
-                *publish.lock().unwrap() = state;
+                {
+                    let _span = tracing::debug_span!("pipeline.publish").entered();
+                    *publish_mask.lock().unwrap() = ir_diff;
+                    *publish_pointer.lock().unwrap() = pointer;
+                    last = state.as_ref().map(|s| s.landmarks.clone()).or(last);
+                    *publish.lock().unwrap() = state;
+                }
 
                 if frame % 30 == 0 {
                     eprintln!(

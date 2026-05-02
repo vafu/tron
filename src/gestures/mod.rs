@@ -1,5 +1,5 @@
 use crate::pipeline::FrameContext;
-use crate::types::{Gesture, HandLandmarks, Vec3};
+use crate::types::{Gesture, GestureClassification, GestureFeatures, HandLandmarks, Vec3};
 
 /// Gesture classification stage.
 ///
@@ -7,7 +7,7 @@ use crate::types::{Gesture, HandLandmarks, Vec3};
 /// sensor state in `FrameContext`; replacing rules with a learned model should
 /// only require swapping this trait object in `main.rs`.
 pub trait GestureClassifier: Send {
-    fn classify(&mut self, ctx: &FrameContext, lm: &HandLandmarks) -> Option<Gesture>;
+    fn classify(&mut self, ctx: &FrameContext, lm: &HandLandmarks) -> GestureClassification;
 }
 
 /// Geometric rules over the 21-keypoint topology. Cheap, deterministic, no
@@ -32,20 +32,18 @@ impl Default for RuleBasedClassifier {
 }
 
 impl GestureClassifier for RuleBasedClassifier {
-    fn classify(&mut self, _ctx: &FrameContext, lm: &HandLandmarks) -> Option<Gesture> {
+    fn classify(&mut self, _ctx: &FrameContext, lm: &HandLandmarks) -> GestureClassification {
         if lm.presence < 0.5 {
-            return None;
+            return GestureClassification::default();
         }
         let p = &lm.points;
         let palm = palm_size(p).max(1e-3);
-        let palm_center = palm_center(p);
 
         let pinch = dist(p[4], p[8]) / palm;
         let index_ext = is_extended(p, 5, 6, 7, 8);
         let middle_ext = is_extended(p, 9, 10, 11, 12);
         let ring_ext = is_extended(p, 13, 14, 15, 16);
         let pinky_ext = is_extended(p, 17, 18, 19, 20);
-        let thumb_ext = is_thumb_extended(p);
         let index_curled = is_curled(p, 5, 8, palm);
         let middle_curled = is_curled(p, 9, 12, palm);
         let ring_curled = is_curled(p, 13, 16, palm);
@@ -55,35 +53,46 @@ impl GestureClassifier for RuleBasedClassifier {
         let n_ext = extended.iter().filter(|x| **x).count();
         let curled = [index_curled, middle_curled, ring_curled, pinky_curled];
         let n_curled = curled.iter().filter(|x| **x).count();
-        let is_thumbs_up = n_curled >= 3 && is_thumb_up(p, palm);
-        let is_closed_fist = n_curled >= 4 || (n_ext == 0 && !is_thumbs_up);
-        let index_available_for_pinch =
-            index_ext || dist(p[8], palm_center) > dist(p[5], palm_center) + palm * 0.35;
-        let is_pinch = pinch < self.pinch_threshold && index_available_for_pinch && !is_closed_fist;
+        let fist_score = fist_score(p, palm, &curled);
+        let thumb_up = n_curled >= 3 && is_thumb_up(p, palm);
+        let features = GestureFeatures {
+            pinch,
+            extended: n_ext as u8,
+            curled: n_curled as u8,
+            thumb_up,
+            fist_score,
+        };
 
-        // Pinch dominates: thumb tip and index tip touching.
-        if is_pinch {
-            return Some(Gesture::Pinch);
+        // Demo priority: make grab reliable first. A closed hand wins over
+        // incidental thumb/index proximity, which currently makes pinch noisy.
+        if fist_score >= 0.72 {
+            return GestureClassification {
+                gesture: Some(Gesture::Fist),
+                features,
+            };
         }
-        // Thumbs up: only thumb extended, others curled, thumb roughly above wrist.
-        if thumb_ext && is_thumbs_up {
-            return Some(Gesture::ThumbsUp);
+        if n_ext == 4 && fist_score < 0.35 {
+            return GestureClassification {
+                gesture: Some(Gesture::Open),
+                features,
+            };
         }
-        // Point: only index extended.
-        if index_ext && !middle_ext && !ring_ext && !pinky_ext {
-            return Some(Gesture::Point);
+        if index_ext && !middle_ext && !ring_ext && !pinky_ext && fist_score < 0.55 {
+            return GestureClassification {
+                gesture: Some(Gesture::Point),
+                features,
+            };
         }
-        // Open palm: all four fingers extended.
-        if n_ext == 4 {
-            return Some(Gesture::Open);
+        if pinch < self.pinch_threshold && fist_score < 0.50 {
+            return GestureClassification {
+                gesture: Some(Gesture::Pinch),
+                features,
+            };
         }
-        // Fist: fingers curled toward the palm. The curl rule is intentionally
-        // looser than the extension rule because real model outputs often keep
-        // fingertip distances noisy when the hand is closed.
-        if is_closed_fist {
-            return Some(Gesture::Fist);
+        GestureClassification {
+            gesture: Some(Gesture::Unknown),
+            features,
         }
-        Some(Gesture::Unknown)
     }
 }
 
@@ -106,12 +115,6 @@ fn is_extended(p: &[Vec3; 21], _mcp: usize, pip: usize, _dip: usize, tip: usize)
     dist(p[tip], wrist) > dist(p[pip], wrist) * 1.10
 }
 
-fn is_thumb_extended(p: &[Vec3; 21]) -> bool {
-    // Thumb runs ~lateral; use distance from wrist with a slightly looser threshold.
-    let wrist = p[0];
-    dist(p[4], wrist) > dist(p[2], wrist) * 1.10
-}
-
 fn is_thumb_up(p: &[Vec3; 21], palm: f32) -> bool {
     // Image y grows downward. Require a distinctly vertical thumb, not just a
     // thumb that happens to sit slightly above the wrist in a closed fist.
@@ -120,7 +123,16 @@ fn is_thumb_up(p: &[Vec3; 21], palm: f32) -> bool {
 
 fn is_curled(p: &[Vec3; 21], mcp: usize, tip: usize, palm: f32) -> bool {
     let center = palm_center(p);
-    dist(p[tip], center) < dist(p[mcp], center) + palm * 0.75
+    dist(p[tip], center) < dist(p[mcp], center) + palm * 0.55
+}
+
+fn fist_score(p: &[Vec3; 21], palm: f32, curled: &[bool; 4]) -> f32 {
+    let center = palm_center(p);
+    let curl_count = curled.iter().filter(|x| **x).count() as f32 / curled.len() as f32;
+    let tips = [8, 12, 16, 20];
+    let mean_tip_dist = tips.iter().map(|&i| dist(p[i], center)).sum::<f32>() / tips.len() as f32;
+    let compactness = (1.25 - mean_tip_dist / palm).clamp(0.0, 1.0);
+    (curl_count * 0.65 + compactness * 0.35).clamp(0.0, 1.0)
 }
 
 fn palm_center(p: &[Vec3; 21]) -> Vec3 {

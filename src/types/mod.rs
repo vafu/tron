@@ -113,11 +113,36 @@ impl Gesture {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GestureFeatures {
+    pub pinch: f32,
+    pub extended: u8,
+    pub curled: u8,
+    pub thumb_up: bool,
+    pub fist_score: f32,
+}
+
+impl GestureFeatures {
+    pub fn summary(self) -> String {
+        format!(
+            "pinch={:.2} ext={} curl={} fist={:.2} thumb_up={}",
+            self.pinch, self.extended, self.curled, self.fist_score, self.thumb_up
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GestureClassification {
+    pub gesture: Option<Gesture>,
+    pub features: GestureFeatures,
+}
+
 #[derive(Clone)]
 pub struct HandState {
     pub roi: RectNorm,
     pub landmarks: HandLandmarks,
     pub gesture: Option<Gesture>,
+    pub gesture_features: GestureFeatures,
     /// The final refined RGB image that was sent to the landmarker.
     pub debug_image: Option<Image>,
 }

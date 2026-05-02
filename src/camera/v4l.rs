@@ -3,7 +3,7 @@ use crate::types::{Image, PixelFormat};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use v4l::FourCC;
 use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
@@ -62,23 +62,54 @@ fn run(config: &StreamConfig, fourcc: FourCC, decoder: Decoder, shared: SharedIm
     // We always publish RGBA (camera frames double as a renderable texture).
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     let mut seq: u64 = 0;
+    let mut last_log = Instant::now();
+    let mut frames: u32 = 0;
+    let mut decode_us: u64 = 0;
+    let mut publish_us: u64 = 0;
 
     loop {
         let (buf, _meta) = stream.next()?;
-        match decoder {
-            Decoder::Yuyv => yuyv_to_rgba(buf, &mut rgba),
-            Decoder::Grey => grey_to_rgba(buf, &mut rgba),
+        let t_decode = Instant::now();
+        {
+            let _span = tracing::debug_span!("camera.decode", path = %config.path).entered();
+            match decoder {
+                Decoder::Yuyv => yuyv_to_rgba(buf, &mut rgba),
+                Decoder::Grey => grey_to_rgba(buf, &mut rgba),
+            }
         }
+        decode_us += t_decode.elapsed().as_micros() as u64;
         seq = seq.wrapping_add(1);
-        let img = Image {
-            data: rgba.clone(),
-            width: w,
-            height: h,
-            format: PixelFormat::Rgba8,
-            timestamp: Instant::now(),
-            seq,
-        };
-        *shared.lock().unwrap() = Some(img);
+        let t_publish = Instant::now();
+        {
+            let _span = tracing::debug_span!("camera.publish", path = %config.path, seq).entered();
+            let img = Image {
+                data: rgba.clone(),
+                width: w,
+                height: h,
+                format: PixelFormat::Rgba8,
+                timestamp: Instant::now(),
+                seq,
+            };
+            *shared.lock().unwrap() = Some(img);
+        }
+        publish_us += t_publish.elapsed().as_micros() as u64;
+        frames += 1;
+
+        if last_log.elapsed() >= Duration::from_secs(2) {
+            let n = frames.max(1) as f32;
+            tracing::debug!(
+                target: "tron::camera",
+                path = %config.path,
+                fps = frames as f32 / last_log.elapsed().as_secs_f32(),
+                decode_ms = decode_us as f32 / n / 1000.0,
+                publish_ms = publish_us as f32 / n / 1000.0,
+                "camera timing"
+            );
+            last_log = Instant::now();
+            frames = 0;
+            decode_us = 0;
+            publish_us = 0;
+        }
     }
 }
 

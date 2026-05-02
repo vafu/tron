@@ -25,3 +25,16 @@ Acceptance:
 - Window/debug output exposes enough classifier features to tune thresholds.
 - Classifier changes are documented with observed behavior.
 
+Progress:
+
+2026-05-02T14:19:12-07:00
+
+- Added `GestureFeatures` and `GestureClassification` so each classified frame carries tunable feature values.
+- Window title now exposes `pinch`, `extended`, `curled`, `fist_score`, and `thumb_up`.
+- Reworked the rule classifier to prioritize the demo states: fist/grab, open/free, point, then pinch as non-critical.
+- Fist detection now uses a weighted score from curled-finger count and fingertip compactness around the palm.
+- Added runtime flags for focused classifier work: `--classifier-only`, `--no-cube`, `--no-skeleton`, and `--no-classifier-debug`.
+
+Next tuning loop:
+
+Run the app and record the title values for open hand, fist, and accidental pinch-like poses. Tune `fist_score` and curl thresholds from those observed numbers.

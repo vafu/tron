@@ -8,6 +8,7 @@ mod texture;
 use crate::camera::SharedImage;
 use crate::pipeline::{SharedHand, SharedMask, SharedPointer};
 use crate::proximity::SharedProx;
+use crate::types::SharedPipelineControls;
 use anyhow::{Context, Result};
 use cube::CubeRenderer;
 use depth::DepthTexture;
@@ -56,6 +57,7 @@ pub struct Gfx {
     #[allow(dead_code)]
     ir_src: SharedImage,
     prox_src: SharedProx,
+    controls: SharedPipelineControls,
     hand_src: SharedHand,
     mask_src: SharedMask,
     pointer_src: SharedPointer,

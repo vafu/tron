@@ -38,6 +38,7 @@ struct App {
     rgb_src: camera::SharedImage,
     ir_src: camera::SharedImage,
     prox_src: proximity::SharedProx,
+    controls: types::SharedPipelineControls,
     hand_src: pipeline::SharedHand,
     mask_src: pipeline::SharedMask,
     pointer_src: pipeline::SharedPointer,
@@ -136,6 +137,7 @@ impl ApplicationHandler for App {
             self.rgb_src.clone(),
             self.ir_src.clone(),
             self.prox_src.clone(),
+            self.controls.clone(),
             self.hand_src.clone(),
             self.mask_src.clone(),
             self.pointer_src.clone(),
@@ -170,7 +172,7 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                handle_calib_key(code, repeat);
+                handle_key(code, repeat, &self.controls);
             }
             WindowEvent::RedrawRequested => {
                 self.loop_timing.redraws += 1;
@@ -245,7 +247,16 @@ fn init_tracing(perfetto_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn handle_calib_key(code: KeyCode, _repeat: bool) {
+fn handle_key(code: KeyCode, repeat: bool, controls: &types::PipelineControls) {
+    if repeat {
+        return;
+    }
+    if code == KeyCode::KeyI {
+        let enabled = controls.toggle_ir_mask();
+        eprintln!("ir mask: {}", if enabled { "on" } else { "off" });
+        return;
+    }
+
     const NUDGE_OFFSET: f32 = 0.005;
     const NUDGE_SCALE: f32 = 0.01;
     match code {
@@ -392,6 +403,7 @@ fn main() -> Result<()> {
     let rgb_src = camera::spawn_rgb("/dev/video0", RGB_W, RGB_H)?;
     let ir_src = camera::spawn_ir("/dev/video2", IR_W, IR_H)?;
     let prox_src = proximity::spawn("prox", "proximity1")?;
+    let controls = types::PipelineControls::new();
 
     // Try the real MediaPipe model; fall back to mock if the file is missing
     // or the load fails. Run `scripts/download_models.sh` to fetch it.
@@ -409,11 +421,13 @@ fn main() -> Result<()> {
             }
         };
 
-    // IR remains available as an auxiliary/debug signal, but the default
-    // tracking path now feeds raw RGB into ROI + landmark stages.
+    // Indoor experiment: keep RGB as the primary tracking image, but use the
+    // IR foreground signal to dim non-hand background before ROI + landmark
+    // stages. Raw RGB/IR frames are still captured into FrameContext first.
     let refiners: Vec<Box<dyn refiners::FrameContextRefiner>> = vec![
         Box::new(refiners::FlashlightDetectorRefiner::new()),
         Box::new(refiners::TemporalSubtractionRefiner::new()),
+        Box::new(refiners::RgbMaskingRefiner::new()),
     ];
 
     let detector =
@@ -434,7 +448,13 @@ fn main() -> Result<()> {
         hand: hand_src,
         mask: mask_src,
         pointer: pointer_src,
-    } = pipeline::spawn(rgb_src.clone(), ir_src.clone(), prox_src.clone(), pipe);
+    } = pipeline::spawn(
+        rgb_src.clone(),
+        ir_src.clone(),
+        prox_src.clone(),
+        controls.clone(),
+        pipe,
+    );
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -443,6 +463,7 @@ fn main() -> Result<()> {
         rgb_src,
         ir_src,
         prox_src,
+        controls,
         hand_src,
         mask_src,
         pointer_src,

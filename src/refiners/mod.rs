@@ -132,6 +132,9 @@ impl Default for RgbMaskingRefiner {
 
 impl FrameContextRefiner for RgbMaskingRefiner {
     fn refine(&mut self, ctx: &mut FrameContext) {
+        if !ctx.controls.ir_mask_enabled() {
+            return;
+        }
         if let Some(d) = &ctx.ir_diff {
             self.last_diff = Some(d.clone());
         }

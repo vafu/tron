@@ -6,7 +6,8 @@ use crate::proximity::SharedProx;
 use crate::refiners::FrameContextRefiner;
 use crate::roi::RoiHinter;
 pub use crate::types::{
-    FrameContext, Gesture, HandLandmarks, HandState, Image, PointerState, Vec3,
+    FrameContext, Gesture, HandLandmarks, HandState, Image, PointerState, SharedPipelineControls,
+    Vec3,
 };
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -265,6 +266,7 @@ pub fn spawn(
     rgb: SharedImage,
     ir: SharedImage,
     prox: SharedProx,
+    controls: SharedPipelineControls,
     mut pipeline: GesturePipeline,
 ) -> PipelineOutputs {
     let out: SharedHand = Arc::new(Mutex::new(None));
@@ -318,6 +320,7 @@ pub fn spawn(
                     proximity: prox_v,
                     last: last.clone(),
                     now: Instant::now(),
+                    controls: controls.clone(),
                 };
 
                 let StepOutput {

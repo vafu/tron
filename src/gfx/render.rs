@@ -118,9 +118,14 @@ impl Gfx {
 
         // Keep gesture feedback in the overlay; the title remains for coarse
         // process/sensor status only.
+        let ir_mask = if self.controls.ir_mask_enabled() {
+            "ir-mask:on"
+        } else {
+            "ir-mask:off"
+        };
         let title = match prox {
-            Some(p) => format!("tron — prox: {p}"),
-            None => "tron".into(),
+            Some(p) => format!("tron — prox: {p} — {ir_mask}"),
+            None => format!("tron — {ir_mask}"),
         };
         self.window.set_title(&title);
 

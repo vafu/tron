@@ -1,3 +1,7 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,4 +183,29 @@ pub struct FrameContext {
     pub proximity: Option<i64>,
     pub last: Option<HandLandmarks>,
     pub now: Instant,
+    pub controls: SharedPipelineControls,
+}
+
+pub type SharedPipelineControls = Arc<PipelineControls>;
+
+#[derive(Debug)]
+pub struct PipelineControls {
+    ir_mask_enabled: AtomicBool,
+}
+
+impl PipelineControls {
+    pub fn new() -> SharedPipelineControls {
+        Arc::new(Self {
+            ir_mask_enabled: AtomicBool::new(true),
+        })
+    }
+
+    pub fn ir_mask_enabled(&self) -> bool {
+        self.ir_mask_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn toggle_ir_mask(&self) -> bool {
+        self.ir_mask_enabled.fetch_xor(true, Ordering::Relaxed);
+        self.ir_mask_enabled()
+    }
 }

@@ -4,6 +4,8 @@
 
 mod calib;
 mod camera;
+mod depth_cue;
+mod diagnostics;
 mod filter;
 mod gestures;
 mod gfx;
@@ -28,10 +30,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-const RGB_W: u32 = 640;
-const RGB_H: u32 = 480;
-const IR_W: u32 = 640;
-const IR_H: u32 = 360;
+const DEFAULT_DIAGNOSTICS_PORT: u16 = 8766;
 
 struct App {
     runtime: RuntimeConfig,
@@ -42,6 +41,8 @@ struct App {
     hand_src: pipeline::SharedHand,
     mask_src: pipeline::SharedMask,
     pointer_src: pipeline::SharedPointer,
+    rgb_size: (u32, u32),
+    ir_size: (u32, u32),
     window: Option<Arc<Window>>,
     gfx: Option<gfx::Gfx>,
     loop_timing: LoopTiming,
@@ -54,6 +55,11 @@ struct RuntimeConfig {
     classifier_debug: bool,
     perfetto_path: Option<PathBuf>,
     perfetto_open: bool,
+    camera: Option<String>,
+    list_cameras: bool,
+    list_camera_modes: bool,
+    diagnostics_port: Option<u16>,
+    diagnostics_port_explicit: bool,
 }
 
 #[derive(Default)]
@@ -71,11 +77,25 @@ impl RuntimeConfig {
             classifier_debug: true,
             perfetto_path: None,
             perfetto_open: false,
+            camera: None,
+            list_cameras: false,
+            list_camera_modes: false,
+            diagnostics_port: Some(DEFAULT_DIAGNOSTICS_PORT),
+            diagnostics_port_explicit: false,
         };
         let mut args = std::env::args().skip(1).peekable();
         while let Some(arg) = args.next() {
             if let Some(path) = arg.strip_prefix("--perfetto=") {
                 cfg.perfetto_path = Some(PathBuf::from(path));
+                continue;
+            }
+            if let Some(camera) = arg.strip_prefix("--camera=") {
+                cfg.camera = Some(camera.to_string());
+                continue;
+            }
+            if let Some(port) = arg.strip_prefix("--diagnostics-port=") {
+                cfg.diagnostics_port = Some(parse_port(port, "--diagnostics-port"));
+                cfg.diagnostics_port_explicit = true;
                 continue;
             }
             match arg.as_str() {
@@ -98,6 +118,27 @@ impl RuntimeConfig {
                     cfg.perfetto_path = Some(PathBuf::from(path));
                 }
                 "--perfetto-open" => cfg.perfetto_open = true,
+                "--no-diagnostics" => cfg.diagnostics_port = None,
+                "--diagnostics-port" => {
+                    let Some(port) = args.next() else {
+                        eprintln!("--diagnostics-port requires a port");
+                        std::process::exit(2);
+                    };
+                    cfg.diagnostics_port = Some(parse_port(&port, "--diagnostics-port"));
+                    cfg.diagnostics_port_explicit = true;
+                }
+                "--list-cameras" => cfg.list_cameras = true,
+                "--list-camera-modes" => {
+                    cfg.list_cameras = true;
+                    cfg.list_camera_modes = true;
+                }
+                "--camera" => {
+                    let Some(camera) = args.next() else {
+                        eprintln!("--camera requires a name, e.g. --camera Lenovo");
+                        std::process::exit(2);
+                    };
+                    cfg.camera = Some(camera);
+                }
                 "--help" | "-h" => {
                     print_help_and_exit();
                 }
@@ -105,6 +146,16 @@ impl RuntimeConfig {
             }
         }
         cfg
+    }
+}
+
+fn parse_port(value: &str, flag: &str) -> u16 {
+    match value.parse::<u16>() {
+        Ok(port) => port,
+        Err(_) => {
+            eprintln!("{flag} requires a valid TCP port, got {value:?}");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -116,6 +167,11 @@ fn print_help_and_exit() -> ! {
            --no-cube / --cube         Disable or enable cube simulation/rendering\n\
            --no-skeleton / --skeleton Disable or enable hand skeleton overlay\n\
            --no-classifier-debug      Hide classifier feature values in the window title\n\
+           --camera NAME              Select a camera set by card/bus name (e.g. Lenovo, NexiGo)\n\
+           --list-cameras             List visible V4L camera capture nodes and exit\n\
+           --list-camera-modes        List selected camera sets plus advertised modes and exit\n\
+           --diagnostics-port PORT    Serve live diagnostics over HTTP (default: 8766)\n\
+           --no-diagnostics           Disable the diagnostics HTTP server\n\
            --perfetto PATH            Write tracing spans/events to a Perfetto .pftrace file\n\
            --perfetto-open            Open the Perfetto trace in the browser after shutdown\n\
            -h, --help                 Show this help"
@@ -146,8 +202,8 @@ impl ApplicationHandler for App {
                 skeleton: self.runtime.skeleton,
                 classifier_debug: self.runtime.classifier_debug,
             },
-            (RGB_W, RGB_H),
-            (IR_W, IR_H),
+            self.rgb_size,
+            self.ir_size,
         ))
         .expect("init gfx");
         self.window = Some(window);
@@ -394,14 +450,43 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let runtime = RuntimeConfig::parse();
+    if runtime.list_cameras {
+        if runtime.list_camera_modes {
+            println!("{}", camera::select::available_summary_detailed());
+        } else {
+            println!("{}", camera::select::available_summary());
+        }
+        return Ok(());
+    }
     if runtime.perfetto_open && runtime.perfetto_path.is_none() {
         anyhow::bail!("--perfetto-open requires --perfetto PATH");
     }
     let perfetto_path = runtime.perfetto_path.clone();
     let perfetto_open = runtime.perfetto_open;
     init_tracing(runtime.perfetto_path.clone())?;
-    let rgb_src = camera::spawn_rgb("/dev/video0", RGB_W, RGB_H)?;
-    let ir_src = camera::spawn_ir("/dev/video2", IR_W, IR_H)?;
+    let diagnostics = match runtime.diagnostics_port {
+        Some(port) if runtime.diagnostics_port_explicit => Some(diagnostics::spawn(port)?),
+        Some(port) => Some(diagnostics::spawn_available(port)?),
+        None => None,
+    };
+    let camera_set = match runtime.camera.as_deref() {
+        Some(name) => camera::select::by_name(name)?,
+        None => camera::select::default_set(),
+    };
+    eprintln!(
+        "camera: {} rgb={} {}x{} ir={} {}x{}",
+        camera_set.label,
+        camera_set.rgb.path,
+        camera_set.rgb.width,
+        camera_set.rgb.height,
+        camera_set.ir.path,
+        camera_set.ir.width,
+        camera_set.ir.height
+    );
+    let rgb_size = (camera_set.rgb.width, camera_set.rgb.height);
+    let ir_size = (camera_set.ir.width, camera_set.ir.height);
+    let rgb_src = camera::spawn_config(camera_set.rgb.clone())?;
+    let ir_src = camera::spawn_config(camera_set.ir.clone())?;
     let prox_src = proximity::spawn("prox", "proximity1")?;
     let controls = types::PipelineControls::new();
 
@@ -443,6 +528,7 @@ fn main() -> Result<()> {
         lm,
         Box::new(filter::OneEuroFilter::default()),
         Box::new(gestures::RuleBasedClassifier::new()),
+        Some(Box::new(depth_cue::IrBrightnessDepthEstimator::new())),
     );
     let pipeline::PipelineOutputs {
         hand: hand_src,
@@ -453,6 +539,7 @@ fn main() -> Result<()> {
         ir_src.clone(),
         prox_src.clone(),
         controls.clone(),
+        diagnostics,
         pipe,
     );
 
@@ -467,6 +554,8 @@ fn main() -> Result<()> {
         hand_src,
         mask_src,
         pointer_src,
+        rgb_size,
+        ir_size,
         window: None,
         gfx: None,
         loop_timing: LoopTiming::default(),

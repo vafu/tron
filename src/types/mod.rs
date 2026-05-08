@@ -153,12 +153,26 @@ pub struct GestureClassification {
     pub features: GestureFeatures,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IrDepthMetrics {
+    pub hand_diff_mean: f32,
+    pub hand_diff_median: f32,
+    pub background_diff_mean: f32,
+    pub background_diff_median: f32,
+    pub raw_hand_mean: f32,
+    pub clip_fraction: f32,
+    pub corrected_signal: f32,
+    pub delta: f32,
+    pub confidence: f32,
+}
+
 #[derive(Clone)]
 pub struct HandState {
     pub roi: RectNorm,
     pub landmarks: HandLandmarks,
     pub gesture: Option<Gesture>,
     pub gesture_features: GestureFeatures,
+    pub ir_depth: Option<IrDepthMetrics>,
     /// The final refined RGB image that was sent to the landmarker.
     pub debug_image: Option<Image>,
 }

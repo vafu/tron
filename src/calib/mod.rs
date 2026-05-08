@@ -58,4 +58,13 @@ impl AffineCalib {
             h: r.h * self.scale_y,
         }
     }
+
+    pub fn unmap_rect(&self, r: RectNorm) -> RectNorm {
+        RectNorm {
+            x: (r.x - self.offset_x) / self.scale_x,
+            y: (r.y - self.offset_y) / self.scale_y,
+            w: r.w / self.scale_x,
+            h: r.h / self.scale_y,
+        }
+    }
 }

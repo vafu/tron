@@ -20,6 +20,13 @@ demo produces enough instrumentation and labeled examples.
 
 Use `zk` for research notes. This repo has a notebook at `notes/`.
 
+As work progresses, save important notes into `notes/` with `zk`. Do this
+when discovering hardware behavior, making or changing research assumptions,
+choosing an implementation direction, observing model/pipeline behavior,
+finding a bug or limitation that affects future work, or leaving a follow-up
+task for the next session. Prefer short notes captured close to the observation
+over reconstructing context later.
+
 Every research note must include:
 
 - an ISO-8601 timestamp
@@ -37,6 +44,15 @@ zk --notebook-dir notes -W notes new --title "Title" --print-path
 zk --notebook-dir notes -W notes list --tag tron --format oneline
 zk --notebook-dir notes -W notes list --tag tron --tag task --format oneline
 zk --notebook-dir notes -W notes index
+```
+
+Quick disposable-note check:
+
+```sh
+zk --notebook-dir notes -W notes new --title "Codex test note" --print-path
+date --iso-8601=seconds
+zk --notebook-dir notes -W notes list --tag tron --tag task --format oneline
+rm notes/<generated-id>.md
 ```
 
 ## Architecture Direction

@@ -123,9 +123,22 @@ impl Gfx {
         } else {
             "ir-mask:off"
         };
+        let depth_debug = if self.options.classifier_debug {
+            hand.as_ref()
+                .and_then(|s| s.ir_depth)
+                .map(|d| {
+                    format!(
+                        " depth:corr={:.2} d={:+.2} clip={:.2} conf={:.2}",
+                        d.corrected_signal, d.delta, d.clip_fraction, d.confidence
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let title = match prox {
-            Some(p) => format!("tron — prox: {p} — {ir_mask}"),
-            None => format!("tron — {ir_mask}"),
+            Some(p) => format!("tron — prox: {p} — {ir_mask}{depth_debug}"),
+            None => format!("tron — {ir_mask}{depth_debug}"),
         };
         self.window.set_title(&title);
 

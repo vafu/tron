@@ -1,4 +1,6 @@
 use crate::camera::SharedImage;
+use crate::depth_cue::{DepthCueContext, DepthCueEstimator};
+use crate::diagnostics::{DiagnosticsHandle, DiagnosticsSnapshot};
 use crate::filter::LandmarkFilter;
 use crate::gestures::GestureClassifier;
 use crate::landmarker::HandLandmarker;
@@ -46,6 +48,7 @@ pub struct GesturePipeline {
     pub lm: Box<dyn HandLandmarker>,
     pub filter: Box<dyn LandmarkFilter>,
     pub gestures: Box<dyn GestureClassifier>,
+    pub depth: Option<Box<dyn DepthCueEstimator>>,
     last_outcome: StepOutcome,
     frame: u64,
 }
@@ -64,6 +67,7 @@ impl GesturePipeline {
         lm: Box<dyn HandLandmarker>,
         filter: Box<dyn LandmarkFilter>,
         gestures: Box<dyn GestureClassifier>,
+        depth: Option<Box<dyn DepthCueEstimator>>,
     ) -> Self {
         Self {
             refiners,
@@ -71,6 +75,7 @@ impl GesturePipeline {
             lm,
             filter,
             gestures,
+            depth,
             last_outcome: StepOutcome::Ok,
             frame: 0,
         }
@@ -146,6 +151,31 @@ impl GesturePipeline {
         };
         let gesture = classification.gesture;
         let gest_us = t_gest.elapsed().as_micros() as u32;
+        let ir_depth = self.depth.as_mut().and_then(|depth| {
+            let _span = tracing::debug_span!("pipeline.depth_cue").entered();
+            depth.estimate(DepthCueContext {
+                frame: &ctx,
+                roi,
+                landmarks: &smoothed,
+            })
+        });
+        if trace {
+            if let Some(d) = ir_depth {
+                eprintln!(
+                    "depth frame={} hand={:.1}/{:.1} bg={:.1}/{:.1} raw={:.1} clip={:.3} corr={:.3} delta={:.3} conf={:.2}",
+                    self.frame,
+                    d.hand_diff_mean,
+                    d.hand_diff_median,
+                    d.background_diff_mean,
+                    d.background_diff_median,
+                    d.raw_hand_mean,
+                    d.clip_fraction,
+                    d.corrected_signal,
+                    d.delta,
+                    d.confidence
+                );
+            }
+        }
         let pointer = Some(pointer_from_landmarks(&smoothed, gesture));
 
         self.transition(StepOutcome::Ok, had_last, &ctx);
@@ -166,6 +196,7 @@ impl GesturePipeline {
                 landmarks: smoothed,
                 gesture,
                 gesture_features: classification.features,
+                ir_depth,
                 debug_image: Some(ctx.rgb.clone()),
             }),
             pointer,
@@ -267,6 +298,7 @@ pub fn spawn(
     ir: SharedImage,
     prox: SharedProx,
     controls: SharedPipelineControls,
+    diagnostics: Option<DiagnosticsHandle>,
     mut pipeline: GesturePipeline,
 ) -> PipelineOutputs {
     let out: SharedHand = Arc::new(Mutex::new(None));
@@ -304,6 +336,8 @@ pub fn spawn(
                     thread::sleep(Duration::from_millis(2));
                     continue;
                 }
+                let rgb_seq = rgb_img.seq;
+                let ir_seq = ir_img.seq;
                 // Frame age — how stale was this frame when we picked it up?
                 let frame_age_ms = rgb_img.timestamp.elapsed().as_secs_f32() * 1000.0;
                 let interval_ms = last_published.elapsed().as_secs_f32() * 1000.0;
@@ -328,6 +362,19 @@ pub fn spawn(
                     pointer,
                     ir_diff,
                 } = pipeline.step(ctx);
+                if let Some(diagnostics) = &diagnostics {
+                    diagnostics.publish(DiagnosticsSnapshot::from_pipeline(
+                        frame,
+                        rgb_seq,
+                        ir_seq,
+                        interval_ms,
+                        frame_age_ms,
+                        prox_v,
+                        state.as_ref(),
+                        pointer.as_ref(),
+                        ir_diff.as_ref(),
+                    ));
+                }
                 {
                     let _span = tracing::debug_span!("pipeline.publish").entered();
                     *publish_mask.lock().unwrap() = ir_diff;

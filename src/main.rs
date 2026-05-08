@@ -15,6 +15,7 @@ mod pipeline;
 mod proximity;
 mod refiners;
 mod roi;
+mod stream;
 mod types;
 
 use anyhow::Result;
@@ -193,6 +194,7 @@ impl ApplicationHandler for App {
             self.mask_src.clone(),
             self.pointer_src.clone(),
             gfx::RenderOptions {
+                title: "tron",
                 cube: self.runtime.cube,
                 skeleton: self.runtime.skeleton,
                 classifier_debug: self.runtime.classifier_debug,

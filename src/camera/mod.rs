@@ -25,6 +25,7 @@ pub struct StreamConfig {
     pub width: u32,
     pub height: u32,
     pub format: StreamFormat,
+    pub fps: Option<u32>,
 }
 
 impl StreamConfig {
@@ -34,6 +35,7 @@ impl StreamConfig {
             width,
             height,
             format: StreamFormat::Rgb,
+            fps: None,
         }
     }
 
@@ -43,7 +45,13 @@ impl StreamConfig {
             width,
             height,
             format: StreamFormat::Ir,
+            fps: None,
         }
+    }
+
+    pub fn with_fps(mut self, fps: u32) -> Self {
+        self.fps = Some(fps);
+        self
     }
 }
 
@@ -78,6 +86,7 @@ pub mod select {
     use std::collections::BTreeMap;
     use v4l::capability::Flags;
     use v4l::context;
+    use v4l::frameinterval::FrameIntervalEnum;
     use v4l::framesize::FrameSizeEnum;
     use v4l::video::Capture;
     use v4l::{Device, FourCC};
@@ -86,6 +95,8 @@ pub mod select {
     const IR_FOURCC: &[u8; 4] = b"GREY";
     const RGB_TARGET_PIXELS: u64 = 960 * 540;
     const IR_TARGET_PIXELS: u64 = 640 * 480;
+    const RGB_TARGET_FPS: u32 = 30;
+    const IR_TARGET_FPS: u32 = 30;
 
     #[derive(Clone, Debug)]
     struct Candidate {
@@ -100,6 +111,7 @@ pub mod select {
         fourcc: FourCC,
         width: u32,
         height: u32,
+        max_fps: Option<u32>,
     }
 
     pub fn by_name(query: &str) -> Result<CameraSet> {
@@ -163,8 +175,8 @@ pub mod select {
     pub fn default_set() -> CameraSet {
         CameraSet {
             label: "default".to_string(),
-            rgb: StreamConfig::rgb("/dev/video0", 640, 480),
-            ir: StreamConfig::ir("/dev/video2", 640, 360),
+            rgb: StreamConfig::rgb("/dev/video0", 640, 480).with_fps(RGB_TARGET_FPS),
+            ir: StreamConfig::ir("/dev/video2", 640, 360).with_fps(IR_TARGET_FPS),
         }
     }
 
@@ -210,11 +222,13 @@ pub mod select {
                         fourcc: desc.fourcc,
                         width: d.width,
                         height: d.height,
+                        max_fps: max_fps(dev, desc.fourcc, d.width, d.height),
                     }),
                     FrameSizeEnum::Stepwise(s) => out.push(FormatInfo {
                         fourcc: desc.fourcc,
                         width: s.min_width,
                         height: s.min_height,
+                        max_fps: max_fps(dev, desc.fourcc, s.min_width, s.min_height),
                     }),
                 }
             }
@@ -222,27 +236,61 @@ pub mod select {
         Ok(out)
     }
 
+    fn max_fps(dev: &Device, fourcc: FourCC, width: u32, height: u32) -> Option<u32> {
+        dev.enum_frameintervals(fourcc, width, height)
+            .ok()?
+            .iter()
+            .filter_map(|interval| match &interval.interval {
+                FrameIntervalEnum::Discrete(frac) => {
+                    fps_from_interval(frac.numerator, frac.denominator)
+                }
+                FrameIntervalEnum::Stepwise(stepwise) => {
+                    fps_from_interval(stepwise.min.numerator, stepwise.min.denominator)
+                }
+            })
+            .max()
+    }
+
+    fn fps_from_interval(numerator: u32, denominator: u32) -> Option<u32> {
+        if numerator == 0 {
+            return None;
+        }
+        Some(((denominator as f64 / numerator as f64) + 0.5) as u32)
+    }
+
     fn stream_configs(candidate: &Candidate, fourcc: &[u8; 4], rgb: bool) -> Vec<StreamConfig> {
         let wanted = FourCC::new(fourcc);
-        let mut sizes: Vec<(u32, u32)> = candidate
+        let target_fps = if rgb { RGB_TARGET_FPS } else { IR_TARGET_FPS };
+        let mut sizes: Vec<(u32, u32, Option<u32>)> = candidate
             .formats
             .iter()
             .filter(|f| f.fourcc == wanted)
-            .map(|f| (f.width, f.height))
+            .map(|f| (f.width, f.height, f.max_fps))
             .collect();
         sizes.sort_unstable();
         sizes.dedup();
 
         sizes
             .into_iter()
-            .map(|(width, height)| {
+            .map(|(width, height, max_fps)| {
+                let fps = max_fps.map(|fps| fps.min(target_fps));
                 if rgb {
-                    StreamConfig::rgb(candidate.path.clone(), width, height)
+                    with_optional_fps(
+                        StreamConfig::rgb(candidate.path.clone(), width, height),
+                        fps,
+                    )
                 } else {
-                    StreamConfig::ir(candidate.path.clone(), width, height)
+                    with_optional_fps(StreamConfig::ir(candidate.path.clone(), width, height), fps)
                 }
             })
             .collect()
+    }
+
+    fn with_optional_fps(config: StreamConfig, fps: Option<u32>) -> StreamConfig {
+        match fps {
+            Some(fps) => config.with_fps(fps),
+            None => config,
+        }
     }
 
     fn choose_stream(configs: &[StreamConfig], target_pixels: u64) -> Option<StreamConfig> {
@@ -257,12 +305,26 @@ pub mod select {
         cfg: &StreamConfig,
         native: &StreamConfig,
         target_pixels: u64,
-    ) -> (u64, u64, u32) {
+    ) -> (u64, u64, u64, u32) {
         (
-            aspect_diff_ppm(cfg, native),
+            fps_penalty(cfg, target_pixels),
             pixels(cfg).abs_diff(target_pixels),
+            aspect_diff_ppm(cfg, native),
             video_index(&cfg.path),
         )
+    }
+
+    fn fps_penalty(cfg: &StreamConfig, target_pixels: u64) -> u64 {
+        let target_fps = match cfg.format {
+            super::StreamFormat::Rgb => RGB_TARGET_FPS,
+            super::StreamFormat::Ir => IR_TARGET_FPS,
+        };
+        let fps = cfg.fps.unwrap_or(0);
+        let shortfall = target_fps.saturating_sub(fps) as u64;
+        if shortfall == 0 {
+            return 0;
+        }
+        shortfall * target_pixels
     }
 
     fn aspect_diff_ppm(a: &StreamConfig, b: &StreamConfig) -> u64 {
@@ -303,8 +365,15 @@ pub mod select {
                 choose_stream(&ir_configs, IR_TARGET_PIXELS),
             ) {
                 sets.push(format!(
-                    "{label}: rgb={} {}x{}, ir={} {}x{}",
-                    rgb.path, rgb.width, rgb.height, ir.path, ir.width, ir.height
+                    "{label}: rgb={} {}x{}{}, ir={} {}x{}{}",
+                    rgb.path,
+                    rgb.width,
+                    rgb.height,
+                    fps_suffix(rgb.fps),
+                    ir.path,
+                    ir.width,
+                    ir.height,
+                    fps_suffix(ir.fps)
                 ));
             }
         }
@@ -330,7 +399,15 @@ pub mod select {
             let mut formats = c
                 .formats
                 .iter()
-                .map(|f| format!("{}:{}x{}", f.fourcc, f.width, f.height))
+                .map(|f| {
+                    format!(
+                        "{}:{}x{}{}",
+                        f.fourcc,
+                        f.width,
+                        f.height,
+                        fps_suffix(f.max_fps)
+                    )
+                })
                 .collect::<Vec<_>>();
             formats.sort();
             formats.dedup();
@@ -352,7 +429,15 @@ pub mod select {
                 let formats = c
                     .formats
                     .iter()
-                    .map(|f| format!("{}:{}x{}", f.fourcc, f.width, f.height))
+                    .map(|f| {
+                        format!(
+                            "{}:{}x{}{}",
+                            f.fourcc,
+                            f.width,
+                            f.height,
+                            fps_suffix(f.max_fps)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 format!("{} [{}] ({formats})", c.path, c.card)
@@ -365,5 +450,9 @@ pub mod select {
         path.rsplit_once("video")
             .and_then(|(_, n)| n.parse().ok())
             .unwrap_or(u32::MAX)
+    }
+
+    fn fps_suffix(fps: Option<u32>) -> String {
+        fps.map(|fps| format!("@{fps}fps")).unwrap_or_default()
     }
 }

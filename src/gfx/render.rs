@@ -144,8 +144,11 @@ impl Gfx {
             String::new()
         };
         let title = match prox {
-            Some(p) => format!("tron — prox: {p} — {ir_mask}{depth_debug}"),
-            None => format!("tron — {ir_mask}{depth_debug}"),
+            Some(p) => format!(
+                "{} — prox: {p} — {ir_mask}{depth_debug}",
+                self.options.title
+            ),
+            None => format!("{} — {ir_mask}{depth_debug}", self.options.title),
         };
         self.window.set_title(&title);
 

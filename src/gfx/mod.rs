@@ -21,6 +21,7 @@ use winit::window::Window;
 
 #[derive(Clone, Copy)]
 pub struct RenderOptions {
+    pub title: &'static str,
     pub cube: bool,
     pub skeleton: bool,
     pub classifier_debug: bool,

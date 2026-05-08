@@ -30,7 +30,6 @@ mod roi;
 mod types;
 
 use anyhow::Result;
-use opencv::core::Point2f;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -53,6 +52,7 @@ struct App {
     raw_rgb: camera::SharedImage,
     raw_ir: camera::SharedImage,
     display_rgb: camera::SharedImage,
+    display_debug_rgb: camera::SharedImage,
     display_ir: camera::SharedImage,
     prox_src: proximity::SharedProx,
     controls: types::SharedPipelineControls,
@@ -62,21 +62,11 @@ struct App {
     rgb_size: (u32, u32),
     ir_size: (u32, u32),
     pattern: (i32, i32),
+    square_size: f32,
     stereo: calib::stereo::StereoCalibrationSession,
-    overlay: SharedOverlay,
     window: Option<Arc<Window>>,
     gfx: Option<gfx::Gfx>,
 }
-
-#[derive(Clone, Default)]
-struct OverlayState {
-    rgb_seq: u64,
-    ir_seq: u64,
-    rgb_corners: Vec<Point2f>,
-    ir_corners: Vec<Point2f>,
-}
-
-type SharedOverlay = Arc<Mutex<Option<OverlayState>>>;
 
 fn main() -> Result<()> {
     let cfg = Config::parse();
@@ -110,23 +100,25 @@ fn main() -> Result<()> {
     let raw_rgb = camera::spawn_config(camera_set.rgb)?;
     let raw_ir = camera::spawn_config(camera_set.ir)?;
     let display_rgb = Arc::new(Mutex::new(None));
+    let display_debug_rgb = Arc::new(Mutex::new(None));
     let display_ir = Arc::new(Mutex::new(None));
-    let overlay = Arc::new(Mutex::new(None));
     spawn_display_mirror(
         raw_rgb.clone(),
         raw_ir.clone(),
         display_rgb.clone(),
         display_ir.clone(),
-        overlay.clone(),
     );
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
+    eprintln!("tron-calib: event loop ready");
+    eprintln!("tron-calib: starting app");
     let controls = types::PipelineControls::new();
     let mut app = App {
         raw_rgb,
         raw_ir,
         display_rgb,
+        display_debug_rgb,
         display_ir,
         prox_src: Arc::new(Mutex::new(None)),
         controls,
@@ -136,13 +128,13 @@ fn main() -> Result<()> {
         rgb_size,
         ir_size,
         pattern: cfg.checkerboard,
+        square_size: cfg.square_size,
         stereo: calib::stereo::StereoCalibrationSession::new(
             cfg.checkerboard,
             cfg.square_size,
             rgb_size,
             ir_size,
         ),
-        overlay,
         window: None,
         gfx: None,
     };
@@ -155,14 +147,16 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        eprintln!("tron-calib: creating window");
         let attrs = Window::default_attributes()
             .with_title("tron-calib")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 600));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        eprintln!("tron-calib: initializing renderer");
         let gfx = pollster::block_on(gfx::Gfx::new(
             window.clone(),
             self.display_rgb.clone(),
-            self.display_rgb.clone(),
+            self.display_debug_rgb.clone(),
             self.display_ir.clone(),
             self.prox_src.clone(),
             self.controls.clone(),
@@ -170,6 +164,7 @@ impl ApplicationHandler for App {
             self.mask_src.clone(),
             self.pointer_src.clone(),
             gfx::RenderOptions {
+                title: "tron-calib",
                 cube: false,
                 skeleton: false,
                 classifier_debug: false,
@@ -178,6 +173,7 @@ impl ApplicationHandler for App {
             self.ir_size,
         ))
         .expect("init gfx");
+        eprintln!("tron-calib: window ready");
         self.window = Some(window);
         self.gfx = Some(gfx);
     }
@@ -205,9 +201,12 @@ impl ApplicationHandler for App {
                         KeyCode::KeyC => self.capture_checkerboard(),
                         KeyCode::KeyV => self.solve_stereo(),
                         KeyCode::KeyR => {
-                            self.stereo
-                                .reset(self.pattern, 1.0, self.rgb_size, self.ir_size);
-                            *self.overlay.lock().unwrap() = None;
+                            self.stereo.reset(
+                                self.pattern,
+                                self.square_size,
+                                self.rgb_size,
+                                self.ir_size,
+                            );
                             eprintln!("stereo: reset samples");
                         }
                         _ => {}
@@ -252,12 +251,6 @@ impl App {
         sample: calib::checkerboard::CheckerboardSample,
         attempts: u32,
     ) {
-        *self.overlay.lock().unwrap() = Some(OverlayState {
-            rgb_seq: rgb.seq,
-            ir_seq: ir.seq,
-            rgb_corners: sample.rgb_corners.clone(),
-            ir_corners: sample.ir_corners.clone(),
-        });
         match calib::checkerboard::calibrate_affine_from_sample(&sample, &rgb, &ir) {
             Ok(result) => {
                 calib::set(result.calib);
@@ -282,8 +275,12 @@ impl App {
         match self.stereo.solve() {
             Ok(result) => {
                 eprintln!(
-                    "stereo: solved samples={} rgb_rms={:.4} ir_rms={:.4} stereo_rms={:.4}",
-                    result.sample_count, result.rgb_rms, result.ir_rms, result.stereo_rms
+                    "stereo: solved samples={} rgb_rms={:.4} ir_rms={:.4} stereo_rms={:.4} {}",
+                    result.sample_count,
+                    result.rgb_rms,
+                    result.ir_rms,
+                    result.stereo_rms,
+                    result.error_summary()
                 );
                 if let Err(e) = calib::save_stereo(&result.to_text()) {
                     eprintln!("stereo: save failed: {e}");
@@ -398,59 +395,21 @@ fn spawn_display_mirror(
     raw_ir: camera::SharedImage,
     display_rgb: camera::SharedImage,
     display_ir: camera::SharedImage,
-    overlay: SharedOverlay,
 ) {
     thread::Builder::new()
         .name("calib-display".into())
         .spawn(move || {
             loop {
-                if let Some(mut rgb) = raw_rgb.lock().unwrap().clone() {
-                    if let Some(overlay) = overlay.lock().unwrap().clone() {
-                        if overlay.rgb_seq == rgb.seq {
-                            draw_corners(&mut rgb, &overlay.rgb_corners, [255, 40, 40]);
-                        }
-                    }
+                if let Some(rgb) = raw_rgb.lock().unwrap().clone() {
                     *display_rgb.lock().unwrap() = Some(rgb);
                 }
-                if let Some(mut ir) = raw_ir.lock().unwrap().clone() {
-                    if let Some(overlay) = overlay.lock().unwrap().clone() {
-                        if overlay.ir_seq == ir.seq {
-                            draw_corners(&mut ir, &overlay.ir_corners, [40, 255, 80]);
-                        }
-                    }
+                if let Some(ir) = raw_ir.lock().unwrap().clone() {
                     *display_ir.lock().unwrap() = Some(ir);
                 }
                 thread::sleep(Duration::from_millis(8));
             }
         })
         .expect("spawn calibration display mirror");
-}
-
-fn draw_corners(img: &mut types::Image, corners: &[Point2f], color: [u8; 3]) {
-    for p in corners {
-        draw_cross(img, p.x.round() as i32, p.y.round() as i32, color);
-    }
-}
-
-fn draw_cross(img: &mut types::Image, x: i32, y: i32, color: [u8; 3]) {
-    for d in -5..=5 {
-        put_pixel(img, x + d, y, color);
-        put_pixel(img, x, y + d, color);
-    }
-}
-
-fn put_pixel(img: &mut types::Image, x: i32, y: i32, color: [u8; 3]) {
-    if x < 0 || y < 0 || x >= img.width as i32 || y >= img.height as i32 {
-        return;
-    }
-    let i = (y as u32 * img.width + x as u32) as usize * 4;
-    if i + 3 >= img.data.len() {
-        return;
-    }
-    img.data[i] = color[0];
-    img.data[i + 1] = color[1];
-    img.data[i + 2] = color[2];
-    img.data[i + 3] = 255;
 }
 
 fn parse_checkerboard(value: &str) -> (i32, i32) {

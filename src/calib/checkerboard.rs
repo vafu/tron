@@ -88,11 +88,16 @@ pub fn calibrate_affine_from_sample(
     })
 }
 
-fn detect_corners(img: &Image, pattern: (i32, i32)) -> Result<Vec<Point2f>> {
+pub fn detect_corners(img: &Image, pattern: (i32, i32)) -> Result<Vec<Point2f>> {
     let gray = gray_mat(img)?;
     let pattern_size = Size::new(pattern.0, pattern.1);
     let mut corners = Vector::<Point2f>::default();
-    let found = calib3d::find_chessboard_corners_def(&gray, pattern_size, &mut corners)?;
+    let mut found =
+        calib3d::find_chessboard_corners_sb_def(&gray, pattern_size, &mut corners).unwrap_or(false);
+    if !found {
+        corners.clear();
+        found = calib3d::find_chessboard_corners_def(&gray, pattern_size, &mut corners)?;
+    }
     if !found {
         bail!(
             "checkerboard {}x{} not found in {}x{} frame",

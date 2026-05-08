@@ -9,6 +9,7 @@ use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
+use v4l::video::capture::Parameters;
 
 pub struct Backend;
 
@@ -50,6 +51,24 @@ fn run(config: &StreamConfig, fourcc: FourCC, decoder: Decoder, shared: SharedIm
     fmt.height = config.height;
     fmt.fourcc = fourcc;
     let fmt = dev.set_format(&fmt)?;
+    if let Some(fps) = config.fps {
+        match dev.set_params(&Parameters::with_fps(fps)) {
+            Ok(params) => tracing::debug!(
+                target: "tron::camera",
+                path = %config.path,
+                requested_fps = fps,
+                interval = %params.interval,
+                "camera frame interval configured"
+            ),
+            Err(err) => tracing::warn!(
+                target: "tron::camera",
+                path = %config.path,
+                requested_fps = fps,
+                error = %err,
+                "camera frame interval request failed"
+            ),
+        }
+    }
     eprintln!(
         "{}: negotiated {}x{} {}",
         config.path, fmt.width, fmt.height, fmt.fourcc

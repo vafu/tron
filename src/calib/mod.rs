@@ -2,6 +2,9 @@ use crate::types::RectNorm;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+pub mod checkerboard;
+pub mod stereo;
+
 /// Quick-and-dirty IR↔RGB camera registration. `AffineCalib` maps normalized IR
 /// coordinates into normalized RGB coordinates; `unmap_*` does the reverse.
 ///
@@ -67,6 +70,14 @@ pub fn modify(f: impl FnOnce(&mut AffineCalib)) {
     );
 }
 
+pub fn set(calib: AffineCalib) {
+    *IR_TO_RGB.write().unwrap() = calib;
+    eprintln!(
+        "calib: set scale=({:.3}, {:.3}) offset=({:.3}, {:.3}) binary={}",
+        calib.scale_x, calib.scale_y, calib.offset_x, calib.offset_y, calib.use_binary
+    );
+}
+
 pub fn reset() {
     let default = PROFILE
         .read()
@@ -94,6 +105,21 @@ pub fn save() -> std::io::Result<()> {
         profile.path.display(),
         profile.camera_label
     );
+    Ok(())
+}
+
+pub fn save_stereo(text: &str) -> std::io::Result<()> {
+    let profile = PROFILE.read().unwrap().clone();
+    let Some(profile) = profile else {
+        eprintln!("calib: no active profile for stereo save");
+        return Ok(());
+    };
+    let path = profile.path.with_extension("stereo");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, text)?;
+    eprintln!("calib: saved stereo {}", path.display());
     Ok(())
 }
 

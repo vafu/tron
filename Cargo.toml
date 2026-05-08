@@ -13,7 +13,7 @@ industrial-io = "0.6"
 anyhow = "1"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "ndarray"] }
 ndarray = "0.17"
-opencv = { version = "0.98", default-features = false, features = ["imgproc", "clang-runtime"] }
+opencv = { version = "0.98", default-features = false, features = ["calib3d", "imgproc", "clang-runtime"] }
 num_cpus = "1"
 tracing = "0.1"
 tracing-perfetto = "0.1.5"

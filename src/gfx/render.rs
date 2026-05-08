@@ -12,7 +12,9 @@ impl Gfx {
         self.main_view.fit(&self.queue, size);
         self.masked_view.fit(&self.queue, size);
         self.mask_view.fit(&self.queue, size);
-        self.depth = DepthTexture::new(&self.device, size);
+        if self.options.cube {
+            self.depth = Some(DepthTexture::new(&self.device, size));
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -23,10 +25,11 @@ impl Gfx {
             .to_owned();
         let t_lock = Instant::now();
         // Pull latest data
-        let (rgb_opt, hand, mask_opt, pointer) = {
+        let (rgb_opt, debug_rgb_opt, hand, mask_opt, pointer) = {
             let _span = tracing::debug_span!("gfx.lock_inputs").entered();
             (
                 self.rgb_src.lock().unwrap().clone(),
+                self.debug_rgb_src.lock().unwrap().clone(),
                 self.hand_src.lock().unwrap().clone(),
                 self.mask_src.lock().unwrap().clone(),
                 *self.pointer_src.lock().unwrap(),
@@ -46,13 +49,11 @@ impl Gfx {
             }
 
             // Masked-RGB pane: pipeline's debug image (RGB darkened by IR mask).
-            // Falls back to raw RGB until the pipeline produces its first frame.
-            if let Some(state) = &hand {
-                if let Some(dbg) = &state.debug_image {
-                    if dbg.seq != self.masked_view.last_seq {
-                        self.masked_view.upload(&self.queue, &dbg.data);
-                        self.masked_view.last_seq = dbg.seq;
-                    }
+            // This is published right after refiners, before ROI/landmarks.
+            if let Some(f) = &debug_rgb_opt {
+                if f.seq != self.masked_view.last_seq {
+                    self.masked_view.upload(&self.queue, &f.data);
+                    self.masked_view.last_seq = f.seq;
                 }
             } else if let Some(f) = &rgb_opt {
                 if f.seq != self.masked_view.last_seq {
@@ -61,7 +62,8 @@ impl Gfx {
                 }
             }
 
-            // Mask pane: grayscale IR-diff. Texture is RGBA8 so expand R8 → RGBA8.
+            // Mask pane: grayscale IR-diff. If no pipeline mask exists, show raw IR.
+            // Texture is RGBA8 so expand R8 → RGBA8 when needed.
             if let Some(m) = &mask_opt {
                 if m.seq != self.mask_view.last_seq {
                     let needed = (m.width * m.height) as usize * 4;
@@ -71,6 +73,11 @@ impl Gfx {
                     expand_to_rgba(m, &mut self.mask_rgba);
                     self.mask_view.upload(&self.queue, &self.mask_rgba);
                     self.mask_view.last_seq = m.seq;
+                }
+            } else if let Some(ir) = self.ir_src.lock().unwrap().as_ref() {
+                if ir.seq != self.mask_view.last_seq {
+                    self.mask_view.upload(&self.queue, &ir.data);
+                    self.mask_view.last_seq = ir.seq;
                 }
             }
         }
@@ -142,14 +149,14 @@ impl Gfx {
         };
         self.window.set_title(&title);
 
-        if self.options.cube {
+        if let Some(cube) = self.cube.as_mut() {
             if let Some(pointer) = pointer {
                 if pointer.grabbed {
                     let pos = [pointer.position.x, pointer.position.y];
                     if let Some(last) = self.last_grab_pos {
                         let dx = pos[0] - last[0];
                         let dy = pos[1] - last[1];
-                        self.cube.rotate(-dx * 8.0, -dy * 8.0);
+                        cube.rotate(-dx * 8.0, -dy * 8.0);
                     }
                     self.last_grab_pos = Some(pos);
                 } else {
@@ -158,8 +165,7 @@ impl Gfx {
             } else {
                 self.last_grab_pos = None;
             }
-            self.cube
-                .update(&self.queue, self.size.width, self.size.height);
+            cube.update(&self.queue, self.size.width, self.size.height);
         } else {
             self.last_grab_pos = None;
         }
@@ -210,7 +216,7 @@ impl Gfx {
             }
         }
 
-        if self.options.cube {
+        if let (Some(cube), Some(depth)) = (self.cube.as_ref(), self.depth.as_ref()) {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rp-cube"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -222,7 +228,7 @@ impl Gfx {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth.view,
+                    view: &depth.view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -232,7 +238,7 @@ impl Gfx {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.cube.draw(&mut rp);
+            cube.draw(&mut rp);
         }
 
         {
@@ -250,8 +256,8 @@ impl Gfx {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if self.options.cube {
-                self.cube.draw_overlay(&mut rp);
+            if let Some(cube) = self.cube.as_ref() {
+                cube.draw_overlay(&mut rp);
             }
             if have_overlay && self.options.skeleton {
                 self.skeleton.draw(&mut rp);

@@ -4,7 +4,7 @@
 
 mod calib;
 mod camera;
-mod depth_cue;
+mod depth;
 mod diagnostics;
 mod filter;
 mod gestures;
@@ -35,6 +35,7 @@ const DEFAULT_DIAGNOSTICS_PORT: u16 = 8766;
 struct App {
     runtime: RuntimeConfig,
     rgb_src: camera::SharedImage,
+    debug_rgb_src: camera::SharedImage,
     ir_src: camera::SharedImage,
     prox_src: proximity::SharedProx,
     controls: types::SharedPipelineControls,
@@ -72,7 +73,7 @@ struct LoopTiming {
 impl RuntimeConfig {
     fn parse() -> Self {
         let mut cfg = Self {
-            cube: true,
+            cube: false,
             skeleton: true,
             classifier_debug: true,
             perfetto_path: None,
@@ -99,17 +100,11 @@ impl RuntimeConfig {
                 continue;
             }
             match arg.as_str() {
-                "--no-cube" => cfg.cube = false,
                 "--cube" => cfg.cube = true,
                 "--no-skeleton" => cfg.skeleton = false,
                 "--skeleton" => cfg.skeleton = true,
                 "--no-classifier-debug" => cfg.classifier_debug = false,
                 "--classifier-debug" => cfg.classifier_debug = true,
-                "--classifier-only" => {
-                    cfg.cube = false;
-                    cfg.skeleton = true;
-                    cfg.classifier_debug = true;
-                }
                 "--perfetto" => {
                     let Some(path) = args.next() else {
                         eprintln!("--perfetto requires a path");
@@ -163,8 +158,7 @@ fn print_help_and_exit() -> ! {
     println!(
         "Usage: tron [OPTIONS]\n\n\
          Options:\n\
-           --classifier-only          Disable cube; keep skeleton + classifier diagnostics\n\
-           --no-cube / --cube         Disable or enable cube simulation/rendering\n\
+           --cube                     Enable cube simulation/rendering\n\
            --no-skeleton / --skeleton Disable or enable hand skeleton overlay\n\
            --no-classifier-debug      Hide classifier feature values in the window title\n\
            --camera NAME              Select a camera set by card/bus name (e.g. Lenovo, NexiGo)\n\
@@ -191,6 +185,7 @@ impl ApplicationHandler for App {
         let g = pollster::block_on(gfx::Gfx::new(
             window.clone(),
             self.rgb_src.clone(),
+            self.debug_rgb_src.clone(),
             self.ir_src.clone(),
             self.prox_src.clone(),
             self.controls.clone(),
@@ -493,8 +488,9 @@ fn main() -> Result<()> {
     calib::init(&camera_set.label, rgb_size, ir_size);
     let rgb_src = camera::spawn_config(camera_set.rgb.clone())?;
     let ir_src = camera::spawn_config(camera_set.ir.clone())?;
-    let prox_src = proximity::spawn("prox", "proximity1")?;
     let controls = types::PipelineControls::new();
+
+    let prox_src = proximity::spawn("prox", "proximity1")?;
 
     // Try the real MediaPipe model; fall back to mock if the file is missing
     // or the load fails. Run `scripts/download_models.sh` to fetch it.
@@ -534,10 +530,11 @@ fn main() -> Result<()> {
         lm,
         Box::new(filter::OneEuroFilter::default()),
         Box::new(gestures::RuleBasedClassifier::new()),
-        Some(Box::new(depth_cue::IrBrightnessDepthEstimator::new())),
+        Some(Box::new(depth::IrBrightnessDepthEstimator::new())),
     );
     let pipeline::PipelineOutputs {
         hand: hand_src,
+        debug_rgb: debug_rgb_src,
         mask: mask_src,
         pointer: pointer_src,
     } = pipeline::spawn(
@@ -554,6 +551,7 @@ fn main() -> Result<()> {
     let mut app = App {
         runtime,
         rgb_src,
+        debug_rgb_src,
         ir_src,
         prox_src,
         controls,

@@ -4,6 +4,7 @@ impl Gfx {
     pub async fn new(
         window: Arc<Window>,
         rgb_src: SharedImage,
+        debug_rgb_src: SharedImage,
         ir_src: SharedImage,
         prox_src: SharedProx,
         controls: SharedPipelineControls,
@@ -150,8 +151,8 @@ impl Gfx {
         );
 
         let skeleton = SkeletonRenderer::new(&device, format);
-        let cube = CubeRenderer::new(&device, format);
-        let depth = DepthTexture::new(&device, size);
+        let cube = options.cube.then(|| CubeRenderer::new(&device, format));
+        let depth = options.cube.then(|| DepthTexture::new(&device, size));
 
         Ok(Self {
             window,
@@ -171,6 +172,7 @@ impl Gfx {
             depth,
             main_pane: main_rect,
             rgb_src,
+            debug_rgb_src,
             ir_src,
             prox_src,
             controls,

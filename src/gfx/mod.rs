@@ -41,20 +41,20 @@ pub struct Gfx {
     main_view: TexQuad,
     /// Side pane: RGB darkened by IR mask (the "dimmed" debug image).
     masked_view: TexQuad,
-    /// Side pane: grayscale IR foreground signal (the mask itself).
+    /// Side pane: grayscale IR foreground signal, or raw IR if no mask exists.
     mask_view: TexQuad,
 
     bar_bg: SolidQuad,
     bar_fill: SolidQuad,
 
     skeleton: SkeletonRenderer,
-    cube: CubeRenderer,
-    depth: DepthTexture,
+    cube: Option<CubeRenderer>,
+    depth: Option<DepthTexture>,
 
     main_pane: (f32, f32, f32, f32),
 
     rgb_src: SharedImage,
-    #[allow(dead_code)]
+    debug_rgb_src: SharedImage,
     ir_src: SharedImage,
     prox_src: SharedProx,
     controls: SharedPipelineControls,

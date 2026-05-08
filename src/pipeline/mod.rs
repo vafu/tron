@@ -1,5 +1,5 @@
 use crate::camera::SharedImage;
-use crate::depth_cue::{DepthCueContext, DepthCueEstimator};
+use crate::depth::{DepthCueContext, DepthCueEstimator};
 use crate::diagnostics::{DiagnosticsHandle, DiagnosticsSnapshot};
 use crate::filter::LandmarkFilter;
 use crate::gestures::GestureClassifier;
@@ -21,6 +21,7 @@ pub type SharedPointer = Arc<Mutex<Option<PointerState>>>;
 
 pub struct PipelineOutputs {
     pub hand: SharedHand,
+    pub debug_rgb: SharedImage,
     pub mask: SharedMask,
     pub pointer: SharedPointer,
 }
@@ -28,6 +29,8 @@ pub struct PipelineOutputs {
 pub struct StepOutput {
     pub state: Option<HandState>,
     pub pointer: Option<PointerState>,
+    /// Refined RGB debug image after frame refiners, before ROI/landmarks.
+    pub debug_rgb: Image,
     /// Final IR-diff grayscale image visible to the UI (post-refiner).
     pub ir_diff: Option<Image>,
 }
@@ -101,6 +104,7 @@ impl GesturePipeline {
             }
         }
         let ir_diff = ctx.ir_diff.clone();
+        let debug_rgb = ctx.rgb.clone();
 
         let t_roi = Instant::now();
         let (roi, _debug) = {
@@ -116,6 +120,7 @@ impl GesturePipeline {
             return StepOutput {
                 state: None,
                 pointer: None,
+                debug_rgb,
                 ir_diff,
             };
         };
@@ -134,6 +139,7 @@ impl GesturePipeline {
             return StepOutput {
                 state: None,
                 pointer: None,
+                debug_rgb,
                 ir_diff,
             };
         };
@@ -200,6 +206,7 @@ impl GesturePipeline {
                 debug_image: Some(ctx.rgb.clone()),
             }),
             pointer,
+            debug_rgb,
             ir_diff,
         }
     }
@@ -302,9 +309,11 @@ pub fn spawn(
     mut pipeline: GesturePipeline,
 ) -> PipelineOutputs {
     let out: SharedHand = Arc::new(Mutex::new(None));
+    let debug_rgb: SharedImage = Arc::new(Mutex::new(None));
     let mask: SharedMask = Arc::new(Mutex::new(None));
     let pointer: SharedPointer = Arc::new(Mutex::new(None));
     let publish = out.clone();
+    let publish_debug_rgb = debug_rgb.clone();
     let publish_mask = mask.clone();
     let publish_pointer = pointer.clone();
 
@@ -360,6 +369,7 @@ pub fn spawn(
                 let StepOutput {
                     state,
                     pointer,
+                    debug_rgb,
                     ir_diff,
                 } = pipeline.step(ctx);
                 if let Some(diagnostics) = &diagnostics {
@@ -377,6 +387,7 @@ pub fn spawn(
                 }
                 {
                     let _span = tracing::debug_span!("pipeline.publish").entered();
+                    *publish_debug_rgb.lock().unwrap() = Some(debug_rgb);
                     *publish_mask.lock().unwrap() = ir_diff;
                     *publish_pointer.lock().unwrap() = pointer;
                     last = state.as_ref().map(|s| s.landmarks.clone()).or(last);
@@ -394,6 +405,7 @@ pub fn spawn(
         .expect("spawn gesture thread");
     PipelineOutputs {
         hand: out,
+        debug_rgb,
         mask,
         pointer,
     }

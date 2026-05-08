@@ -1,3 +1,11 @@
+---
+title: "Task profile CPU usage"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task profile CPU usage
 
 Timestamp: 2026-05-02T14:53:22-07:00

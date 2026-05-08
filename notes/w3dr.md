@@ -1,3 +1,11 @@
+---
+title: "Task implement RGB first cube demo"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task implement RGB first cube demo
 
 Timestamp: 2026-05-02T13:48:13-07:00

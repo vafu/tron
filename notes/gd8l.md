@@ -1,3 +1,11 @@
+---
+title: "IR brightness depth experiment integration plan"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # IR brightness depth experiment integration plan
 
 2026-05-07T17:33:09-07:00

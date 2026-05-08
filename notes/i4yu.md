@@ -1,3 +1,11 @@
+---
+title: "Task split rendering modules"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task split rendering modules
 
 Timestamp: 2026-05-02T16:32:43-07:00

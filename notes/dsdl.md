@@ -1,3 +1,11 @@
+---
+title: "RGB IR calibration is depth dependent"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # RGB IR calibration is depth dependent
 
 # RGB IR calibration is depth dependent

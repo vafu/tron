@@ -1,3 +1,11 @@
+---
+title: "Task investigate IR strobe timing"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task investigate IR strobe timing
 
 Timestamp: 2026-05-02T13:22:25-07:00

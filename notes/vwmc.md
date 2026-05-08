@@ -1,3 +1,11 @@
+---
+title: "Camera set selection by name"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Camera set selection by name
 
 2026-05-07T17:55:00-07:00

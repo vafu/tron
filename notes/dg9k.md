@@ -1,3 +1,11 @@
+---
+title: "Observation IR mask improves hand edges near face"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Observation IR mask improves hand edges near face
 
 Timestamp: 2026-05-02T17:13:51-07:00

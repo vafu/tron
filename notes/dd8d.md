@@ -1,3 +1,11 @@
+---
+title: "Stereo calibration can support depth cue test"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Stereo calibration can support depth cue test
 
 # Stereo calibration can support depth cue test

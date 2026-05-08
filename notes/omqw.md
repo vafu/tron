@@ -1,3 +1,11 @@
+---
+title: "Camera mode selection should preserve RGB IR aspect"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Camera mode selection should preserve RGB IR aspect
 
 # Camera mode selection should preserve RGB IR aspect

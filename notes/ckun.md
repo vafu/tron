@@ -1,3 +1,11 @@
+---
+title: "Task test IR masked RGB tracking"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task test IR masked RGB tracking
 
 Timestamp: 2026-05-02T16:50:58-07:00

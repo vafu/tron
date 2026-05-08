@@ -1,3 +1,11 @@
+---
+title: "Per camera affine calibration profiles"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Per camera affine calibration profiles
 
 # Per camera affine calibration profiles

@@ -1,3 +1,11 @@
+---
+title: "Task improve gesture classifier"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task improve gesture classifier
 
 Timestamp: 2026-05-02T14:19:12-07:00

@@ -1,3 +1,11 @@
+---
+title: "Task investigate Windows Hello exposure controls"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Task investigate Windows Hello exposure controls
 
 Timestamp: 2026-05-02T13:22:25-07:00

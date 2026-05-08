@@ -1,3 +1,11 @@
+---
+title: "RGB IR resolution and FOV calibration problem"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # RGB IR resolution and FOV calibration problem
 
 # RGB IR resolution and FOV calibration problem

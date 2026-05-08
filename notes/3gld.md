@@ -1,3 +1,11 @@
+---
+title: "Checkerboard affine calibration path"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Checkerboard affine calibration path
 
 # Checkerboard affine calibration path

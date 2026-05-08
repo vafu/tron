@@ -1,3 +1,11 @@
+---
+title: "Auto exposure compensated IR depth hypothesis"
+tags:
+  - project/tron
+  - kind/fleeting
+  - status/inbox
+---
+
 # Auto exposure compensated IR depth hypothesis
 
 2026-05-07T17:24:35-07:00

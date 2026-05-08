@@ -18,41 +18,55 @@ demo produces enough instrumentation and labeled examples.
 
 ## Research Notes
 
-Use `zk` for research notes. This repo has a notebook at `notes/`.
+Use `remarked-cli` for research notes. Always target this project with
+`--proj tron`.
 
-As work progresses, save important notes into `notes/` with `zk`. Do this
-when discovering hardware behavior, making or changing research assumptions,
+As work progresses, save important notes with `remarked-cli`. Do this when
+discovering hardware behavior, making or changing research assumptions,
 choosing an implementation direction, observing model/pipeline behavior,
 finding a bug or limitation that affects future work, or leaving a follow-up
 task for the next session. Prefer short notes captured close to the observation
 over reconstructing context later.
 
+Do not log administrative events. Notes should be related to actual research or
+technical decisions.
+
 Every research note must include:
 
 - an ISO-8601 timestamp
-- the `#tron` tag
 - the question or hypothesis being tested
 - the observed result, even if inconclusive
 - follow-up tasks or instrumentation gaps
 
-Task notes must include both `#tron` and `#task`.
+Always set a meaningful `--title`. Do not include a markdown `# title` heading
+inside the note body.
+
+Always set `--tags` to include `codex` plus extra comma-separated tags that
+describe the work, such as `calibration`, `tracking`, `depth`, `camera`,
+`diagnostics`, or `task`.
 
 Useful commands:
 
 ```sh
-zk --notebook-dir notes -W notes new --title "Title" --print-path
-zk --notebook-dir notes -W notes list --tag tron --format oneline
-zk --notebook-dir notes -W notes list --tag tron --tag task --format oneline
-zk --notebook-dir notes -W notes index
+remarked-cli --proj tron --title "Meaningful title" --tags "codex,calibration" "Timestamp: $(date --iso-8601=seconds)
+
+Question / hypothesis: ...
+
+Observed result: ...
+
+Follow-up tasks / instrumentation gaps: ..."
 ```
 
 Quick disposable-note check:
 
 ```sh
-zk --notebook-dir notes -W notes new --title "Codex test note" --print-path
-date --iso-8601=seconds
-zk --notebook-dir notes -W notes list --tag tron --tag task --format oneline
-rm notes/<generated-id>.md
+remarked-cli --proj tron --title "Codex remarked test" --tags "codex,test" "Timestamp: $(date --iso-8601=seconds)
+
+Question / hypothesis: Verify remarked-cli can create notes for tron from Codex.
+
+Observed result: Test note created through remarked-cli.
+
+Follow-up tasks / instrumentation gaps: Remove this disposable test note after verification."
 ```
 
 ## Architecture Direction
@@ -99,7 +113,7 @@ evidence.
 
 When adding a model or backend, expose it through the existing module boundary
 first. If the boundary does not fit, adjust the boundary deliberately and note
-the reason in `zk`.
+the reason with `remarked-cli`.
 
 Do not make hardware-specific code a dependency of the core pipeline. Keep it
 behind camera, sensor, or inference adapters.

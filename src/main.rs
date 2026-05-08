@@ -326,6 +326,11 @@ fn handle_key(code: KeyCode, repeat: bool, controls: &types::PipelineControls) {
         KeyCode::KeyS => calib::modify(|c| c.scale_y += NUDGE_SCALE),
         KeyCode::KeyB => calib::modify(|c| c.use_binary = !c.use_binary),
         KeyCode::KeyR => calib::reset(),
+        KeyCode::KeyO => {
+            if let Err(e) = calib::save() {
+                eprintln!("calib: save failed: {e}");
+            }
+        }
         KeyCode::KeyP => eprintln!("calib: {:?}", calib::current()),
         _ => {}
     }
@@ -485,6 +490,7 @@ fn main() -> Result<()> {
     );
     let rgb_size = (camera_set.rgb.width, camera_set.rgb.height);
     let ir_size = (camera_set.ir.width, camera_set.ir.height);
+    calib::init(&camera_set.label, rgb_size, ir_size);
     let rgb_src = camera::spawn_config(camera_set.rgb.clone())?;
     let ir_src = camera::spawn_config(camera_set.ir.clone())?;
     let prox_src = proximity::spawn("prox", "proximity1")?;

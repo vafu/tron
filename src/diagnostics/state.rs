@@ -17,9 +17,19 @@ pub struct DiagnosticsSnapshot {
     pub interval_ms: f32,
     pub input_age_ms: f32,
     pub proximity: Option<i64>,
+    pub calibration: DiagnosticsCalibration,
     pub hand: Option<DiagnosticsHand>,
     pub ir_depth: Option<DiagnosticsIrDepth>,
     pub pointer: Option<DiagnosticsPointer>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DiagnosticsCalibration {
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub use_binary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +105,7 @@ impl DiagnosticsSnapshot {
             delta: d.delta,
             confidence: d.confidence,
         });
+        let calib = crate::calib::current();
 
         Self {
             updated_unix_ms: now_unix_ms(),
@@ -105,6 +116,13 @@ impl DiagnosticsSnapshot {
             interval_ms,
             input_age_ms,
             proximity,
+            calibration: DiagnosticsCalibration {
+                scale_x: calib.scale_x,
+                scale_y: calib.scale_y,
+                offset_x: calib.offset_x,
+                offset_y: calib.offset_y,
+                use_binary: calib.use_binary,
+            },
             hand: state.map(|s| DiagnosticsHand {
                 gesture: s.gesture.map(|g| g.name()),
                 presence: s.landmarks.presence,
@@ -137,6 +155,14 @@ impl DiagnosticsSnapshot {
         push_float(&mut out, "interval_ms", self.interval_ms);
         push_float(&mut out, "input_age_ms", self.input_age_ms);
         push_opt_i64(&mut out, "proximity", self.proximity);
+
+        out.push_str("\"calibration\":{");
+        push_float(&mut out, "scale_x", self.calibration.scale_x);
+        push_float(&mut out, "scale_y", self.calibration.scale_y);
+        push_float(&mut out, "offset_x", self.calibration.offset_x);
+        push_float(&mut out, "offset_y", self.calibration.offset_y);
+        push_bool_last(&mut out, "use_binary", self.calibration.use_binary);
+        out.push_str("},");
 
         out.push_str("\"hand\":");
         if let Some(hand) = &self.hand {
@@ -209,6 +235,13 @@ impl Default for DiagnosticsSnapshot {
             interval_ms: 0.0,
             input_age_ms: 0.0,
             proximity: None,
+            calibration: DiagnosticsCalibration {
+                scale_x: 1.0,
+                scale_y: 1.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                use_binary: false,
+            },
             hand: None,
             ir_depth: None,
             pointer: None,
@@ -284,6 +317,13 @@ fn push_bool(out: &mut String, key: &str, value: bool) {
     out.push_str("\":");
     out.push_str(if value { "true" } else { "false" });
     out.push(',');
+}
+
+fn push_bool_last(out: &mut String, key: &str, value: bool) {
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\":");
+    out.push_str(if value { "true" } else { "false" });
 }
 
 fn push_str(out: &mut String, key: &str, value: &str) {

@@ -24,6 +24,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   <h1>tron diagnostics <span id="age" class="stale"></span></h1>
   <div class="grid">
     <section><h2>Pipeline</h2><dl id="pipeline"></dl></section>
+    <section><h2>Calibration</h2><dl id="calibration"></dl></section>
     <section><h2>Hand</h2><dl id="hand"></dl></section>
     <section><h2>IR Depth</h2><dl id="depth"></dl></section>
     <section><h2>Pointer</h2><dl id="pointer"></dl></section>
@@ -87,6 +88,13 @@ async function tick() {
       ["handedness", s.hand.handedness],
       ["roi", `${fmt(s.hand.roi.x,2)},${fmt(s.hand.roi.y,2)} ${fmt(s.hand.roi.w,2)}x${fmt(s.hand.roi.h,2)}`],
       ["features", s.hand.gesture_features],
+    ] : [["state", "none"]]);
+    rows("calibration", s.calibration ? [
+      ["scale x", s.calibration.scale_x],
+      ["scale y", s.calibration.scale_y],
+      ["offset x", s.calibration.offset_x],
+      ["offset y", s.calibration.offset_y],
+      ["binary", s.calibration.use_binary],
     ] : [["state", "none"]]);
     rows("depth", s.ir_depth ? [
       ["corrected", s.ir_depth.corrected_signal],

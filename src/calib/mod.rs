@@ -1,26 +1,58 @@
 use crate::types::RectNorm;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-/// Quick-and-dirty IR↔RGB camera registration.
+/// Quick-and-dirty IR↔RGB camera registration. `AffineCalib` maps normalized IR
+/// coordinates into normalized RGB coordinates; `unmap_*` does the reverse.
 ///
-/// Both cameras share a module but expose different sensor crops:
-///   RGB: 640×480 (4:3)
-///   IR : 640×360 (16:9)
-///
-/// First-pass guess: same horizontal sensor coverage; IR is the central
-/// horizontal strip of an equivalent vertical extent → vertical letterbox of
-/// (480-360)/2 = 60 px on each side ⇒ scale_y = 360/480 = 0.75, offset_y =
-/// 60/480 = 0.125. Live-tunable at runtime via keyboard (see `main.rs`); the
-/// final values can then be pasted back into `DEFAULT` for persistence.
-pub const DEFAULT: AffineCalib = AffineCalib {
-    scale_x: 1.22,
-    scale_y: 0.89,
-    offset_x: -0.12,
-    offset_y: 0.03,
+/// This is intentionally a first-order model. It handles translation and scale
+/// while we build a real measured RGB↔IR calibration workflow.
+pub const FALLBACK: AffineCalib = AffineCalib {
+    scale_x: 1.0,
+    scale_y: 1.0,
+    offset_x: 0.0,
+    offset_y: 0.0,
     use_binary: false,
 };
 
-static IR_TO_RGB: RwLock<AffineCalib> = RwLock::new(DEFAULT);
+#[derive(Clone, Debug)]
+struct ActiveProfile {
+    camera_label: String,
+    path: PathBuf,
+    default: AffineCalib,
+}
+
+static IR_TO_RGB: RwLock<AffineCalib> = RwLock::new(FALLBACK);
+static PROFILE: RwLock<Option<ActiveProfile>> = RwLock::new(None);
+
+pub fn init(camera_label: &str, rgb_size: (u32, u32), ir_size: (u32, u32)) {
+    let default = default_from_sizes(rgb_size, ir_size);
+    let path = profile_path(camera_label);
+    let loaded = load_from_path(&path);
+    let calib = loaded.unwrap_or(default);
+
+    *IR_TO_RGB.write().unwrap() = calib;
+    *PROFILE.write().unwrap() = Some(ActiveProfile {
+        camera_label: camera_label.to_string(),
+        path: path.clone(),
+        default,
+    });
+
+    eprintln!(
+        "calib: {} {} scale=({:.3}, {:.3}) offset=({:.3}, {:.3}) binary={}",
+        if loaded.is_some() {
+            "loaded"
+        } else {
+            "default"
+        },
+        path.display(),
+        calib.scale_x,
+        calib.scale_y,
+        calib.offset_x,
+        calib.offset_y,
+        calib.use_binary
+    );
+}
 
 pub fn current() -> AffineCalib {
     *IR_TO_RGB.read().unwrap()
@@ -36,8 +68,33 @@ pub fn modify(f: impl FnOnce(&mut AffineCalib)) {
 }
 
 pub fn reset() {
-    *IR_TO_RGB.write().unwrap() = DEFAULT;
-    eprintln!("calib: reset to default");
+    let default = PROFILE
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.default)
+        .unwrap_or(FALLBACK);
+    *IR_TO_RGB.write().unwrap() = default;
+    eprintln!("calib: reset to profile default");
+}
+
+pub fn save() -> std::io::Result<()> {
+    let calib = current();
+    let profile = PROFILE.read().unwrap().clone();
+    let Some(profile) = profile else {
+        eprintln!("calib: no active profile");
+        return Ok(());
+    };
+    if let Some(parent) = profile.path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&profile.path, calib.to_text())?;
+    eprintln!(
+        "calib: saved {} for {}",
+        profile.path.display(),
+        profile.camera_label
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,4 +124,89 @@ impl AffineCalib {
             h: r.h / self.scale_y,
         }
     }
+
+    fn to_text(self) -> String {
+        format!(
+            "scale_x={:.8}\nscale_y={:.8}\noffset_x={:.8}\noffset_y={:.8}\nuse_binary={}\n",
+            self.scale_x, self.scale_y, self.offset_x, self.offset_y, self.use_binary
+        )
+    }
+}
+
+fn default_from_sizes(rgb_size: (u32, u32), ir_size: (u32, u32)) -> AffineCalib {
+    let rgb_ar = aspect(rgb_size);
+    let ir_ar = aspect(ir_size);
+    if rgb_ar <= 0.0 || ir_ar <= 0.0 {
+        return FALLBACK;
+    }
+
+    if rgb_ar > ir_ar {
+        let scale_x = ir_ar / rgb_ar;
+        AffineCalib {
+            scale_x,
+            scale_y: 1.0,
+            offset_x: (1.0 - scale_x) * 0.5,
+            offset_y: 0.0,
+            use_binary: false,
+        }
+    } else {
+        let scale_y = rgb_ar / ir_ar;
+        AffineCalib {
+            scale_x: 1.0,
+            scale_y,
+            offset_x: 0.0,
+            offset_y: (1.0 - scale_y) * 0.5,
+            use_binary: false,
+        }
+    }
+}
+
+fn aspect(size: (u32, u32)) -> f32 {
+    size.0 as f32 / size.1.max(1) as f32
+}
+
+fn profile_path(camera_label: &str) -> PathBuf {
+    PathBuf::from("calib").join(format!("{}.calib", slug(camera_label)))
+}
+
+fn slug(label: &str) -> String {
+    let mut out = String::new();
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "camera".to_string()
+    } else {
+        out
+    }
+}
+
+fn load_from_path(path: &Path) -> Option<AffineCalib> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut calib = FALLBACK;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "scale_x" => calib.scale_x = value.parse().ok()?,
+            "scale_y" => calib.scale_y = value.parse().ok()?,
+            "offset_x" => calib.offset_x = value.parse().ok()?,
+            "offset_y" => calib.offset_y = value.parse().ok()?,
+            "use_binary" => calib.use_binary = value.parse().ok()?,
+            _ => {}
+        }
+    }
+    Some(calib)
 }

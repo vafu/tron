@@ -1,0 +1,18 @@
+[package]
+name = "tron"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tron-api.workspace = true
+tron-core.workspace = true
+
+[[bin]]
+name = "tron-playground"
+path = "src/playground/main.rs"
+
+[[bin]]
+name = "tron-calibration"
+path = "src/calibration/main.rs"

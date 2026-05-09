@@ -75,8 +75,12 @@ Keep the runtime modular. The goal is to replace individual pieces without
 rewriting the application shell.
 
 Prefer building new architecture beside the current demo, then porting proven
-pieces into `main`. The existing `tron` and `tron-stream` binaries may contain
-research/playground wiring; avoid turning them into larger catch-all modules.
+pieces into `main`. `tron-pipeline` is the primary new executable for this
+work. Older binaries such as `tron-stream` may contain research/playground
+wiring; avoid turning them into larger catch-all modules.
+
+Use `clap` derive for command-line interfaces. Avoid hand-rolled argument
+parsers in project binaries.
 
 Directory structure should reflect implementation structure. Use a plain module
 file such as `stream/frame.rs` when the module is only vocabulary, types, or a

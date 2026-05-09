@@ -27,6 +27,20 @@ pub enum PixelFormat {
     Yuyv422,
 }
 
+impl TryFrom<CaptureFormat> for PixelFormat {
+    type Error = anyhow::Error;
+
+    fn try_from(format: CaptureFormat) -> Result<Self, Self::Error> {
+        match format {
+            CaptureFormat::Gray8 => Ok(Self::Gray8),
+            CaptureFormat::Yuyv422 => Ok(Self::Yuyv422),
+            CaptureFormat::Mjpeg => {
+                anyhow::bail!("MJPEG is encoded and cannot be converted to a pixel format")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimestampSource {
     StartOfExposure,
@@ -59,10 +73,22 @@ pub struct EncodedFrame<'a> {
     pub data: &'a [u8],
 }
 
-#[derive(Clone, Copy, Debug, derive_more::From)]
+#[derive(Clone, Copy, Debug)]
 pub enum CapturedFrame<'a> {
     Encoded(EncodedFrame<'a>),
     Frame(Frame<'a>),
+}
+
+impl<'a> From<EncodedFrame<'a>> for CapturedFrame<'a> {
+    fn from(value: EncodedFrame<'a>) -> Self {
+        Self::Encoded(value)
+    }
+}
+
+impl<'a> From<Frame<'a>> for CapturedFrame<'a> {
+    fn from(value: Frame<'a>) -> Self {
+        Self::Frame(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +97,25 @@ pub struct Frame<'a> {
     pub format: PixelFormat,
     pub stride: usize,
     pub data: &'a [u8],
+}
+
+#[derive(Debug)]
+pub struct FrameMut<'a> {
+    pub meta: FrameMeta,
+    pub format: PixelFormat,
+    pub stride: usize,
+    pub data: &'a mut [u8],
+}
+
+impl FrameMut<'_> {
+    pub fn as_frame(&self) -> Frame<'_> {
+        Frame {
+            meta: self.meta,
+            format: self.format,
+            stride: self.stride,
+            data: self.data,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +133,15 @@ impl OwnedFrame {
             format: self.format,
             stride: self.stride,
             data: &self.data,
+        }
+    }
+
+    pub fn as_frame_mut(&mut self) -> FrameMut<'_> {
+        FrameMut {
+            meta: self.meta,
+            format: self.format,
+            stride: self.stride,
+            data: &mut self.data,
         }
     }
 }

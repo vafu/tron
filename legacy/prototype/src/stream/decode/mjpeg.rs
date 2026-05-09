@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use crate::stream::decode::{DecodeOutput, FrameDecoder};
+use crate::stream::decode::FrameDecoder;
 use crate::stream::frame::{EncodedFormat, EncodedFrame, Frame, PixelFormat};
 
 pub struct TurboMjpegDecoder {
@@ -23,7 +23,7 @@ impl TurboMjpegDecoder {
 }
 
 impl FrameDecoder for TurboMjpegDecoder {
-    fn decode<'a>(&'a mut self, frame: EncodedFrame<'_>) -> Result<DecodeOutput<'a>> {
+    fn decode<'a>(&'a mut self, frame: EncodedFrame<'_>) -> Result<Frame<'a>> {
         if frame.format != EncodedFormat::Mjpeg {
             anyhow::bail!("TurboJPEG decoder only supports MJPEG frames");
         }
@@ -58,12 +58,12 @@ impl FrameDecoder for TurboMjpegDecoder {
             )
             .context("decode MJPEG frame")?;
 
-        Ok(DecodeOutput::Borrowed(Frame {
+        Ok(Frame {
             meta: frame.meta,
             format: self.output_format,
             stride,
             data: &self.buffer,
-        }))
+        })
     }
 }
 

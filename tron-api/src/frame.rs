@@ -3,6 +3,12 @@ use std::time::Instant;
 pub type FrameId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SensorKind {
     Rgb,
     Ir,
@@ -60,8 +66,7 @@ pub struct FrameTimestamp {
 pub struct FrameMeta {
     pub id: FrameId,
     pub sensor: SensorKind,
-    pub width: u32,
-    pub height: u32,
+    pub size: FrameSize,
     pub timestamp: FrameTimestamp,
     pub sequence: Option<u64>,
 }

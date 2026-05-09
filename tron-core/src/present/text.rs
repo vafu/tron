@@ -36,8 +36,8 @@ impl<'a> Presenter<FrameViewModel<'a, FrameStats>> for TextStatsPresenter {
                     format!(
                         "{}={}x{} {:?} stride={} len={} age={:.2}ms id={} seq={:?}",
                         named.name,
-                        frame.meta.width,
-                        frame.meta.height,
+                        frame.meta.size.width,
+                        frame.meta.size.height,
                         frame.format,
                         frame.stride,
                         frame.data.len(),

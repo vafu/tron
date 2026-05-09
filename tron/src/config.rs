@@ -1,53 +1,56 @@
 use clap::{Args, ValueEnum};
-use tron_api::{CaptureFormat, PixelFormat, SensorKind};
-use tron_core::capture::v4l::V4lSourceConfig;
+use tron_api::{
+    CameraOpenRequest, CameraSelector, CaptureFormat, FrameSize, PixelFormat, SensorKind,
+};
 
 #[derive(Clone, Debug, Args)]
 pub struct CameraArgs {
-    /// Human-oriented camera selector. Name resolution is intentionally not wired yet.
+    /// Human-oriented camera selector matched by the selected camera backend.
     #[arg(long)]
     pub camera: Option<String>,
 
-    /// V4L capture node.
-    #[arg(long, default_value = "/dev/video53")]
-    pub device: String,
+    /// Backend-native camera identifier. On V4L this is a path such as /dev/video51.
+    #[arg(long, alias = "device")]
+    pub camera_id: Option<String>,
 
     /// Sensor label attached to captured frame metadata.
     #[arg(long, value_enum, default_value = "rgb")]
     pub sensor: SensorArg,
 
-    /// Requested capture format.
-    #[arg(long, value_enum, default_value = "mjpg")]
-    pub format: CaptureFormatArg,
+    /// Requested capture format. If omitted, the backend keeps its default.
+    #[arg(long, value_enum)]
+    pub format: Option<CaptureFormatArg>,
 
-    /// Requested capture size.
-    #[arg(long, value_parser = parse_size, default_value = "1280x720")]
-    pub size: Size,
+    /// Requested capture size. If omitted, the backend keeps its default.
+    #[arg(long, value_parser = parse_size)]
+    pub size: Option<Size>,
 
-    /// Requested frame rate.
-    #[arg(long, value_parser = parse_positive_u32, default_value = "30")]
-    pub fps: u32,
+    /// Requested frame rate. If omitted, the backend keeps its default.
+    #[arg(long, value_parser = parse_positive_u32)]
+    pub fps: Option<u32>,
 
-    /// Requested V4L mmap buffer count.
-    #[arg(long, value_parser = parse_positive_u32, default_value = "4")]
-    pub buffers: u32,
+    /// Requested capture buffer count. If omitted, the backend chooses.
+    #[arg(long, value_parser = parse_positive_u32)]
+    pub buffers: Option<u32>,
 }
 
 impl CameraArgs {
-    pub fn capture_format(&self) -> CaptureFormat {
-        self.format.into()
+    pub fn open_request(&self) -> CameraOpenRequest {
+        CameraOpenRequest {
+            selector: CameraSelector {
+                id: self.camera_id.clone(),
+                name: self.camera.clone(),
+                sensor: self.sensor.into(),
+            },
+            format: self.format.map(Into::into),
+            size: self.size.map(Into::into),
+            fps: self.fps,
+            buffers: self.buffers,
+        }
     }
 
-    pub fn to_v4l_config(&self) -> V4lSourceConfig {
-        V4lSourceConfig::new(
-            self.device.clone(),
-            self.sensor.into(),
-            self.format.into(),
-            self.size.width,
-            self.size.height,
-        )
-        .with_fps(self.fps)
-        .with_buffers(self.buffers)
+    pub fn requested_format(&self) -> Option<CaptureFormat> {
+        self.format.map(Into::into)
     }
 }
 
@@ -124,6 +127,15 @@ impl From<PixelFormatArg> for PixelFormat {
             PixelFormatArg::Gray8 => Self::Gray8,
             PixelFormatArg::Bgra8 => Self::Bgra8,
             PixelFormatArg::Yuyv422 => Self::Yuyv422,
+        }
+    }
+}
+
+impl From<Size> for FrameSize {
+    fn from(value: Size) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
         }
     }
 }

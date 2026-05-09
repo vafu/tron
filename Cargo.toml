@@ -11,6 +11,10 @@ anyhow = "1"
 clap = { version = "4.6.1", features = ["derive"] }
 tron-api = { path = "tron-api" }
 tron-core = { path = "tron-core" }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.3"
+wgpu = "22"
+winit = "0.30"
 
 [profile.dev]
 opt-level = 1

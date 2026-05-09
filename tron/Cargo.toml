@@ -6,13 +6,15 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+pollster.workspace = true
 tron-api.workspace = true
 tron-core.workspace = true
+winit.workspace = true
 
 [[bin]]
-name = "tron-playground"
+name = "playground"
 path = "src/playground/main.rs"
 
 [[bin]]
-name = "tron-calibration"
+name = "calibration"
 path = "src/calibration/main.rs"

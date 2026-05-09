@@ -32,12 +32,12 @@ impl FrameDecoder for TurboMjpegDecoder {
         let header_width = header.width as u32;
         let header_height = header.height as u32;
         anyhow::ensure!(
-            frame.meta.width == header_width && frame.meta.height == header_height,
+            frame.meta.size.width == header_width && frame.meta.size.height == header_height,
             "MJPEG payload dimensions {}x{} do not match frame metadata {}x{}",
             header_width,
             header_height,
-            frame.meta.width,
-            frame.meta.height
+            frame.meta.size.width,
+            frame.meta.size.height
         );
 
         let stride = header.width * self.turbojpeg_format.size();

@@ -1,2 +1,5 @@
 target/
 .zk/
+legacy/
+AGENTS.md
+TODO.md

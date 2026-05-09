@@ -7,8 +7,8 @@ pub mod source;
 pub use decode::FrameDecoder;
 pub use frame::{
     CaptureFormat, CapturedFrame, EncodedFormat, EncodedFrame, Frame, FrameId, FrameMeta, FrameMut,
-    FrameTimestamp, OwnedFrame, PixelFormat, SensorKind, TimestampSource,
+    FrameSize, FrameTimestamp, OwnedFrame, PixelFormat, SensorKind, TimestampSource,
 };
 pub use present::{FrameStats, FrameViewModel, NamedFrame, NoContext, Presenter};
 pub use process::{InPlaceFrameProcessor, Processor};
-pub use source::FrameSource;
+pub use source::{CameraOpenRequest, CameraOpener, CameraSelector, FrameSource, OpenedCameraInfo};

@@ -88,7 +88,7 @@ impl FrameSource for V4lFrameSource {
         &self.info
     }
 
-    fn next_frame(&mut self) -> Result<CapturedFrame<'_>> {
+    fn next_frame(&mut self) -> Result<Option<CapturedFrame<'_>>> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
 
@@ -98,21 +98,25 @@ impl FrameSource for V4lFrameSource {
         let meta = frame_meta(id, self.info.sensor, self.info.size, v4l_meta);
 
         match self.info.format {
-            CaptureFormat::Mjpeg => Ok(EncodedFrame {
-                meta,
-                format: EncodedFormat::Mjpeg,
-                data,
-            }
-            .into()),
-            CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
-                let format = PixelFormat::try_from(self.info.format)?;
-                Ok(Frame {
+            CaptureFormat::Mjpeg => Ok(Some(
+                EncodedFrame {
                     meta,
-                    format,
-                    stride: stride(format, self.info.size.width),
+                    format: EncodedFormat::Mjpeg,
                     data,
                 }
-                .into())
+                .into(),
+            )),
+            CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
+                let format = PixelFormat::try_from(self.info.format)?;
+                Ok(Some(
+                    Frame {
+                        meta,
+                        format,
+                        stride: stride(format, self.info.size.width),
+                        data,
+                    }
+                    .into(),
+                ))
             }
         }
     }

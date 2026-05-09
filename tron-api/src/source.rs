@@ -35,5 +35,5 @@ pub trait CameraOpener {
 pub trait FrameSource {
     fn info(&self) -> &OpenedCameraInfo;
 
-    fn next_frame(&mut self) -> Result<CapturedFrame<'_>>;
+    fn next_frame(&mut self) -> Result<Option<CapturedFrame<'_>>>;
 }

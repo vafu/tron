@@ -1,6 +1,7 @@
 use crate::overlay::{RoiOverlayPresenter, RoiOverlayView};
 use crate::roi::RoiController;
 use crate::sweep::RoiSweep;
+use crate::uvc_step::UvcStepper;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,10 +19,11 @@ pub fn run(
     stream: Box<dyn FrameStream + 'static>,
     controller: RoiController,
     sweep_speed: f32,
+    uvc_stepper: Option<UvcStepper>,
 ) -> Result<()> {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(stream, controller, sweep_speed);
+    let mut app = WindowApp::new(stream, controller, sweep_speed, uvc_stepper);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -37,11 +39,17 @@ struct WindowApp {
     cursor_position: Option<PhysicalPosition<f64>>,
     dragging_roi: bool,
     sweep: RoiSweep,
+    uvc_stepper: Option<UvcStepper>,
     result: Result<()>,
 }
 
 impl WindowApp {
-    fn new(stream: Box<dyn FrameStream>, controller: RoiController, sweep_speed: f32) -> Self {
+    fn new(
+        stream: Box<dyn FrameStream>,
+        controller: RoiController,
+        sweep_speed: f32,
+        uvc_stepper: Option<UvcStepper>,
+    ) -> Self {
         Self {
             stream,
             controller,
@@ -56,6 +64,7 @@ impl WindowApp {
             cursor_position: None,
             dragging_roi: false,
             sweep: RoiSweep::new(sweep_speed),
+            uvc_stepper,
             result: Ok(()),
         }
     }
@@ -121,6 +130,14 @@ impl WindowApp {
                 self.sweep.adjust_speed(-1.0);
                 eprintln!("roi-sweep: speed={:.1}px/s", self.sweep.speed());
                 Ok(())
+            }
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                if let Some(stepper) = self.uvc_stepper.as_mut() {
+                    stepper.step()
+                } else {
+                    eprintln!("uvc-step: disabled; restart roi-control with --uvc-step");
+                    Ok(())
+                }
             }
             _ => Ok(()),
         };
@@ -264,16 +281,19 @@ impl ApplicationHandler for WindowApp {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                match self.stream.next_frame().and_then(|frame| {
-                    self.latest_size = Some(frame.meta.size);
-                    self.sweep
-                        .update(&mut self.controller, frame.meta.size, now)?;
-                    self.sweep
-                        .maybe_log(frame, self.controller.rect(), Instant::now());
-                    presenter.present(RoiView {
-                        frame,
-                        roi: self.controller.rect(),
-                    })
+                match self.stream.next_frame().and_then(|frame| match frame {
+                    Some(frame) => {
+                        self.latest_size = Some(frame.meta.size);
+                        self.sweep
+                            .update(&mut self.controller, frame.meta.size, now)?;
+                        self.sweep
+                            .maybe_log(frame, self.controller.rect(), Instant::now());
+                        presenter.present(RoiView {
+                            frame,
+                            roi: self.controller.rect(),
+                        })
+                    }
+                    None => Ok(()),
                 }) {
                     Ok(()) => {}
                     Err(err) => {

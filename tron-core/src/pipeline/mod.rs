@@ -2,7 +2,7 @@ use anyhow::Result;
 use tron_api::{CapturedFrame, Frame, FrameDecoder, FrameSource};
 
 pub trait FrameStream {
-    fn next_frame(&mut self) -> Result<Frame<'_>>;
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>>;
 }
 
 pub struct PassthroughStream<S> {
@@ -27,14 +27,15 @@ impl<S> FrameStream for PassthroughStream<S>
 where
     S: FrameSource,
 {
-    fn next_frame(&mut self) -> Result<Frame<'_>> {
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         match self.source.next_frame()? {
-            CapturedFrame::Frame(frame) => Ok(frame),
-            CapturedFrame::Encoded(frame) => anyhow::bail!(
+            Some(CapturedFrame::Frame(frame)) => Ok(Some(frame)),
+            Some(CapturedFrame::Encoded(frame)) => anyhow::bail!(
                 "passthrough stream received encoded frame {:?} from sensor {:?}",
                 frame.format,
                 frame.meta.sensor
             ),
+            None => Ok(None),
         }
     }
 }
@@ -71,14 +72,15 @@ where
     S: FrameSource,
     D: FrameDecoder,
 {
-    fn next_frame(&mut self) -> Result<Frame<'_>> {
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         match self.source.next_frame()? {
-            CapturedFrame::Encoded(frame) => self.decoder.decode(frame),
-            CapturedFrame::Frame(frame) => anyhow::bail!(
+            Some(CapturedFrame::Encoded(frame)) => self.decoder.decode(frame).map(Some),
+            Some(CapturedFrame::Frame(frame)) => anyhow::bail!(
                 "decode stream received pixel frame {:?} from sensor {:?}",
                 frame.format,
                 frame.meta.sensor
             ),
+            None => Ok(None),
         }
     }
 }

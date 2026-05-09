@@ -11,6 +11,7 @@ use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
 mod overlay;
 mod roi;
 mod sweep;
+mod uvc_step;
 mod window;
 
 #[derive(Debug, Parser)]
@@ -35,6 +36,18 @@ struct Cli {
     /// Initial autopilot sweep speed in pixels per second.
     #[arg(long, default_value_t = 160.0)]
     sweep_speed: f32,
+
+    /// Enable Enter-to-step UVC mode writes for emitter experiments.
+    #[arg(long)]
+    uvc_step: bool,
+
+    /// UVC extension unit used by --uvc-step.
+    #[arg(long, default_value_t = 4)]
+    uvc_unit: u8,
+
+    /// UVC extension selector used by --uvc-step.
+    #[arg(long, default_value_t = 6)]
+    uvc_selector: u8,
 }
 
 fn main() -> Result<()> {
@@ -66,7 +79,16 @@ fn run(cli: Cli) -> Result<()> {
     };
 
     let controller = roi::RoiController::new(info.id.clone(), cli.roi, cli.step);
-    window::run(stream, controller, cli.sweep_speed)
+    let uvc_stepper = if cli.uvc_step {
+        Some(uvc_step::UvcStepper::new(
+            info.id.clone(),
+            cli.uvc_unit,
+            cli.uvc_selector,
+        )?)
+    } else {
+        None
+    };
+    window::run(stream, controller, cli.sweep_speed, uvc_stepper)
 }
 
 fn camera_request(cli: &Cli) -> CameraOpenRequest {

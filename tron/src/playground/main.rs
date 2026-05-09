@@ -7,8 +7,11 @@ use tron_api::{
 use tron_core::capture::v4l::V4lCameraOpener;
 use tron_core::decode::mjpeg::TurboMjpegDecoder;
 use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
+use tron_core::present::http::HttpMetadataPresenter;
 
-mod latency;
+mod latest;
+mod pipeline;
+mod presenter;
 mod window;
 
 #[derive(Debug, Parser)]
@@ -25,6 +28,14 @@ struct Cli {
     /// Backend-native IR camera identifier. On V4L this is a path such as /dev/video51.
     #[arg(long)]
     ir_camera_id: Option<String>,
+
+    /// Local HTTP port for live metadata.
+    #[arg(long, default_value_t = 8787)]
+    metadata_port: u16,
+
+    /// Disable the local HTTP metadata endpoint.
+    #[arg(long)]
+    no_metadata_http: bool,
 }
 
 fn main() -> Result<()> {
@@ -49,7 +60,7 @@ fn run(cli: Cli) -> Result<()> {
     let rgb_stream = match rgb_info.format {
         CaptureFormat::Mjpeg => {
             let decoder = TurboMjpegDecoder::new(PixelFormat::from(cli.decode_format))?;
-            Box::new(DecodeStream::new(rgb_source, decoder)) as Box<dyn FrameStream>
+            Box::new(DecodeStream::new(rgb_source, decoder)) as Box<dyn FrameStream + Send>
         }
         CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
             anyhow::bail!("playground RGB feed currently requires MJPEG")
@@ -65,14 +76,27 @@ fn run(cli: Cli) -> Result<()> {
     let ir_stream = match ir_info.format {
         CaptureFormat::Mjpeg => {
             let decoder = TurboMjpegDecoder::new(PixelFormat::Bgra8)?;
-            Box::new(DecodeStream::new(ir_source, decoder)) as Box<dyn FrameStream>
+            Box::new(DecodeStream::new(ir_source, decoder)) as Box<dyn FrameStream + Send>
         }
         CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
-            Box::new(PassthroughStream::new(ir_source)) as Box<dyn FrameStream>
+            Box::new(PassthroughStream::new(ir_source)) as Box<dyn FrameStream + Send>
         }
     };
 
-    window::run(rgb_stream, ir_stream)
+    let rgb_latest = latest::LatestFrameSource::spawn("rgb", rgb_stream);
+    let ir_latest = latest::LatestFrameSource::spawn("ir", ir_stream);
+    let metadata = if cli.no_metadata_http {
+        None
+    } else {
+        let presenter =
+            HttpMetadataPresenter::bind_available(("127.0.0.1", cli.metadata_port), 20)?;
+        eprintln!(
+            "tron-playground: metadata http://{}/metadata",
+            presenter.local_addr()
+        );
+        Some(presenter)
+    };
+    window::run(rgb_latest, ir_latest, metadata)
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tron-api.workspace = true
 turbojpeg = { version = "1.4", default-features = false, features = ["pkg-config", "require-simd"] }
 v4l = "0.14"

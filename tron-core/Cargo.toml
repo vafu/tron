@@ -10,4 +10,3 @@ tron-api.workspace = true
 turbojpeg = { version = "1.4", default-features = false, features = ["pkg-config", "require-simd"] }
 v4l = "0.14"
 wgpu.workspace = true
-winit.workspace = true

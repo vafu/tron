@@ -1,9 +1,23 @@
-use anyhow::{Context, Result};
-use std::sync::Arc;
-use tron_api::{FrameStats, FrameViewModel, PixelFormat, Presenter};
+use anyhow::Result;
+use tron_api::{Frame, FrameSize, PixelFormat, Presenter};
 use wgpu::util::DeviceExt;
-use winit::dpi::PhysicalSize;
-use winit::window::Window;
+
+#[derive(Clone, Copy, Debug)]
+pub struct NdcRect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl NdcRect {
+    pub const FULL: Self = Self {
+        x0: -1.0,
+        y0: -1.0,
+        x1: 1.0,
+        y1: 1.0,
+    };
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -18,18 +32,22 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
 };
 
-pub struct WgpuPresenter {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    size: PhysicalSize<u32>,
+pub struct WgpuFramePresenter {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
     texture: Option<FrameTexture>,
+    bgra_scratch: Vec<u8>,
+}
+
+pub struct WgpuFrameView<'frame, 'pass> {
+    pub device: &'frame wgpu::Device,
+    pub queue: &'frame wgpu::Queue,
+    pub pass: &'frame mut wgpu::RenderPass<'pass>,
+    pub frame: Frame<'frame>,
+    pub rect: NdcRect,
+    pub target_size: FrameSize,
 }
 
 struct FrameTexture {
@@ -39,57 +57,8 @@ struct FrameTexture {
     height: u32,
 }
 
-impl WgpuPresenter {
-    pub async fn new(window: Arc<Window>) -> Result<Self> {
-        let size = window.inner_size();
-        anyhow::ensure!(
-            size.width > 0 && size.height > 0,
-            "window surface cannot be initialized at zero size"
-        );
-
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .context("request wgpu adapter")?;
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("tron-wgpu-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                },
-                None,
-            )
-            .await
-            .context("request wgpu device")?;
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|format| format.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
+impl WgpuFramePresenter {
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tron-frame-bind-group-layout"),
@@ -130,7 +99,7 @@ impl WgpuPresenter {
                 module: &shader,
                 entry_point: "fs",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -160,53 +129,97 @@ impl WgpuPresenter {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        Ok(Self {
-            window,
-            surface,
-            device,
-            queue,
-            config,
-            size,
+        Self {
             pipeline,
             bind_group_layout,
             sampler,
             vertex_buffer,
             texture: None,
-        })
-    }
-
-    pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
-            return;
-        }
-        self.size = size;
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
-        if let Some(texture) = &self.texture {
-            self.update_vertices(texture.width, texture.height);
+            bgra_scratch: Vec::new(),
         }
     }
+}
 
-    pub fn window(&self) -> &Window {
-        &self.window
+impl<'frame, 'pass> Presenter<WgpuFrameView<'frame, 'pass>> for WgpuFramePresenter {
+    fn present(&mut self, view: WgpuFrameView<'frame, 'pass>) -> Result<()> {
+        let frame = view.frame;
+        self.ensure_texture(view.device, frame.meta.size);
+        self.update_vertices(view.queue, frame.meta.size, view.rect, view.target_size);
+
+        let (data, stride) = match frame.format {
+            PixelFormat::Bgra8 => {
+                anyhow::ensure!(
+                    frame.stride == frame.meta.size.width as usize * 4,
+                    "WgpuFramePresenter requires tightly packed BGRA8 frames"
+                );
+                (frame.data, frame.stride)
+            }
+            PixelFormat::Gray8 => {
+                anyhow::ensure!(
+                    frame.stride == frame.meta.size.width as usize,
+                    "WgpuFramePresenter requires tightly packed Gray8 frames"
+                );
+                let pixel_count = frame.meta.size.width as usize * frame.meta.size.height as usize;
+                self.bgra_scratch.resize(pixel_count * 4, 255);
+                for (i, gray) in frame.data.iter().take(pixel_count).copied().enumerate() {
+                    let offset = i * 4;
+                    self.bgra_scratch[offset] = gray;
+                    self.bgra_scratch[offset + 1] = gray;
+                    self.bgra_scratch[offset + 2] = gray;
+                    self.bgra_scratch[offset + 3] = 255;
+                }
+                (&self.bgra_scratch[..], frame.meta.size.width as usize * 4)
+            }
+            PixelFormat::Yuyv422 => {
+                anyhow::bail!("WgpuFramePresenter does not support YUYV422 yet")
+            }
+        };
+
+        let texture = self.texture.as_ref().expect("texture was just created");
+        view.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(stride as u32),
+                rows_per_image: Some(frame.meta.size.height),
+            },
+            wgpu::Extent3d {
+                width: frame.meta.size.width,
+                height: frame.meta.size.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        view.pass.set_pipeline(&self.pipeline);
+        view.pass.set_bind_group(0, &texture.bind_group, &[]);
+        view.pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        view.pass.draw(0..6, 0..1);
+        Ok(())
     }
+}
 
-    fn ensure_texture(&mut self, width: u32, height: u32) {
+impl WgpuFramePresenter {
+    fn ensure_texture(&mut self, device: &wgpu::Device, size: FrameSize) {
         let needs_texture = self
             .texture
             .as_ref()
-            .map(|texture| texture.width != width || texture.height != height)
+            .map(|texture| texture.width != size.width || texture.height != size.height)
             .unwrap_or(true);
         if !needs_texture {
             return;
         }
 
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("tron-frame-texture"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: size.width,
+                height: size.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -217,7 +230,7 @@ impl WgpuPresenter {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tron-frame-bind-group"),
             layout: &self.bind_group_layout,
             entries: &[
@@ -234,15 +247,20 @@ impl WgpuPresenter {
         self.texture = Some(FrameTexture {
             texture,
             bind_group,
-            width,
-            height,
+            width: size.width,
+            height: size.height,
         });
-        self.update_vertices(width, height);
     }
 
-    fn update_vertices(&self, frame_width: u32, frame_height: u32) {
-        let (x0, y0, x1, y1) = letterbox(frame_width, frame_height, self.size);
-        self.queue.write_buffer(
+    fn update_vertices(
+        &self,
+        queue: &wgpu::Queue,
+        frame_size: FrameSize,
+        rect: NdcRect,
+        target_size: FrameSize,
+    ) {
+        let (x0, y0, x1, y1) = letterbox(frame_size, rect, target_size);
+        queue.write_buffer(
             &self.vertex_buffer,
             0,
             bytemuck::cast_slice(&quad(x0, y0, x1, y1)),
@@ -250,107 +268,27 @@ impl WgpuPresenter {
     }
 }
 
-impl<'a> Presenter<FrameViewModel<'a, FrameStats>> for WgpuPresenter {
-    fn present(&mut self, view: FrameViewModel<'a, FrameStats>) -> Result<()> {
-        let Some(named) = view.frames.first() else {
-            return Ok(());
-        };
-        let frame = named.frame;
-        anyhow::ensure!(
-            frame.format == PixelFormat::Bgra8,
-            "WgpuPresenter currently supports only BGRA8 frames, got {:?}",
-            frame.format
-        );
-        anyhow::ensure!(
-            frame.stride == frame.meta.size.width as usize * 4,
-            "WgpuPresenter requires tightly packed BGRA8 frames"
-        );
+fn letterbox(frame: FrameSize, rect: NdcRect, target: FrameSize) -> (f32, f32, f32, f32) {
+    let rect_width_ndc = (rect.x1 - rect.x0).abs();
+    let rect_height_ndc = (rect.y1 - rect.y0).abs();
+    let rect_pixel_width = target.width as f32 * rect_width_ndc / 2.0;
+    let rect_pixel_height = target.height as f32 * rect_height_ndc / 2.0;
+    let frame_aspect = frame.width as f32 / frame.height.max(1) as f32;
+    let rect_aspect = rect_pixel_width / rect_pixel_height.max(1.0);
 
-        self.ensure_texture(frame.meta.size.width, frame.meta.size.height);
-        let texture = self.texture.as_ref().expect("texture was just created");
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &texture.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            frame.data,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(frame.stride as u32),
-                rows_per_image: Some(frame.meta.size.height),
-            },
-            wgpu::Extent3d {
-                width: frame.meta.size.width,
-                height: frame.meta.size.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        let surface_frame = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.config);
-                self.surface
-                    .get_current_texture()
-                    .context("get surface texture after reconfigure")?
-            }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
-            Err(err) => return Err(err).context("get surface texture"),
-        };
-        let surface_view = surface_frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("tron-frame-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("tron-frame-render-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.025,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &texture.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..6, 0..1);
-        }
-        self.queue.submit([encoder.finish()]);
-        surface_frame.present();
-        Ok(())
-    }
-}
-
-fn letterbox(
-    frame_width: u32,
-    frame_height: u32,
-    window: PhysicalSize<u32>,
-) -> (f32, f32, f32, f32) {
-    let frame_aspect = frame_width as f32 / frame_height.max(1) as f32;
-    let window_aspect = window.width as f32 / window.height.max(1) as f32;
-    if window_aspect > frame_aspect {
-        let width = frame_aspect / window_aspect;
-        (-width, -1.0, width, 1.0)
+    if rect_aspect > frame_aspect {
+        let width_ndc = rect_width_ndc * frame_aspect / rect_aspect;
+        let cx = (rect.x0 + rect.x1) * 0.5;
+        (cx - width_ndc * 0.5, rect.y0, cx + width_ndc * 0.5, rect.y1)
     } else {
-        let height = window_aspect / frame_aspect;
-        (-1.0, -height, 1.0, height)
+        let height_ndc = rect_height_ndc * rect_aspect / frame_aspect;
+        let cy = (rect.y0 + rect.y1) * 0.5;
+        (
+            rect.x0,
+            cy - height_ndc * 0.5,
+            rect.x1,
+            cy + height_ndc * 0.5,
+        )
     }
 }
 

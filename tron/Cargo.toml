@@ -5,10 +5,12 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytemuck.workspace = true
 clap.workspace = true
 pollster.workspace = true
 tron-api.workspace = true
 tron-core.workspace = true
+wgpu.workspace = true
 winit.workspace = true
 
 [[bin]]
@@ -18,3 +20,7 @@ path = "src/playground/main.rs"
 [[bin]]
 name = "calibration"
 path = "src/calibration/main.rs"
+
+[[bin]]
+name = "roi-control"
+path = "src/roi/main.rs"

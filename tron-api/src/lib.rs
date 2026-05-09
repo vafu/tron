@@ -9,6 +9,6 @@ pub use frame::{
     CaptureFormat, CapturedFrame, EncodedFormat, EncodedFrame, Frame, FrameId, FrameMeta, FrameMut,
     FrameSize, FrameTimestamp, OwnedFrame, PixelFormat, SensorKind, TimestampSource,
 };
-pub use present::{FrameStats, FrameViewModel, NamedFrame, NoContext, Presenter};
+pub use present::{NoContext, Presenter};
 pub use process::{InPlaceFrameProcessor, Processor};
 pub use source::{CameraOpenRequest, CameraOpener, CameraSelector, FrameSource, OpenedCameraInfo};

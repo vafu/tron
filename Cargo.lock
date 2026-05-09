@@ -1971,10 +1971,12 @@ name = "tron"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "clap",
  "pollster",
  "tron-api",
  "tron-core",
+ "wgpu",
  "winit",
 ]
 
@@ -1995,7 +1997,6 @@ dependencies = [
  "turbojpeg",
  "v4l",
  "wgpu",
- "winit",
 ]
 
 [[package]]

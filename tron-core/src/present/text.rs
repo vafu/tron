@@ -1,6 +1,13 @@
 use anyhow::Result;
 use std::time::{Duration, Instant};
-use tron_api::{FrameStats, FrameViewModel, Presenter};
+use tron_api::{Frame, Presenter};
+
+#[derive(Clone, Copy, Debug)]
+pub struct TextFrameView<'a> {
+    pub name: &'static str,
+    pub frame: Frame<'a>,
+    pub acquire_us: u64,
+}
 
 pub struct TextStatsPresenter {
     interval: Duration,
@@ -20,42 +27,30 @@ impl TextStatsPresenter {
     }
 }
 
-impl<'a> Presenter<FrameViewModel<'a, FrameStats>> for TextStatsPresenter {
-    fn present(&mut self, view: FrameViewModel<'a, FrameStats>) -> Result<()> {
+impl<'a> Presenter<TextFrameView<'a>> for TextStatsPresenter {
+    fn present(&mut self, view: TextFrameView<'a>) -> Result<()> {
         self.frames += 1;
-        self.acquire_us += view.metadata.acquire_us;
+        self.acquire_us += view.acquire_us;
 
         if self.last_log.elapsed() >= self.interval {
             let elapsed = self.last_log.elapsed().as_secs_f32();
             let n = self.frames.max(1) as f32;
-            let frame_summary = view
-                .frames
-                .iter()
-                .map(|named| {
-                    let frame = named.frame;
-                    format!(
-                        "{}={}x{} {:?} stride={} len={} age={:.2}ms id={} seq={:?}",
-                        named.name,
-                        frame.meta.size.width,
-                        frame.meta.size.height,
-                        frame.format,
-                        frame.stride,
-                        frame.data.len(),
-                        frame.meta.timestamp.received_at.elapsed().as_secs_f32() * 1000.0,
-                        frame.meta.id,
-                        frame.meta.sequence
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let first = view.frames.first().map(|named| named.frame);
+            let frame = view.frame;
             eprintln!(
-                "pipeline: fps={:.1} acquire={:.3}ms {} cam_ts={:?} ts_src={:?}",
+                "pipeline: fps={:.1} acquire={:.3}ms {}={}x{} {:?} stride={} len={} age={:.2}ms id={} seq={:?} cam_ts={:?} ts_src={:?}",
                 self.frames as f32 / elapsed,
                 self.acquire_us as f32 / n / 1000.0,
-                frame_summary,
-                first.and_then(|frame| frame.meta.timestamp.camera_monotonic_us),
-                first.map(|frame| frame.meta.timestamp.source)
+                view.name,
+                frame.meta.size.width,
+                frame.meta.size.height,
+                frame.format,
+                frame.stride,
+                frame.data.len(),
+                frame.meta.timestamp.received_at.elapsed().as_secs_f32() * 1000.0,
+                frame.meta.id,
+                frame.meta.sequence,
+                frame.meta.timestamp.camera_monotonic_us,
+                frame.meta.timestamp.source
             );
             self.last_log = Instant::now();
             self.frames = 0;

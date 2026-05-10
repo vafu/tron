@@ -1,8 +1,10 @@
+pub mod capture;
 pub mod decode;
 pub mod frame;
 pub mod present;
 pub mod process;
-pub mod source;
+pub mod roi;
+pub mod stream;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
@@ -17,6 +19,32 @@ pub struct Rect {
     pub size: Size,
 }
 
+impl Rect {
+    pub fn clamp_to(self, bounds: Size) -> Self {
+        let width = self.size.width.min(bounds.width).max(1);
+        let height = self.size.height.min(bounds.height).max(1);
+        let x = self.x.min(bounds.width.saturating_sub(width));
+        let y = self.y.min(bounds.height.saturating_sub(height));
+        Self {
+            x,
+            y,
+            size: Size { width, height },
+        }
+    }
+
+    pub fn non_empty_or(self, size: Size) -> Self {
+        if self.size.width > 0 && self.size.height > 0 {
+            self
+        } else {
+            Self {
+                x: self.x,
+                y: self.y,
+                size,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a> {
     pub meta: frame::FrameMeta,
@@ -26,6 +54,9 @@ pub struct View<'a> {
     pub data: &'a [u8],
 }
 
+pub use capture::{
+    CameraOpenRequest, CameraOpener, CameraRoiControl, CameraSelector, OpenedCameraInfo,
+};
 pub use decode::FrameDecoder;
 pub use frame::{
     CaptureFormat, CapturedFrame, EncodedFormat, EncodedFrame, Frame, FrameId, FrameMeta, FrameMut,
@@ -33,4 +64,5 @@ pub use frame::{
 };
 pub use present::{NoContext, Presenter};
 pub use process::{InPlaceFrameProcessor, Processor};
-pub use source::{CameraOpenRequest, CameraOpener, CameraSelector, FrameSource, OpenedCameraInfo};
+pub use roi::{RoiCandidate, RoiProcessor, RoiResult};
+pub use stream::FrameSource;

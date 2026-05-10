@@ -5,6 +5,7 @@ use tron_api::{
     CameraOpenRequest, CameraOpener, CaptureFormat, FrameSource, PixelFormat, SensorKind,
 };
 use tron_core::capture::v4l::V4lCameraOpener;
+use tron_core::capture::v4l_control::V4lCameraRoiControl;
 use tron_core::decode::mjpeg::TurboMjpegDecoder;
 use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
 
@@ -27,7 +28,7 @@ struct Cli {
 
     /// Initial ROI rectangle as x,y,width,height in frame pixels.
     #[arg(long, value_parser = parse_roi, default_value = "280,140,80,80")]
-    roi: roi::RoiRect,
+    roi: tron_api::Rect,
 
     /// Keyboard movement step in pixels.
     #[arg(long, default_value_t = 10)]
@@ -78,7 +79,11 @@ fn run(cli: Cli) -> Result<()> {
         }
     };
 
-    let controller = roi::RoiController::new(info.id.clone(), cli.roi, cli.step);
+    let controller = roi::RoiController::new(
+        Box::new(V4lCameraRoiControl::open(&info.id)?),
+        cli.roi,
+        cli.step,
+    );
     let uvc_stepper = if cli.uvc_step {
         Some(uvc_step::UvcStepper::new(
             info.id.clone(),
@@ -97,7 +102,7 @@ fn camera_request(cli: &Cli) -> CameraOpenRequest {
     request
 }
 
-fn parse_roi(value: &str) -> std::result::Result<roi::RoiRect, String> {
+fn parse_roi(value: &str) -> std::result::Result<tron_api::Rect, String> {
     let parts = value
         .split(',')
         .map(str::trim)
@@ -107,10 +112,12 @@ fn parse_roi(value: &str) -> std::result::Result<roi::RoiRect, String> {
     if parts.len() != 4 {
         return Err(format!("invalid ROI {value:?}; expected x,y,width,height"));
     }
-    Ok(roi::RoiRect {
+    Ok(tron_api::Rect {
         x: parts[0],
         y: parts[1],
-        width: parts[2],
-        height: parts[3],
+        size: tron_api::Size {
+            width: parts[2],
+            height: parts[3],
+        },
     })
 }

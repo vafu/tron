@@ -5,7 +5,7 @@ use crate::uvc_step::UvcStepper;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Instant;
-use tron_api::{Frame, Presenter, Size};
+use tron_api::{Frame, Presenter, Rect, Size};
 use tron_core::pipeline::FrameStream;
 use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView};
 use winit::application::ApplicationHandler;
@@ -361,7 +361,7 @@ fn window_to_frame(
 
 struct RoiView<'a> {
     frame: Frame<'a>,
-    roi: crate::roi::RoiRect,
+    roi: Rect,
 }
 
 struct RoiWindowPresenter {

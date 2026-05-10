@@ -1,14 +1,22 @@
 use anyhow::Result;
 use clap::Parser;
+use std::path::PathBuf;
+use std::time::Duration;
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{
     CameraOpenRequest, CameraOpener, CaptureFormat, FrameSource, PixelFormat, SensorKind,
 };
 use tron_core::capture::v4l::V4lCameraOpener;
+use tron_core::capture::v4l_control::V4lCameraRoiControl;
 use tron_core::decode::mjpeg::TurboMjpegDecoder;
 use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
 use tron_core::present::http::HttpMetadataPresenter;
 
+use crate::camera_roi::{CameraRoiConfig, CameraRoiDriver};
+use crate::pipeline::PlaygroundPipelineConfig;
+
+mod camera_roi;
+mod exposure_roi;
 mod latest;
 mod metadata;
 mod pipeline;
@@ -37,6 +45,46 @@ struct Cli {
     /// Disable the local HTTP metadata endpoint.
     #[arg(long)]
     no_metadata_http: bool,
+
+    /// Binary threshold for ROI detection on the ambient-rejected IR frame.
+    #[arg(long, default_value_t = 32)]
+    roi_threshold: u8,
+
+    /// Raw IR pixel threshold used to find clipped regions for camera exposure ROI.
+    #[arg(long, default_value_t = 250)]
+    exposure_roi_threshold: u8,
+
+    /// Drive the camera exposure ROI from the detected IR ROI.
+    #[arg(long)]
+    camera_roi_from_detection: bool,
+
+    /// Minimum edge size for the camera exposure ROI rectangle.
+    #[arg(long, default_value_t = 40)]
+    camera_roi_min_edge: u32,
+
+    /// Minimum interval between camera exposure ROI updates. Set 0 to disable throttling.
+    #[arg(long, default_value_t = 100)]
+    camera_roi_update_ms: u64,
+
+    /// Disable camera exposure ROI update throttling.
+    #[arg(long)]
+    no_camera_roi_throttle: bool,
+
+    /// Run the MediaPipe/Qualcomm palm detector on the RGB frame and render its ROI.
+    #[arg(long)]
+    rgb_mediapipe_roi: bool,
+
+    /// ONNX model path for RGB MediaPipe ROI detection.
+    #[arg(long, default_value = "models/hand_detector/model.onnx")]
+    rgb_mediapipe_model: PathBuf,
+
+    /// Minimum MediaPipe palm detector confidence for RGB ROI.
+    #[arg(long, default_value_t = 0.75)]
+    rgb_mediapipe_min_score: f32,
+
+    /// Scale applied around the raw MediaPipe palm detector box before rendering ROI.
+    #[arg(long, default_value_t = 1.0)]
+    rgb_mediapipe_box_scale: f32,
 }
 
 fn main() -> Result<()> {
@@ -74,6 +122,7 @@ fn run(cli: Cli) -> Result<()> {
         "tron-playground: opened ir {} {:?} {}x{}",
         ir_info.id, ir_info.format, ir_info.size.width, ir_info.size.height
     );
+    let ir_device_id = ir_info.id.clone();
     let ir_stream = match ir_info.format {
         CaptureFormat::Mjpeg => {
             let decoder = TurboMjpegDecoder::new(PixelFormat::Bgra8)?;
@@ -86,6 +135,17 @@ fn run(cli: Cli) -> Result<()> {
 
     let rgb_latest = latest::LatestFrameSource::spawn("rgb", rgb_stream);
     let ir_latest = latest::LatestFrameSource::spawn("ir", ir_stream);
+    let camera_roi = if cli.camera_roi_from_detection {
+        Some(CameraRoiDriver::new(
+            CameraRoiConfig {
+                min_edge: cli.camera_roi_min_edge,
+                update_interval: camera_roi_update_interval(&cli),
+            },
+            Box::new(V4lCameraRoiControl::open(&ir_device_id)?),
+        ))
+    } else {
+        None
+    };
     let metadata = if cli.no_metadata_http {
         None
     } else {
@@ -97,7 +157,29 @@ fn run(cli: Cli) -> Result<()> {
         );
         Some(presenter)
     };
-    window::run(rgb_latest, ir_latest, metadata)
+    window::run(
+        rgb_latest,
+        ir_latest,
+        metadata,
+        camera_roi,
+        PlaygroundPipelineConfig {
+            roi_threshold: cli.roi_threshold,
+            exposure_roi_threshold: cli.exposure_roi_threshold,
+            rgb_mediapipe_model: cli
+                .rgb_mediapipe_roi
+                .then_some(cli.rgb_mediapipe_model.clone()),
+            rgb_mediapipe_min_score: cli.rgb_mediapipe_min_score,
+            rgb_mediapipe_box_scale: cli.rgb_mediapipe_box_scale,
+        },
+    )
+}
+
+fn camera_roi_update_interval(cli: &Cli) -> Option<Duration> {
+    if cli.no_camera_roi_throttle || cli.camera_roi_update_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(cli.camera_roi_update_ms))
+    }
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

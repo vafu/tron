@@ -1,7 +1,8 @@
 use anyhow::Result;
 use tron_api::{Presenter, Rect, Size};
-use tron_core::present::wgpu::NdcRect;
 use wgpu::util::DeviceExt;
+
+use crate::present::wgpu::NdcRect;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -16,10 +17,11 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
 };
 
-pub struct RoiOverlayView<'pass> {
-    pub queue: &'pass wgpu::Queue,
-    pub pass: &'pass mut wgpu::RenderPass<'pass>,
+pub struct RoiOverlayView<'frame, 'pass> {
+    pub queue: &'frame wgpu::Queue,
+    pub pass: &'frame mut wgpu::RenderPass<'pass>,
     pub roi: Rect,
+    pub color: [f32; 4],
     pub frame_size: Size,
     pub rect: NdcRect,
     pub target_size: Size,
@@ -86,9 +88,15 @@ impl RoiOverlayPresenter {
     }
 }
 
-impl<'pass> Presenter<RoiOverlayView<'pass>> for RoiOverlayPresenter {
-    fn present(&mut self, view: RoiOverlayView<'pass>) -> Result<()> {
-        let vertices = roi_vertices(view.roi, view.frame_size, view.rect, view.target_size);
+impl<'frame, 'pass> Presenter<RoiOverlayView<'frame, 'pass>> for RoiOverlayPresenter {
+    fn present(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
+        let vertices = roi_vertices(
+            view.roi,
+            view.color,
+            view.frame_size,
+            view.rect,
+            view.target_size,
+        );
         view.queue
             .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         view.pass.set_pipeline(&self.pipeline);
@@ -98,7 +106,13 @@ impl<'pass> Presenter<RoiOverlayView<'pass>> for RoiOverlayPresenter {
     }
 }
 
-fn roi_vertices(roi: Rect, frame_size: Size, rect: NdcRect, target_size: Size) -> [Vertex; 8] {
+fn roi_vertices(
+    roi: Rect,
+    color: [f32; 4],
+    frame_size: Size,
+    rect: NdcRect,
+    target_size: Size,
+) -> [Vertex; 8] {
     let (x0, y0, x1, y1) = letterbox(frame_size, rect, target_size);
     let fx0 = roi.x as f32 / frame_size.width.max(1) as f32;
     let fy0 = roi.y as f32 / frame_size.height.max(1) as f32;
@@ -108,7 +122,6 @@ fn roi_vertices(roi: Rect, frame_size: Size, rect: NdcRect, target_size: Size) -
     let right = lerp(x0, x1, fx1);
     let top = lerp(y1, y0, fy0);
     let bottom = lerp(y1, y0, fy1);
-    let color = [0.1, 0.9, 1.0, 1.0];
     [
         Vertex {
             position: [left, top],

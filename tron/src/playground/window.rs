@@ -1,5 +1,6 @@
+use crate::camera_roi::CameraRoiDriver;
 use crate::latest::LatestFrameSource;
-use crate::pipeline::{PlaygroundInput, PlaygroundPipeline};
+use crate::pipeline::{PlaygroundInput, PlaygroundPipeline, PlaygroundPipelineConfig};
 use crate::presenter::{PlaygroundPresenter, PlaygroundView};
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -14,10 +15,12 @@ pub fn run(
     rgb: LatestFrameSource,
     ir: LatestFrameSource,
     metadata: Option<HttpMetadataPresenter>,
+    camera_roi: Option<CameraRoiDriver>,
+    pipeline_config: PlaygroundPipelineConfig,
 ) -> Result<()> {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(rgb, ir, metadata);
+    let mut app = WindowApp::new(rgb, ir, metadata, camera_roi, pipeline_config)?;
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -29,6 +32,7 @@ struct WindowApp {
     window: Option<Arc<winit::window::Window>>,
     presenter: Option<PlaygroundPresenter>,
     metadata: Option<HttpMetadataPresenter>,
+    camera_roi: Option<CameraRoiDriver>,
     pipeline: PlaygroundPipeline,
     result: Result<()>,
 }
@@ -38,17 +42,20 @@ impl WindowApp {
         rgb: LatestFrameSource,
         ir: LatestFrameSource,
         metadata: Option<HttpMetadataPresenter>,
-    ) -> Self {
-        Self {
+        camera_roi: Option<CameraRoiDriver>,
+        pipeline_config: PlaygroundPipelineConfig,
+    ) -> Result<Self> {
+        Ok(Self {
             rgb,
             ir,
             window_id: None,
             window: None,
             presenter: None,
             metadata,
-            pipeline: PlaygroundPipeline::new(),
+            camera_roi,
+            pipeline: PlaygroundPipeline::new(pipeline_config)?,
             result: Ok(()),
-        }
+        })
     }
 
     fn set_error(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
@@ -129,10 +136,27 @@ impl ApplicationHandler for WindowApp {
                         return;
                     }
                 };
+                let mut camera_roi_rect = None;
+                if let Some(camera_roi) = self.camera_roi.as_mut()
+                    && let Some(ir_diff) = output.ir_diff
+                {
+                    if let Err(err) = camera_roi.update(
+                        output.exposure_roi,
+                        output.roi.map(|roi| roi.rect),
+                        ir_diff.meta.size,
+                    ) {
+                        self.set_error(event_loop, err);
+                        return;
+                    }
+                    camera_roi_rect = camera_roi.current_rect();
+                }
                 match presenter.present(PlaygroundView {
                     rgb: output.rgb.as_ref().map(|frame| frame.as_frame()),
                     depth_cue: output.depth_cue,
                     ir_diff: output.ir_diff,
+                    roi: output.roi,
+                    rgb_roi: output.rgb_roi,
+                    camera_roi: camera_roi_rect,
                     metadata: output.metadata,
                 }) {
                     Ok(()) => {}

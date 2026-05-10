@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::Size;
-use crate::frame::{CaptureFormat, CapturedFrame, SensorKind};
+use crate::frame::{CaptureFormat, SensorKind};
+use crate::{FrameSource, Rect, Size};
 
 #[derive(Clone, Debug)]
 pub struct CameraSelector {
@@ -33,8 +33,10 @@ pub trait CameraOpener {
     fn open(&self, request: CameraOpenRequest) -> Result<Self::Source>;
 }
 
-pub trait FrameSource {
-    fn info(&self) -> &OpenedCameraInfo;
+pub trait CameraRoiControl {
+    fn roi_rect(&self) -> Result<Rect>;
 
-    fn next_frame(&mut self) -> Result<Option<CapturedFrame<'_>>>;
+    fn set_roi_rect(&mut self, rect: Rect) -> Result<()>;
+
+    fn set_roi_auto(&mut self, enabled: bool) -> Result<()>;
 }

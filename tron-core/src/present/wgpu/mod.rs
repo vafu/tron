@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Frame, FrameSize, PixelFormat, Presenter};
+use tron_api::{Frame, PixelFormat, Presenter, Size};
 use wgpu::util::DeviceExt;
 
 #[derive(Clone, Copy, Debug)]
@@ -47,7 +47,7 @@ pub struct WgpuFrameView<'frame, 'pass> {
     pub pass: &'frame mut wgpu::RenderPass<'pass>,
     pub frame: Frame<'frame>,
     pub rect: NdcRect,
-    pub target_size: FrameSize,
+    pub target_size: Size,
 }
 
 struct FrameTexture {
@@ -205,7 +205,7 @@ impl<'frame, 'pass> Presenter<WgpuFrameView<'frame, 'pass>> for WgpuFramePresent
 }
 
 impl WgpuFramePresenter {
-    fn ensure_texture(&mut self, device: &wgpu::Device, size: FrameSize) {
+    fn ensure_texture(&mut self, device: &wgpu::Device, size: Size) {
         let needs_texture = self
             .texture
             .as_ref()
@@ -255,9 +255,9 @@ impl WgpuFramePresenter {
     fn update_vertices(
         &self,
         queue: &wgpu::Queue,
-        frame_size: FrameSize,
+        frame_size: Size,
         rect: NdcRect,
-        target_size: FrameSize,
+        target_size: Size,
     ) {
         let (x0, y0, x1, y1) = letterbox(frame_size, rect, target_size);
         queue.write_buffer(
@@ -268,7 +268,7 @@ impl WgpuFramePresenter {
     }
 }
 
-fn letterbox(frame: FrameSize, rect: NdcRect, target: FrameSize) -> (f32, f32, f32, f32) {
+fn letterbox(frame: Size, rect: NdcRect, target: Size) -> (f32, f32, f32, f32) {
     let rect_width_ndc = (rect.x1 - rect.x0).abs();
     let rect_height_ndc = (rect.y1 - rect.y0).abs();
     let rect_pixel_width = target.width as f32 * rect_width_ndc / 2.0;

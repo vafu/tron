@@ -1,6 +1,6 @@
 use crate::roi::RoiRect;
 use anyhow::Result;
-use tron_api::{FrameSize, Presenter};
+use tron_api::{Presenter, Size};
 use tron_core::present::wgpu::NdcRect;
 use wgpu::util::DeviceExt;
 
@@ -21,9 +21,9 @@ pub struct RoiOverlayView<'pass> {
     pub queue: &'pass wgpu::Queue,
     pub pass: &'pass mut wgpu::RenderPass<'pass>,
     pub roi: RoiRect,
-    pub frame_size: FrameSize,
+    pub frame_size: Size,
     pub rect: NdcRect,
-    pub target_size: FrameSize,
+    pub target_size: Size,
 }
 
 pub struct RoiOverlayPresenter {
@@ -99,12 +99,7 @@ impl<'pass> Presenter<RoiOverlayView<'pass>> for RoiOverlayPresenter {
     }
 }
 
-fn roi_vertices(
-    roi: RoiRect,
-    frame_size: FrameSize,
-    rect: NdcRect,
-    target_size: FrameSize,
-) -> [Vertex; 8] {
+fn roi_vertices(roi: RoiRect, frame_size: Size, rect: NdcRect, target_size: Size) -> [Vertex; 8] {
     let (x0, y0, x1, y1) = letterbox(frame_size, rect, target_size);
     let fx0 = roi.x as f32 / frame_size.width.max(1) as f32;
     let fy0 = roi.y as f32 / frame_size.height.max(1) as f32;
@@ -151,7 +146,7 @@ fn roi_vertices(
     ]
 }
 
-fn letterbox(frame: FrameSize, rect: NdcRect, target: FrameSize) -> (f32, f32, f32, f32) {
+fn letterbox(frame: Size, rect: NdcRect, target: Size) -> (f32, f32, f32, f32) {
     let rect_width_ndc = (rect.x1 - rect.x0).abs();
     let rect_height_ndc = (rect.y1 - rect.y0).abs();
     let rect_pixel_width = target.width as f32 * rect_width_ndc / 2.0;

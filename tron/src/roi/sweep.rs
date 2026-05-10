@@ -1,7 +1,7 @@
 use crate::roi::{RoiController, RoiRect};
 use anyhow::Result;
 use std::time::{Duration, Instant};
-use tron_api::{Frame, FrameSize, PixelFormat};
+use tron_api::{Frame, PixelFormat, Size};
 
 const LOG_INTERVAL: Duration = Duration::from_millis(250);
 const MIN_SPEED: f32 = 1.0;
@@ -45,7 +45,7 @@ impl RoiSweep {
     pub fn update(
         &mut self,
         controller: &mut RoiController,
-        frame_size: FrameSize,
+        frame_size: Size,
         now: Instant,
     ) -> Result<()> {
         if !self.enabled {

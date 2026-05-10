@@ -3,7 +3,7 @@ use crate::pipeline::{PlaygroundInput, PlaygroundPipeline};
 use crate::presenter::{PlaygroundPresenter, PlaygroundView};
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use tron_api::{FrameSize, NoContext, Presenter, Processor};
+use tron_api::{Presenter, Size};
 use tron_core::present::http::HttpMetadataPresenter;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -75,7 +75,7 @@ impl ApplicationHandler for WindowApp {
         let size = window.inner_size();
         match pollster::block_on(PlaygroundPresenter::new(
             window.clone(),
-            FrameSize {
+            Size {
                 width: size.width,
                 height: size.height,
             },
@@ -103,7 +103,7 @@ impl ApplicationHandler for WindowApp {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => presenter.resize(FrameSize {
+            WindowEvent::Resized(size) => presenter.resize(Size {
                 width: size.width,
                 height: size.height,
             }),
@@ -122,10 +122,7 @@ impl ApplicationHandler for WindowApp {
                         return;
                     }
                 };
-                let output = match self
-                    .pipeline
-                    .process(PlaygroundInput { rgb, ir }, NoContext)
-                {
+                let output = match self.pipeline.process(PlaygroundInput { rgb, ir }) {
                     Ok(output) => output,
                     Err(err) => {
                         self.set_error(event_loop, err);
@@ -134,7 +131,8 @@ impl ApplicationHandler for WindowApp {
                 };
                 match presenter.present(PlaygroundView {
                     rgb: output.rgb.as_ref().map(|frame| frame.as_frame()),
-                    ir: output.ir.as_ref().map(|frame| frame.as_frame()),
+                    depth_cue: output.depth_cue,
+                    ir_diff: output.ir_diff,
                     metadata: output.metadata,
                 }) {
                     Ok(()) => {}

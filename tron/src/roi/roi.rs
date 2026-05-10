@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::process::Command;
-use tron_api::FrameSize;
+use tron_api::Size;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RoiRect {
@@ -11,7 +11,7 @@ pub struct RoiRect {
 }
 
 impl RoiRect {
-    pub fn clamp_to(self, size: FrameSize) -> Self {
+    pub fn clamp_to(self, size: Size) -> Self {
         let width = self.width.min(size.width).max(1);
         let height = self.height.min(size.height).max(1);
         let x = self.x.min(size.width.saturating_sub(width));
@@ -79,7 +79,7 @@ impl RoiController {
         set_roi_rect(&self.device, self.rect)
     }
 
-    pub fn move_by(&mut self, dx: i32, dy: i32, frame_size: FrameSize) -> Result<()> {
+    pub fn move_by(&mut self, dx: i32, dy: i32, frame_size: Size) -> Result<()> {
         let x = self.rect.x.saturating_add_signed(dx * self.step as i32);
         let y = self.rect.y.saturating_add_signed(dy * self.step as i32);
         self.rect.x = x;
@@ -88,18 +88,18 @@ impl RoiController {
         self.apply_rect()
     }
 
-    pub fn resize_by_step(&mut self, delta: i32, frame_size: FrameSize) -> Result<()> {
+    pub fn resize_by_step(&mut self, delta: i32, frame_size: Size) -> Result<()> {
         self.resize_by_pixels(delta * self.step as i32, frame_size)
     }
 
-    pub fn resize_by_pixels(&mut self, amount: i32, frame_size: FrameSize) -> Result<()> {
+    pub fn resize_by_pixels(&mut self, amount: i32, frame_size: Size) -> Result<()> {
         self.rect.width = self.rect.width.saturating_add_signed(amount).max(1);
         self.rect.height = self.rect.height.saturating_add_signed(amount).max(1);
         self.rect = self.rect.clamp_to(frame_size);
         self.apply_rect()
     }
 
-    pub fn set_square_size(&mut self, edge: u32, frame_size: FrameSize) -> Result<()> {
+    pub fn set_square_size(&mut self, edge: u32, frame_size: Size) -> Result<()> {
         let edge = edge.max(1);
         let cx = self.rect.x + self.rect.width / 2;
         let cy = self.rect.y + self.rect.height / 2;
@@ -113,12 +113,12 @@ impl RoiController {
         self.apply_rect()
     }
 
-    pub fn set_rect(&mut self, rect: RoiRect, frame_size: FrameSize) -> Result<()> {
+    pub fn set_rect(&mut self, rect: RoiRect, frame_size: Size) -> Result<()> {
         self.rect = rect.clamp_to(frame_size);
         self.apply_rect()
     }
 
-    pub fn center_on(&mut self, x: u32, y: u32, frame_size: FrameSize) -> Result<()> {
+    pub fn center_on(&mut self, x: u32, y: u32, frame_size: Size) -> Result<()> {
         let rect = self.rect.non_empty_or_default();
         self.rect = RoiRect {
             x: x.saturating_sub(rect.width / 2),

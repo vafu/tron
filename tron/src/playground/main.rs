@@ -10,6 +10,7 @@ use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
 use tron_core::present::http::HttpMetadataPresenter;
 
 mod latest;
+mod metadata;
 mod pipeline;
 mod presenter;
 mod window;

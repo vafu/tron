@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Instant;
 use tron_api::{
     CameraOpenRequest, CameraOpener, CameraSelector, CaptureFormat, CapturedFrame, EncodedFormat,
-    EncodedFrame, Frame, FrameMeta, FrameSize, FrameSource, FrameTimestamp, OpenedCameraInfo,
-    PixelFormat, SensorKind, TimestampSource,
+    EncodedFrame, Frame, FrameMeta, FrameSource, FrameTimestamp, OpenedCameraInfo, PixelFormat,
+    SensorKind, Size, TimestampSource,
 };
 use v4l::FourCC;
 use v4l::buffer::{Flags, Metadata, Type};
@@ -27,7 +27,7 @@ impl CameraOpener for V4lCameraOpener {
         let path = resolve_device(&request.selector)?;
         let dev = Device::with_path(&path).with_context(|| format!("open {path}"))?;
         let mut fmt = dev.format()?;
-        if let Some(FrameSize { width, height }) = request.size {
+        if let Some(Size { width, height }) = request.size {
             fmt.width = width;
             fmt.height = height;
         }
@@ -49,7 +49,7 @@ impl CameraOpener for V4lCameraOpener {
             );
         }
         let format = capture_format(fmt.fourcc)?;
-        let size = FrameSize {
+        let size = Size {
             width: fmt.width,
             height: fmt.height,
         };
@@ -250,7 +250,7 @@ fn capture_format(fourcc: FourCC) -> Result<CaptureFormat> {
     }
 }
 
-fn frame_meta(id: u64, sensor: SensorKind, size: FrameSize, meta: &Metadata) -> FrameMeta {
+fn frame_meta(id: u64, sensor: SensorKind, size: Size, meta: &Metadata) -> FrameMeta {
     FrameMeta {
         id,
         sensor,

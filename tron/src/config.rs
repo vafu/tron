@@ -1,7 +1,5 @@
 use clap::{Args, ValueEnum};
-use tron_api::{
-    CameraOpenRequest, CameraSelector, CaptureFormat, FrameSize, PixelFormat, SensorKind,
-};
+use tron_api::{CameraOpenRequest, CameraSelector, CaptureFormat, PixelFormat, SensorKind, Size};
 
 #[derive(Clone, Debug, Args)]
 pub struct CameraArgs {
@@ -23,7 +21,7 @@ pub struct CameraArgs {
 
     /// Requested capture size. If omitted, the backend keeps its default.
     #[arg(long, value_parser = parse_size)]
-    pub size: Option<Size>,
+    pub size: Option<SizeArg>,
 
     /// Requested frame rate. If omitted, the backend keeps its default.
     #[arg(long, value_parser = parse_positive_u32)]
@@ -78,16 +76,16 @@ pub enum PixelFormatArg {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Size {
+pub struct SizeArg {
     pub width: u32,
     pub height: u32,
 }
 
-pub fn parse_size(value: &str) -> std::result::Result<Size, String> {
+pub fn parse_size(value: &str) -> std::result::Result<SizeArg, String> {
     let Some((width, height)) = value.split_once('x') else {
         return Err(format!("invalid size {value:?}; expected WIDTHxHEIGHT"));
     };
-    Ok(Size {
+    Ok(SizeArg {
         width: parse_positive_u32(width)?,
         height: parse_positive_u32(height)?,
     })
@@ -131,8 +129,8 @@ impl From<PixelFormatArg> for PixelFormat {
     }
 }
 
-impl From<Size> for FrameSize {
-    fn from(value: Size) -> Self {
+impl From<SizeArg> for Size {
+    fn from(value: SizeArg) -> Self {
         Self {
             width: value.width,
             height: value.height,

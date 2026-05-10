@@ -1,6 +1,7 @@
 use anyhow::Result;
 
-use crate::frame::{CaptureFormat, CapturedFrame, FrameSize, SensorKind};
+use crate::Size;
+use crate::frame::{CaptureFormat, CapturedFrame, SensorKind};
 
 #[derive(Clone, Debug)]
 pub struct CameraSelector {
@@ -13,7 +14,7 @@ pub struct CameraSelector {
 pub struct CameraOpenRequest {
     pub selector: CameraSelector,
     pub format: Option<CaptureFormat>,
-    pub size: Option<FrameSize>,
+    pub size: Option<Size>,
     pub fps: Option<u32>,
     pub buffers: Option<u32>,
 }
@@ -23,7 +24,7 @@ pub struct OpenedCameraInfo {
     pub id: String,
     pub sensor: SensorKind,
     pub format: CaptureFormat,
-    pub size: FrameSize,
+    pub size: Size,
 }
 
 pub trait CameraOpener {

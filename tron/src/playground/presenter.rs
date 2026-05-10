@@ -1,11 +1,12 @@
-use crate::pipeline::PlaygroundMetadata;
+use crate::metadata::PlaygroundMetadata;
 use anyhow::{Context, Result};
-use tron_api::{Frame, FrameSize, PixelFormat, Presenter};
+use tron_api::{Frame, PixelFormat, Presenter, Size};
 use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView};
 
 pub struct PlaygroundView<'a> {
     pub rgb: Option<Frame<'a>>,
-    pub ir: Option<Frame<'a>>,
+    pub depth_cue: Option<Frame<'a>>,
+    pub ir_diff: Option<Frame<'a>>,
     pub metadata: PlaygroundMetadata,
 }
 
@@ -14,17 +15,14 @@ pub struct PlaygroundPresenter {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    size: FrameSize,
-    rgb_top: WgpuFramePresenter,
-    rgb_bottom: WgpuFramePresenter,
-    ir: WgpuFramePresenter,
+    size: Size,
+    depth_cue: WgpuFramePresenter,
+    ir_diff: WgpuFramePresenter,
+    rgb: WgpuFramePresenter,
 }
 
 impl PlaygroundPresenter {
-    pub async fn new(
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
-        size: FrameSize,
-    ) -> Result<Self> {
+    pub async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, size: Size) -> Result<Self> {
         anyhow::ensure!(
             size.width > 0 && size.height > 0,
             "surface cannot be initialized at zero size"
@@ -72,9 +70,9 @@ impl PlaygroundPresenter {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let rgb_top = WgpuFramePresenter::new(&device, format);
-        let rgb_bottom = WgpuFramePresenter::new(&device, format);
-        let ir = WgpuFramePresenter::new(&device, format);
+        let depth_cue = WgpuFramePresenter::new(&device, format);
+        let ir_diff = WgpuFramePresenter::new(&device, format);
+        let rgb = WgpuFramePresenter::new(&device, format);
 
         Ok(Self {
             surface,
@@ -82,13 +80,13 @@ impl PlaygroundPresenter {
             queue,
             config,
             size,
-            rgb_top,
-            rgb_bottom,
-            ir,
+            depth_cue,
+            ir_diff,
+            rgb,
         })
     }
 
-    pub fn resize(&mut self, size: FrameSize) {
+    pub fn resize(&mut self, size: Size) {
         if size.width == 0 || size.height == 0 {
             return;
         }
@@ -146,12 +144,12 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if let Some(rgb) = view.rgb {
-                self.rgb_top.present(WgpuFrameView {
+            if let Some(depth_cue) = view.depth_cue {
+                self.depth_cue.present(WgpuFrameView {
                     device: &self.device,
                     queue: &self.queue,
                     pass: &mut pass,
-                    frame: rgb,
+                    frame: depth_cue,
                     rect: NdcRect {
                         x0: -1.0,
                         y0: 0.0,
@@ -160,7 +158,24 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                     },
                     target_size: self.size,
                 })?;
-                self.rgb_bottom.present(WgpuFrameView {
+            }
+            if let Some(ir_diff) = view.ir_diff {
+                self.ir_diff.present(WgpuFrameView {
+                    device: &self.device,
+                    queue: &self.queue,
+                    pass: &mut pass,
+                    frame: ir_diff,
+                    rect: NdcRect {
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: 1.0,
+                        y1: 1.0,
+                    },
+                    target_size: self.size,
+                })?;
+            }
+            if let Some(rgb) = view.rgb {
+                self.rgb.present(WgpuFrameView {
                     device: &self.device,
                     queue: &self.queue,
                     pass: &mut pass,
@@ -170,21 +185,6 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                         y0: -1.0,
                         x1: 1.0,
                         y1: 0.0,
-                    },
-                    target_size: self.size,
-                })?;
-            }
-            if let Some(ir) = view.ir {
-                self.ir.present(WgpuFrameView {
-                    device: &self.device,
-                    queue: &self.queue,
-                    pass: &mut pass,
-                    frame: ir,
-                    rect: NdcRect {
-                        x0: 0.0,
-                        y0: 0.0,
-                        x1: 1.0,
-                        y1: 1.0,
                     },
                     target_size: self.size,
                 })?;

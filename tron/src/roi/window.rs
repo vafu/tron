@@ -5,7 +5,7 @@ use crate::uvc_step::UvcStepper;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Instant;
-use tron_api::{Frame, FrameSize, Presenter};
+use tron_api::{Frame, Presenter, Size};
 use tron_core::pipeline::FrameStream;
 use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView};
 use winit::application::ApplicationHandler;
@@ -34,8 +34,8 @@ struct WindowApp {
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
     presenter: Option<RoiWindowPresenter>,
-    latest_size: Option<FrameSize>,
-    window_size: FrameSize,
+    latest_size: Option<Size>,
+    window_size: Size,
     cursor_position: Option<PhysicalPosition<f64>>,
     dragging_roi: bool,
     sweep: RoiSweep,
@@ -57,7 +57,7 @@ impl WindowApp {
             window: None,
             presenter: None,
             latest_size: None,
-            window_size: FrameSize {
+            window_size: Size {
                 width: 1,
                 height: 1,
             },
@@ -223,13 +223,13 @@ impl ApplicationHandler for WindowApp {
         };
         self.window_id = Some(window.id());
         let size = window.inner_size();
-        self.window_size = FrameSize {
+        self.window_size = Size {
             width: size.width.max(1),
             height: size.height.max(1),
         };
         match pollster::block_on(RoiWindowPresenter::new(
             window.clone(),
-            FrameSize {
+            Size {
                 width: size.width,
                 height: size.height,
             },
@@ -270,11 +270,11 @@ impl ApplicationHandler for WindowApp {
             }
             WindowEvent::MouseWheel { delta, .. } => self.handle_mouse_wheel(event_loop, delta),
             WindowEvent::Resized(size) => {
-                self.window_size = FrameSize {
+                self.window_size = Size {
                     width: size.width.max(1),
                     height: size.height.max(1),
                 };
-                presenter.resize(FrameSize {
+                presenter.resize(Size {
                     width: size.width,
                     height: size.height,
                 });
@@ -318,8 +318,8 @@ impl ApplicationHandler for WindowApp {
 
 fn window_to_frame(
     position: PhysicalPosition<f64>,
-    frame_size: FrameSize,
-    window_size: FrameSize,
+    frame_size: Size,
+    window_size: Size,
 ) -> Option<(u32, u32)> {
     let frame_aspect = frame_size.width as f64 / frame_size.height.max(1) as f64;
     let window_aspect = window_size.width as f64 / window_size.height.max(1) as f64;
@@ -369,13 +369,13 @@ struct RoiWindowPresenter {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    size: FrameSize,
+    size: Size,
     frame: WgpuFramePresenter,
     overlay: RoiOverlayPresenter,
 }
 
 impl RoiWindowPresenter {
-    async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, size: FrameSize) -> Result<Self> {
+    async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, size: Size) -> Result<Self> {
         anyhow::ensure!(
             size.width > 0 && size.height > 0,
             "surface cannot be initialized at zero size"
@@ -435,7 +435,7 @@ impl RoiWindowPresenter {
         })
     }
 
-    fn resize(&mut self, size: FrameSize) {
+    fn resize(&mut self, size: Size) {
         if size.width == 0 || size.height == 0 {
             return;
         }

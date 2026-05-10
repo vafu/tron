@@ -1,12 +1,8 @@
 use std::time::Instant;
 
-pub type FrameId = u64;
+use crate::Size;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameSize {
-    pub width: u32,
-    pub height: u32,
-}
+pub type FrameId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,7 +63,7 @@ pub struct FrameTimestamp {
 pub struct FrameMeta {
     pub id: FrameId,
     pub sensor: SensorKind,
-    pub size: FrameSize,
+    pub size: Size,
     pub timestamp: FrameTimestamp,
     pub sequence: Option<u64>,
 }

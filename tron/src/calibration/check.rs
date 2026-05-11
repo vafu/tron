@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use opencv::calib3d;
-use opencv::core::{Mat, Point2f, Point3f, Vector};
-use opencv::prelude::*;
 use tron_api::{
-    CheckerboardStereoCalibration, Frame, FrameMeta, FrameSource, OwnedFrame, PixelFormat,
-    Renderer, Size,
+    CheckerboardStereoCalibration, DepthProjectionMap, Frame, FrameMeta, FrameSource, OwnedFrame,
+    PixelFormat, Renderer, Size,
 };
 use tron_core::pipeline::{FramePairSource, FrameSynchronizer};
+use tron_core::projection::CheckerboardDepthProjection;
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
+use tron_core::transform::ProjectedFrameSource;
 use tron_core::view::{IntoView, ViewExt};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -27,6 +26,9 @@ where
     R: FrameSource,
     I: FrameSource,
 {
+    let projection = CheckerboardDepthProjection::new(config.calibration.clone());
+    let map = projection.map(config.depth_mm)?;
+    let ir = ProjectedFrameSource::new(ir, move || Ok(map.clone()))?;
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = CheckApp::new(rgb, ir, config);
@@ -36,8 +38,6 @@ where
 
 struct CheckApp<R, I> {
     synchronizer: FrameSynchronizer<R, I>,
-    calibration: CheckerboardStereoCalibration,
-    depth_mm: f64,
     window_id: Option<WindowId>,
     renderer: Option<CheckRenderer>,
     window: Option<Arc<winit::window::Window>>,
@@ -53,8 +53,6 @@ where
     fn new(rgb: R, ir: I, config: CalibrationCheckConfig) -> Self {
         Self {
             synchronizer: FrameSynchronizer::new(rgb, ir, config.max_sync_delta_us),
-            calibration: config.calibration,
-            depth_mm: config.depth_mm,
             window_id: None,
             renderer: None,
             window: None,
@@ -139,10 +137,7 @@ where
                     return;
                 };
 
-                if let Err(err) =
-                    self.composite
-                        .update(&pair.left, &pair.right, &self.calibration, self.depth_mm)
-                {
+                if let Err(err) = self.composite.update(&pair.left, &pair.right) {
                     self.set_error(event_loop, err);
                     return;
                 }
@@ -219,79 +214,37 @@ impl Renderer<Frame<'_>> for CheckRenderer {
 struct CompositeFrame {
     meta: Option<FrameMeta>,
     data: Vec<u8>,
-    projection_key: Option<ProjectionMapKey>,
-    projection_map: Vec<Option<(u32, u32)>>,
 }
 
 impl CompositeFrame {
-    fn update(
-        &mut self,
-        rgb: &OwnedFrame,
-        ir: &OwnedFrame,
-        calibration: &CheckerboardStereoCalibration,
-        depth_mm: f64,
-    ) -> Result<()> {
-        anyhow::ensure!(depth_mm > 0.0, "check depth must be positive");
+    fn update(&mut self, rgb: &OwnedFrame, ir: &OwnedFrame) -> Result<()> {
         anyhow::ensure!(
-            rgb.meta.size == calibration.left.image_size,
-            "RGB frame size {:?} does not match calibration left image size {:?}",
+            rgb.meta.size == ir.meta.size,
+            "RGB frame size {:?} does not match projected IR frame size {:?}",
             rgb.meta.size,
-            calibration.left.image_size
-        );
-        anyhow::ensure!(
-            ir.meta.size == calibration.right.image_size,
-            "IR frame size {:?} does not match calibration right image size {:?}",
             ir.meta.size,
-            calibration.right.image_size
         );
 
         let size = rgb.meta.size;
         let pixel_count = size.width as usize * size.height as usize;
         self.data.resize(pixel_count * 4, 255);
-        self.ensure_projection_map(calibration, rgb.meta.size, ir.meta.size, depth_mm)?;
 
         let rgb_view = rgb.as_frame().view();
         let ir_view = ir.as_frame().view();
         for y in 0..size.height {
             let rgb_row = rgb_view.row(y)?;
+            let ir_row = ir_view.row(y)?;
             for x in 0..size.width {
-                let rgb = bgra_at(rgb_row, rgb.format, x as usize)?;
+                let rgb = bgra_at(rgb_row, rgb_view.format, x as usize)?;
                 let dst = (y as usize * size.width as usize + x as usize) * 4;
                 self.data[dst..dst + 4].copy_from_slice(&rgb);
 
-                let Some((ir_x, ir_y)) =
-                    self.projection_map[y as usize * size.width as usize + x as usize]
-                else {
-                    continue;
-                };
-                let ir_row = ir_view.row(ir_y)?;
-                let ir = gray_at(ir_row, ir.format, ir_x as usize)?;
+                let ir = gray_at(ir_row, ir_view.format, x as usize)?;
                 blend_ir(&mut self.data[dst..dst + 4], rgb, ir, 0.38);
             }
         }
 
         self.meta = Some(FrameMeta { size, ..rgb.meta });
-        Ok(())
-    }
-
-    fn ensure_projection_map(
-        &mut self,
-        calibration: &CheckerboardStereoCalibration,
-        rgb_size: Size,
-        ir_size: Size,
-        depth_mm: f64,
-    ) -> Result<()> {
-        let key = ProjectionMapKey {
-            rgb_size,
-            ir_size,
-            depth_bits: depth_mm.to_bits(),
-        };
-        if self.projection_key == Some(key) {
-            return Ok(());
-        }
-
-        self.projection_map = build_projection_map(calibration, rgb_size, ir_size, depth_mm)?;
-        self.projection_key = Some(key);
         Ok(())
     }
 
@@ -304,83 +257,6 @@ impl CompositeFrame {
             data: &self.data,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ProjectionMapKey {
-    rgb_size: Size,
-    ir_size: Size,
-    depth_bits: u64,
-}
-
-fn build_projection_map(
-    calibration: &CheckerboardStereoCalibration,
-    rgb_size: Size,
-    ir_size: Size,
-    depth_mm: f64,
-) -> Result<Vec<Option<(u32, u32)>>> {
-    let pixel_count = rgb_size.width as usize * rgb_size.height as usize;
-
-    let mut rgb_pixels = Vector::<Point2f>::with_capacity(pixel_count);
-    for y in 0..rgb_size.height {
-        for x in 0..rgb_size.width {
-            rgb_pixels.push(Point2f::new(x as f32, y as f32));
-        }
-    }
-
-    let left_camera = mat3(calibration.left.camera_matrix)?;
-    let left_dist = mat_vec(&calibration.left.distortion)?;
-    let mut normalized = Vector::<Point2f>::new();
-    calib3d::undistort_points_def(&rgb_pixels, &mut normalized, &left_camera, &left_dist)
-        .context("undistort RGB pixels")?;
-
-    let mut object_points = Vector::<Point3f>::with_capacity(pixel_count);
-    for point in normalized {
-        object_points.push(Point3f::new(
-            point.x * depth_mm as f32,
-            point.y * depth_mm as f32,
-            depth_mm as f32,
-        ));
-    }
-
-    let rotation = mat3(calibration.rotation)?;
-    let mut rvec = Mat::default();
-    calib3d::rodrigues_def(&rotation, &mut rvec).context("convert stereo rotation to rvec")?;
-    let tvec = mat_vec(&calibration.translation)?;
-    let right_camera = mat3(calibration.right.camera_matrix)?;
-    let right_dist = mat_vec(&calibration.right.distortion)?;
-    let mut projected = Vector::<Point2f>::new();
-    calib3d::project_points_def(
-        &object_points,
-        &rvec,
-        &tvec,
-        &right_camera,
-        &right_dist,
-        &mut projected,
-    )
-    .context("project RGB depth plane into IR")?;
-
-    let mut map = Vec::with_capacity(pixel_count);
-    for point in projected {
-        let x = point.x as f64;
-        let y = point.y as f64;
-        if (0.0..ir_size.width as f64).contains(&x) && (0.0..ir_size.height as f64).contains(&y) {
-            map.push(Some((x as u32, y as u32)));
-        } else {
-            map.push(None);
-        }
-    }
-    Ok(map)
-}
-
-fn mat3(values: [[f64; 3]; 3]) -> Result<Mat> {
-    let mat = Mat::from_slice_2d(&values).context("create OpenCV 3x3 matrix")?;
-    mat.try_clone().context("clone OpenCV 3x3 matrix")
-}
-
-fn mat_vec(values: &[f64]) -> Result<Mat> {
-    let mat = Mat::from_slice(values).context("create OpenCV vector")?;
-    mat.try_clone().context("clone OpenCV vector")
 }
 
 fn bgra_at(row: &[u8], format: PixelFormat, x: usize) -> Result<[u8; 4]> {

@@ -1,0 +1,118 @@
+use anyhow::{Context, Result};
+use opencv::calib3d;
+use opencv::core::{Mat, Point2f, Point3f, Vector};
+use opencv::prelude::*;
+use tron_api::{CheckerboardStereoCalibration, DepthProjectionMap, Size};
+
+#[derive(Clone, Debug)]
+pub struct CheckerboardDepthProjection {
+    calibration: CheckerboardStereoCalibration,
+}
+
+impl CheckerboardDepthProjection {
+    pub fn new(calibration: CheckerboardStereoCalibration) -> Self {
+        Self { calibration }
+    }
+}
+
+impl DepthProjectionMap for CheckerboardDepthProjection {
+    type Map = FrameProjectionMap;
+
+    fn map(&self, depth_mm: f64) -> Result<FrameProjectionMap> {
+        anyhow::ensure!(depth_mm > 0.0, "projection depth must be positive");
+        build_projection_map(&self.calibration, depth_mm)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FrameProjectionMap {
+    pub input_size: Size,
+    pub output_size: Size,
+    pub pixels: Vec<Option<(u32, u32)>>,
+}
+
+impl FrameProjectionMap {
+    pub fn get(&self, x: u32, y: u32) -> Option<(u32, u32)> {
+        if x >= self.output_size.width || y >= self.output_size.height {
+            return None;
+        }
+        self.pixels[y as usize * self.output_size.width as usize + x as usize]
+    }
+}
+
+fn build_projection_map(
+    calibration: &CheckerboardStereoCalibration,
+    depth_mm: f64,
+) -> Result<FrameProjectionMap> {
+    let output_size = calibration.left.image_size;
+    let input_size = calibration.right.image_size;
+    let pixel_count = output_size.width as usize * output_size.height as usize;
+
+    let mut left_pixels = Vector::<Point2f>::with_capacity(pixel_count);
+    for y in 0..output_size.height {
+        for x in 0..output_size.width {
+            left_pixels.push(Point2f::new(x as f32, y as f32));
+        }
+    }
+
+    let left_camera = mat3(calibration.left.camera_matrix)?;
+    let left_dist = mat_vec(&calibration.left.distortion)?;
+    let mut normalized = Vector::<Point2f>::new();
+    calib3d::undistort_points_def(&left_pixels, &mut normalized, &left_camera, &left_dist)
+        .context("undistort left-frame pixels")?;
+
+    let mut object_points = Vector::<Point3f>::with_capacity(pixel_count);
+    for point in normalized {
+        object_points.push(Point3f::new(
+            point.x * depth_mm as f32,
+            point.y * depth_mm as f32,
+            depth_mm as f32,
+        ));
+    }
+
+    let rotation = mat3(calibration.rotation)?;
+    let mut rvec = Mat::default();
+    calib3d::rodrigues_def(&rotation, &mut rvec).context("convert stereo rotation to rvec")?;
+    let tvec = mat_vec(&calibration.translation)?;
+    let right_camera = mat3(calibration.right.camera_matrix)?;
+    let right_dist = mat_vec(&calibration.right.distortion)?;
+    let mut projected = Vector::<Point2f>::new();
+    calib3d::project_points_def(
+        &object_points,
+        &rvec,
+        &tvec,
+        &right_camera,
+        &right_dist,
+        &mut projected,
+    )
+    .context("project left depth plane into right frame")?;
+
+    let mut pixels = Vec::with_capacity(pixel_count);
+    for point in projected {
+        let x = point.x as f64;
+        let y = point.y as f64;
+        if (0.0..input_size.width as f64).contains(&x)
+            && (0.0..input_size.height as f64).contains(&y)
+        {
+            pixels.push(Some((x as u32, y as u32)));
+        } else {
+            pixels.push(None);
+        }
+    }
+
+    Ok(FrameProjectionMap {
+        input_size,
+        output_size,
+        pixels,
+    })
+}
+
+fn mat3(values: [[f64; 3]; 3]) -> Result<Mat> {
+    let mat = Mat::from_slice_2d(&values).context("create OpenCV 3x3 matrix")?;
+    mat.try_clone().context("clone OpenCV 3x3 matrix")
+}
+
+fn mat_vec(values: &[f64]) -> Result<Mat> {
+    let mat = Mat::from_slice(values).context("create OpenCV vector")?;
+    mat.try_clone().context("clone OpenCV vector")
+}

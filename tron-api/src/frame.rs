@@ -1,7 +1,5 @@
 use std::time::Instant;
 
-use anyhow::Result;
-
 use crate::{OpenedCameraInfo, Size};
 
 pub type FrameId = u64;
@@ -126,5 +124,5 @@ impl OwnedFrame {
 pub trait FrameSource {
     fn info(&self) -> &OpenedCameraInfo;
 
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>>;
+    fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>>;
 }

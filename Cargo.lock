@@ -2447,7 +2447,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
- "opencv",
  "pollster",
  "rustix 1.1.4",
  "serde",

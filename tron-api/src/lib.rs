@@ -2,6 +2,7 @@ pub mod calib;
 pub mod capture;
 pub mod frame;
 pub mod process;
+pub mod projection;
 pub mod render;
 pub mod roi;
 
@@ -79,5 +80,6 @@ pub use frame::{
     PixelFormat, SensorKind, TimestampSource,
 };
 pub use process::{InPlaceFrameProcessor, Processor};
+pub use projection::{DepthProjectionMap, ProjectionMapSource};
 pub use render::{NoContext, Renderer};
 pub use roi::{RoiCandidate, RoiProcessor, RoiResult};

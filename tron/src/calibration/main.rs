@@ -91,10 +91,8 @@ fn run(cli: Cli) -> Result<()> {
         ir_info.id, ir_info.format, ir_info.size.width, ir_info.size.height, ir_metadata_id
     );
 
-    let (rgb_info, rgb_stream) = open_v4l_stream(
-        rgb_request(&cli, ir_info.size),
-        PixelFormat::from(cli.decode_format),
-    )?;
+    let (rgb_info, rgb_stream) =
+        open_v4l_stream(rgb_request(&cli), PixelFormat::from(cli.decode_format))?;
     anyhow::ensure!(
         rgb_info.format == CaptureFormat::Mjpeg,
         "calibration RGB feed currently requires MJPEG"
@@ -132,14 +130,17 @@ fn checkerboard_spec(cli: &Cli) -> CheckerboardSpec {
     }
 }
 
-fn rgb_request(cli: &Cli, default_size: Size) -> CameraOpenRequest {
+fn rgb_request(cli: &Cli) -> CameraOpenRequest {
     let mut request = cli.camera.open_request();
     request.selector.sensor = SensorKind::Rgb;
     if request.format.is_none() {
         request.format = Some(CaptureFormat::Mjpeg);
     }
     if request.size.is_none() {
-        request.size = Some(default_size);
+        request.size = Some(Size {
+            width: 640,
+            height: 480,
+        });
     }
     request
 }

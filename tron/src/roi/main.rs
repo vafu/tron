@@ -1,13 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use tron::config::{CameraArgs, PixelFormatArg};
-use tron_api::{
-    CameraOpenRequest, CameraOpener, CaptureFormat, FrameSource, PixelFormat, SensorKind,
-};
+use tron_api::{CameraOpenRequest, CameraOpener, FrameSource, PixelFormat, SensorKind};
 use tron_core::capture::v4l::V4lCameraOpener;
 use tron_core::capture::v4l_control::V4lCameraRoiControl;
-use tron_core::decode::mjpeg::TurboMjpegDecoder;
-use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
 
 mod overlay;
 mod roi;
@@ -57,7 +53,8 @@ fn main() -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     let request = camera_request(&cli);
-    let source = V4lCameraOpener.open(request)?;
+    let source = V4lCameraOpener::with_decoded_mjpeg_format(PixelFormat::from(cli.decode_format))
+        .open(request)?;
     let info = source.info().clone();
     eprintln!(
         "roi-control: opened {} {:?} {}x{}",
@@ -68,16 +65,6 @@ fn run(cli: Cli) -> Result<()> {
     );
     eprintln!("roi-control: F1..F7 set exact square sizes: 1, 8, 16, 24, 32, 48, 64");
     eprintln!("roi-control: A toggles horizontal ROI sweep, [/] coarse speed, ,/. fine speed");
-
-    let stream = match info.format {
-        CaptureFormat::Mjpeg => {
-            let decoder = TurboMjpegDecoder::new(PixelFormat::from(cli.decode_format))?;
-            Box::new(DecodeStream::new(source, decoder)) as Box<dyn FrameStream>
-        }
-        CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
-            Box::new(PassthroughStream::new(source)) as Box<dyn FrameStream>
-        }
-    };
 
     let controller = roi::RoiController::new(
         Box::new(V4lCameraRoiControl::open(&info.id)?),
@@ -93,7 +80,7 @@ fn run(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    window::run(stream, controller, cli.sweep_speed, uvc_stepper)
+    window::run(Box::new(source), controller, cli.sweep_speed, uvc_stepper)
 }
 
 fn camera_request(cli: &Cli) -> CameraOpenRequest {

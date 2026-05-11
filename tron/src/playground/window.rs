@@ -1,11 +1,11 @@
 use crate::camera_roi::CameraRoiDriver;
 use crate::pipeline::{PlaygroundInput, PlaygroundPipeline, PlaygroundPipelineConfig};
-use crate::presenter::{PlaygroundPresenter, PlaygroundView};
+use crate::renderer::{PlaygroundRenderer, PlaygroundView};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tron::latest::LatestFrameSource;
-use tron_api::{Presenter, Size};
-use tron_core::present::http::HttpMetadataPresenter;
+use tron_api::{Renderer, Size};
+use tron_core::render::http::HttpMetadataRenderer;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -14,7 +14,7 @@ use winit::window::{WindowAttributes, WindowId};
 pub fn run(
     rgb: LatestFrameSource,
     ir: LatestFrameSource,
-    metadata: Option<HttpMetadataPresenter>,
+    metadata: Option<HttpMetadataRenderer>,
     camera_roi: Option<CameraRoiDriver>,
     pipeline_config: PlaygroundPipelineConfig,
 ) -> Result<()> {
@@ -30,8 +30,8 @@ struct WindowApp {
     ir: LatestFrameSource,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
-    presenter: Option<PlaygroundPresenter>,
-    metadata: Option<HttpMetadataPresenter>,
+    renderer: Option<PlaygroundRenderer>,
+    metadata: Option<HttpMetadataRenderer>,
     camera_roi: Option<CameraRoiDriver>,
     pipeline: PlaygroundPipeline,
     result: Result<()>,
@@ -41,7 +41,7 @@ impl WindowApp {
     fn new(
         rgb: LatestFrameSource,
         ir: LatestFrameSource,
-        metadata: Option<HttpMetadataPresenter>,
+        metadata: Option<HttpMetadataRenderer>,
         camera_roi: Option<CameraRoiDriver>,
         pipeline_config: PlaygroundPipelineConfig,
     ) -> Result<Self> {
@@ -50,7 +50,7 @@ impl WindowApp {
             ir,
             window_id: None,
             window: None,
-            presenter: None,
+            renderer: None,
             metadata,
             camera_roi,
             pipeline: PlaygroundPipeline::new(pipeline_config)?,
@@ -66,7 +66,7 @@ impl WindowApp {
 
 impl ApplicationHandler for WindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.presenter.is_some() {
+        if self.renderer.is_some() {
             return;
         }
 
@@ -80,16 +80,16 @@ impl ApplicationHandler for WindowApp {
         };
         self.window_id = Some(window.id());
         let size = window.inner_size();
-        match pollster::block_on(PlaygroundPresenter::new(
+        match pollster::block_on(PlaygroundRenderer::new(
             window.clone(),
             Size {
                 width: size.width,
                 height: size.height,
             },
         )) {
-            Ok(presenter) => {
+            Ok(renderer) => {
                 self.window = Some(window);
-                self.presenter = Some(presenter);
+                self.renderer = Some(renderer);
             }
             Err(err) => self.set_error(event_loop, err),
         }
@@ -104,13 +104,13 @@ impl ApplicationHandler for WindowApp {
         if Some(window_id) != self.window_id {
             return;
         }
-        let Some(presenter) = self.presenter.as_mut() else {
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => presenter.resize(Size {
+            WindowEvent::Resized(size) => renderer.resize(Size {
                 width: size.width,
                 height: size.height,
             }),
@@ -150,7 +150,7 @@ impl ApplicationHandler for WindowApp {
                     }
                     camera_roi_rect = camera_roi.current_rect();
                 }
-                match presenter.present(PlaygroundView {
+                match renderer.render(PlaygroundView {
                     rgb: output.rgb.as_ref().map(|frame| frame.as_frame()),
                     depth_cue: output.depth_cue,
                     ir_diff: output.ir_diff,
@@ -166,7 +166,7 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
                 if let Some(metadata) = self.metadata.as_mut()
-                    && let Err(err) = metadata.present(output.metadata)
+                    && let Err(err) = metadata.render(output.metadata)
                 {
                     self.set_error(event_loop, err);
                     return;

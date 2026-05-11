@@ -1,8 +1,8 @@
 use anyhow::Result;
-use tron_api::{CheckerboardDetection, Presenter, Size};
+use tron_api::{CheckerboardDetection, Renderer, Size};
 
-use crate::present::line_overlay::{LineOverlayPresenter, LineOverlayView, LineVertex};
-use crate::present::wgpu::{NdcRect, project_frame_point};
+use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
+use crate::render::wgpu::{NdcRect, project_frame_point};
 
 pub struct CheckerboardOverlayView<'frame, 'pass> {
     pub device: &'frame wgpu::Device,
@@ -14,24 +14,24 @@ pub struct CheckerboardOverlayView<'frame, 'pass> {
     pub target_size: Size,
 }
 
-pub struct CheckerboardOverlayPresenter {
-    lines: LineOverlayPresenter,
+pub struct CheckerboardOverlayRenderer {
+    lines: LineOverlayRenderer,
     vertices: Vec<LineVertex>,
 }
 
-impl CheckerboardOverlayPresenter {
+impl CheckerboardOverlayRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         Self {
-            lines: LineOverlayPresenter::new(device, surface_format, "tron-checkerboard-overlay"),
+            lines: LineOverlayRenderer::new(device, surface_format, "tron-checkerboard-overlay"),
             vertices: Vec::new(),
         }
     }
 }
 
-impl<'frame, 'pass> Presenter<CheckerboardOverlayView<'frame, 'pass>>
-    for CheckerboardOverlayPresenter
+impl<'frame, 'pass> Renderer<CheckerboardOverlayView<'frame, 'pass>>
+    for CheckerboardOverlayRenderer
 {
-    fn present(&mut self, view: CheckerboardOverlayView<'frame, 'pass>) -> Result<()> {
+    fn render(&mut self, view: CheckerboardOverlayView<'frame, 'pass>) -> Result<()> {
         build_vertices(
             view.detection,
             view.color,
@@ -42,7 +42,7 @@ impl<'frame, 'pass> Presenter<CheckerboardOverlayView<'frame, 'pass>>
         if self.vertices.is_empty() {
             return Ok(());
         }
-        self.lines.present(LineOverlayView {
+        self.lines.render(LineOverlayView {
             device: view.device,
             queue: view.queue,
             pass: view.pass,

@@ -1,9 +1,9 @@
 use anyhow::Result;
-use tron_api::{CheckerboardDetection, Frame, Presenter, Size};
-use tron_core::present::checkerboard_overlay::{
-    CheckerboardOverlayPresenter, CheckerboardOverlayView,
+use tron_api::{CheckerboardDetection, Frame, Renderer, Size};
+use tron_core::render::checkerboard_overlay::{
+    CheckerboardOverlayRenderer, CheckerboardOverlayView,
 };
-use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView, WgpuSurfaceContext};
+use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
 
 pub struct CalibrationView<'a> {
     pub rgb: Option<Frame<'a>>,
@@ -12,22 +12,22 @@ pub struct CalibrationView<'a> {
     pub ir_checkerboard: Option<&'a CheckerboardDetection>,
 }
 
-pub struct CalibrationPresenter {
+pub struct CalibrationRenderer {
     surface: WgpuSurfaceContext,
-    rgb: WgpuFramePresenter,
-    ir: WgpuFramePresenter,
-    rgb_checkerboard: CheckerboardOverlayPresenter,
-    ir_checkerboard: CheckerboardOverlayPresenter,
+    rgb: WgpuFrameRenderer,
+    ir: WgpuFrameRenderer,
+    rgb_checkerboard: CheckerboardOverlayRenderer,
+    ir_checkerboard: CheckerboardOverlayRenderer,
 }
 
-impl CalibrationPresenter {
+impl CalibrationRenderer {
     pub async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, size: Size) -> Result<Self> {
         let surface = WgpuSurfaceContext::new(target, size, "tron-calibration-wgpu-device").await?;
         let format = surface.format();
-        let rgb = WgpuFramePresenter::new(surface.device(), format);
-        let ir = WgpuFramePresenter::new(surface.device(), format);
-        let rgb_checkerboard = CheckerboardOverlayPresenter::new(surface.device(), format);
-        let ir_checkerboard = CheckerboardOverlayPresenter::new(surface.device(), format);
+        let rgb = WgpuFrameRenderer::new(surface.device(), format);
+        let ir = WgpuFrameRenderer::new(surface.device(), format);
+        let rgb_checkerboard = CheckerboardOverlayRenderer::new(surface.device(), format);
+        let ir_checkerboard = CheckerboardOverlayRenderer::new(surface.device(), format);
         Ok(Self {
             surface,
             rgb,
@@ -42,8 +42,8 @@ impl CalibrationPresenter {
     }
 }
 
-impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
-    fn present(&mut self, view: CalibrationView<'a>) -> Result<()> {
+impl<'a> Renderer<CalibrationView<'a>> for CalibrationRenderer {
+    fn render(&mut self, view: CalibrationView<'a>) -> Result<()> {
         self.surface.render(
             "tron-calibration-render-pass",
             wgpu::Color {
@@ -55,7 +55,7 @@ impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
             |surface| {
                 let mut pass = surface.pass;
                 if let Some(rgb) = view.rgb {
-                    self.rgb.present(WgpuFrameView {
+                    self.rgb.render(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -65,7 +65,7 @@ impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
                     })?;
                 }
                 if let Some(detection) = view.rgb_checkerboard {
-                    self.rgb_checkerboard.present(CheckerboardOverlayView {
+                    self.rgb_checkerboard.render(CheckerboardOverlayView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -76,7 +76,7 @@ impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
                     })?;
                 }
                 if let Some(ir) = view.ir {
-                    self.ir.present(WgpuFrameView {
+                    self.ir.render(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -86,7 +86,7 @@ impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
                     })?;
                 }
                 if let Some(detection) = view.ir_checkerboard {
-                    self.ir_checkerboard.present(CheckerboardOverlayView {
+                    self.ir_checkerboard.render(CheckerboardOverlayView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,

@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use tron_api::{EncodedFormat, EncodedFrame, Frame, FrameDecoder, PixelFormat};
+use tron_api::{Frame, PixelFormat};
+
+use crate::decode::{EncodedFormat, EncodedFrame, FrameDecoder};
 
 pub struct TurboMjpegDecoder {
     decompressor: turbojpeg::Decompressor,

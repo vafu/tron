@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::frame::FrameMut;
-use crate::present::NoContext;
+use crate::render::NoContext;
 
 pub trait Processor<I, C = NoContext> {
     type Output;

@@ -7,9 +7,10 @@ use tron::capture::{LitIrFrameStream, open_v4l_stream};
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CaptureFormat, CheckerboardSpec, PixelFormat, SensorKind, Size};
 use tron_core::capture::v4l::V4lUvcmMetadataSource;
+use tron_core::pipeline::BufferedFrameSource;
 
 mod latency;
-mod presenter;
+mod renderer;
 mod window;
 
 #[derive(Debug, Parser)]
@@ -107,6 +108,8 @@ fn run(cli: Cli) -> Result<()> {
         "tron-calibration: press Space to capture a paired checkerboard sample; press C to calibrate and write {}",
         cli.output.display()
     );
+    let rgb_stream = BufferedFrameSource::spawn("calibration-rgb", rgb_stream, 4);
+    let ir_stream = BufferedFrameSource::spawn("calibration-ir", ir_stream, 4);
     window::run(
         rgb_stream,
         ir_stream,

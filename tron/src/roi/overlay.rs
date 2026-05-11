@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tron_api::{Presenter, Rect, Size};
-use tron_core::present::wgpu::NdcRect;
+use tron_api::{Rect, Renderer, Size};
+use tron_core::render::wgpu::NdcRect;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -25,12 +25,12 @@ pub struct RoiOverlayView<'pass> {
     pub target_size: Size,
 }
 
-pub struct RoiOverlayPresenter {
+pub struct RoiOverlayRenderer {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
 }
 
-impl RoiOverlayPresenter {
+impl RoiOverlayRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("tron-roi-overlay-shader"),
@@ -86,8 +86,8 @@ impl RoiOverlayPresenter {
     }
 }
 
-impl<'pass> Presenter<RoiOverlayView<'pass>> for RoiOverlayPresenter {
-    fn present(&mut self, view: RoiOverlayView<'pass>) -> Result<()> {
+impl<'pass> Renderer<RoiOverlayView<'pass>> for RoiOverlayRenderer {
+    fn render(&mut self, view: RoiOverlayView<'pass>) -> Result<()> {
         let vertices = roi_vertices(view.roi, view.frame_size, view.rect, view.target_size);
         view.queue
             .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));

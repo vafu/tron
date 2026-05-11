@@ -1,11 +1,9 @@
 pub mod calib;
 pub mod capture;
-pub mod decode;
 pub mod frame;
-pub mod present;
 pub mod process;
+pub mod render;
 pub mod roi;
-pub mod stream;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Size {
@@ -76,12 +74,10 @@ pub use calib::{
 pub use capture::{
     CameraOpenRequest, CameraOpener, CameraRoiControl, CameraSelector, OpenedCameraInfo,
 };
-pub use decode::FrameDecoder;
 pub use frame::{
-    CaptureFormat, CapturedFrame, EncodedFormat, EncodedFrame, Frame, FrameId, FrameMeta, FrameMut,
-    FrameTimestamp, OwnedFrame, PixelFormat, SensorKind, TimestampSource,
+    CaptureFormat, Frame, FrameId, FrameMeta, FrameMut, FrameSource, FrameTimestamp, OwnedFrame,
+    PixelFormat, SensorKind, TimestampSource,
 };
-pub use present::{NoContext, Presenter};
 pub use process::{InPlaceFrameProcessor, Processor};
+pub use render::{NoContext, Renderer};
 pub use roi::{RoiCandidate, RoiProcessor, RoiResult};
-pub use stream::FrameSource;

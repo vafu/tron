@@ -1,8 +1,8 @@
 use crate::metadata::PlaygroundMetadata;
 use anyhow::Result;
-use tron_api::{Frame, PixelFormat, Presenter, Rect, RoiResult, Size};
-use tron_core::present::roi_overlay::{RoiOverlayPresenter, RoiOverlayView};
-use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView, WgpuSurfaceContext};
+use tron_api::{Frame, PixelFormat, Rect, Renderer, RoiResult, Size};
+use tron_core::render::roi_overlay::{RoiOverlayRenderer, RoiOverlayView};
+use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
 
 pub struct PlaygroundView<'a> {
     pub rgb: Option<Frame<'a>>,
@@ -14,26 +14,26 @@ pub struct PlaygroundView<'a> {
     pub metadata: PlaygroundMetadata,
 }
 
-pub struct PlaygroundPresenter {
+pub struct PlaygroundRenderer {
     surface: WgpuSurfaceContext,
-    depth_cue: WgpuFramePresenter,
-    ir_diff: WgpuFramePresenter,
-    roi_overlay: RoiOverlayPresenter,
-    camera_roi_overlay: RoiOverlayPresenter,
-    rgb_roi_overlay: RoiOverlayPresenter,
-    rgb: WgpuFramePresenter,
+    depth_cue: WgpuFrameRenderer,
+    ir_diff: WgpuFrameRenderer,
+    roi_overlay: RoiOverlayRenderer,
+    camera_roi_overlay: RoiOverlayRenderer,
+    rgb_roi_overlay: RoiOverlayRenderer,
+    rgb: WgpuFrameRenderer,
 }
 
-impl PlaygroundPresenter {
+impl PlaygroundRenderer {
     pub async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, size: Size) -> Result<Self> {
         let surface = WgpuSurfaceContext::new(target, size, "tron-playground-wgpu-device").await?;
         let format = surface.format();
-        let depth_cue = WgpuFramePresenter::new(surface.device(), format);
-        let ir_diff = WgpuFramePresenter::new(surface.device(), format);
-        let roi_overlay = RoiOverlayPresenter::new(surface.device(), format);
-        let camera_roi_overlay = RoiOverlayPresenter::new(surface.device(), format);
-        let rgb_roi_overlay = RoiOverlayPresenter::new(surface.device(), format);
-        let rgb = WgpuFramePresenter::new(surface.device(), format);
+        let depth_cue = WgpuFrameRenderer::new(surface.device(), format);
+        let ir_diff = WgpuFrameRenderer::new(surface.device(), format);
+        let roi_overlay = RoiOverlayRenderer::new(surface.device(), format);
+        let camera_roi_overlay = RoiOverlayRenderer::new(surface.device(), format);
+        let rgb_roi_overlay = RoiOverlayRenderer::new(surface.device(), format);
+        let rgb = WgpuFrameRenderer::new(surface.device(), format);
 
         Ok(Self {
             surface,
@@ -51,8 +51,8 @@ impl PlaygroundPresenter {
     }
 }
 
-impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
-    fn present(&mut self, view: PlaygroundView<'a>) -> Result<()> {
+impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
+    fn render(&mut self, view: PlaygroundView<'a>) -> Result<()> {
         let _ = view.metadata;
         if let Some(rgb) = view.rgb
             && rgb.format != PixelFormat::Bgra8
@@ -70,7 +70,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
             |surface| {
                 let mut pass = surface.pass;
                 if let Some(depth_cue) = view.depth_cue {
-                    self.depth_cue.present(WgpuFrameView {
+                    self.depth_cue.render(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -91,7 +91,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                         x1: 1.0,
                         y1: 1.0,
                     };
-                    self.ir_diff.present(WgpuFrameView {
+                    self.ir_diff.render(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -100,7 +100,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                         target_size: surface.size,
                     })?;
                     if let Some(roi) = view.roi {
-                        self.roi_overlay.present(RoiOverlayView {
+                        self.roi_overlay.render(RoiOverlayView {
                             device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
@@ -112,7 +112,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                         })?;
                     }
                     if let Some(camera_roi) = view.camera_roi {
-                        self.camera_roi_overlay.present(RoiOverlayView {
+                        self.camera_roi_overlay.render(RoiOverlayView {
                             device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
@@ -131,7 +131,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                         x1: 1.0,
                         y1: 0.0,
                     };
-                    self.rgb.present(WgpuFrameView {
+                    self.rgb.render(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -140,7 +140,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                         target_size: surface.size,
                     })?;
                     if let Some(rgb_roi) = view.rgb_roi {
-                        self.rgb_roi_overlay.present(RoiOverlayView {
+                        self.rgb_roi_overlay.render(RoiOverlayView {
                             device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,

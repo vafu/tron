@@ -1,13 +1,11 @@
 use anyhow::Result;
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
-use tron_api::{CapturedFrame, Frame, FrameDecoder, FrameSource, OwnedFrame};
+use tron_api::{Frame, FrameSource, OpenedCameraInfo, OwnedFrame};
 
-pub trait FrameStream {
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>>;
-}
-
-pub trait FramePairStream {
+pub trait FramePairSource {
     fn next_pair(&mut self) -> Result<Option<SyncedFramePair>>;
 }
 
@@ -16,6 +14,81 @@ pub struct SyncedFramePair {
     pub left: OwnedFrame,
     pub right: OwnedFrame,
     pub delta_us: i64,
+}
+
+pub struct BufferedFrameSource {
+    info: OpenedCameraInfo,
+    shared: Arc<Mutex<BufferedState>>,
+    current: Option<OwnedFrame>,
+}
+
+impl BufferedFrameSource {
+    pub fn spawn<S>(name: &'static str, mut source: S, capacity: usize) -> Self
+    where
+        S: FrameSource + Send + 'static,
+    {
+        let info = source.info().clone();
+        let shared = Arc::new(Mutex::new(BufferedState {
+            frames: VecDeque::with_capacity(capacity),
+            capacity: capacity.max(1),
+            error: None,
+        }));
+        let thread_shared = shared.clone();
+
+        thread::spawn(move || {
+            loop {
+                match source.next_frame() {
+                    Ok(Some(frame)) => {
+                        let frame = own_frame(frame);
+                        if let Ok(mut state) = thread_shared.lock() {
+                            if state.frames.len() >= state.capacity {
+                                state.frames.pop_front();
+                            }
+                            state.frames.push_back(frame);
+                        }
+                    }
+                    Ok(None) => thread::yield_now(),
+                    Err(err) => {
+                        if let Ok(mut state) = thread_shared.lock() {
+                            state.error = Some(err);
+                        }
+                        eprintln!("buffered frame source {name}: stopped");
+                        return;
+                    }
+                }
+            }
+        });
+
+        Self {
+            info,
+            shared,
+            current: None,
+        }
+    }
+}
+
+impl FrameSource for BufferedFrameSource {
+    fn info(&self) -> &OpenedCameraInfo {
+        &self.info
+    }
+
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| anyhow::anyhow!("buffered frame source lock poisoned"))?;
+        if let Some(err) = state.error.take() {
+            return Err(err);
+        }
+        self.current = state.frames.pop_front();
+        Ok(self.current.as_ref().map(|frame| frame.as_frame()))
+    }
+}
+
+struct BufferedState {
+    frames: VecDeque<OwnedFrame>,
+    capacity: usize,
+    error: Option<anyhow::Error>,
 }
 
 pub struct FrameSynchronizer<L, R> {
@@ -30,8 +103,8 @@ pub struct FrameSynchronizer<L, R> {
 
 impl<L, R> FrameSynchronizer<L, R>
 where
-    L: FrameStream,
-    R: FrameStream,
+    L: FrameSource,
+    R: FrameSource,
 {
     pub fn new(left: L, right: R, max_delta_us: i64) -> Self {
         Self {
@@ -81,10 +154,10 @@ where
     }
 }
 
-impl<L, R> FramePairStream for FrameSynchronizer<L, R>
+impl<L, R> FramePairSource for FrameSynchronizer<L, R>
 where
-    L: FrameStream,
-    R: FrameStream,
+    L: FrameSource,
+    R: FrameSource,
 {
     fn next_pair(&mut self) -> Result<Option<SyncedFramePair>> {
         const MAX_DEQUEUE_STEPS: usize = 32;
@@ -126,26 +199,8 @@ where
     }
 }
 
-pub struct PassthroughStream<S> {
-    source: S,
-}
-
-impl<S> PassthroughStream<S> {
-    pub fn new(source: S) -> Self {
-        Self { source }
-    }
-
-    pub fn source(&self) -> &S {
-        &self.source
-    }
-
-    pub fn source_mut(&mut self) -> &mut S {
-        &mut self.source
-    }
-}
-
-fn next_owned_frame(stream: &mut impl FrameStream) -> Result<Option<OwnedFrame>> {
-    stream.next_frame().map(|frame| frame.map(own_frame))
+fn next_owned_frame(source: &mut impl FrameSource) -> Result<Option<OwnedFrame>> {
+    source.next_frame().map(|frame| frame.map(own_frame))
 }
 
 fn own_frame(frame: Frame<'_>) -> OwnedFrame {
@@ -180,66 +235,4 @@ fn instant_delta_us(left: Instant, right: Instant) -> i64 {
 
 fn duration_to_i64_us(duration: Duration) -> i64 {
     duration.as_micros().min(i64::MAX as u128) as i64
-}
-
-impl<S> FrameStream for PassthroughStream<S>
-where
-    S: FrameSource,
-{
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
-        match self.source.next_frame()? {
-            Some(CapturedFrame::Frame(frame)) => Ok(Some(frame)),
-            Some(CapturedFrame::Encoded(frame)) => anyhow::bail!(
-                "passthrough stream received encoded frame {:?} from sensor {:?}",
-                frame.format,
-                frame.meta.sensor
-            ),
-            None => Ok(None),
-        }
-    }
-}
-
-pub struct DecodeStream<S, D> {
-    source: S,
-    decoder: D,
-}
-
-impl<S, D> DecodeStream<S, D> {
-    pub fn new(source: S, decoder: D) -> Self {
-        Self { source, decoder }
-    }
-
-    pub fn source(&self) -> &S {
-        &self.source
-    }
-
-    pub fn source_mut(&mut self) -> &mut S {
-        &mut self.source
-    }
-
-    pub fn decoder(&self) -> &D {
-        &self.decoder
-    }
-
-    pub fn decoder_mut(&mut self) -> &mut D {
-        &mut self.decoder
-    }
-}
-
-impl<S, D> FrameStream for DecodeStream<S, D>
-where
-    S: FrameSource,
-    D: FrameDecoder,
-{
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
-        match self.source.next_frame()? {
-            Some(CapturedFrame::Encoded(frame)) => self.decoder.decode(frame).map(Some),
-            Some(CapturedFrame::Frame(frame)) => anyhow::bail!(
-                "decode stream received pixel frame {:?} from sensor {:?}",
-                frame.format,
-                frame.meta.sensor
-            ),
-            None => Ok(None),
-        }
-    }
 }

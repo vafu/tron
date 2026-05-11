@@ -3,15 +3,15 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use tron_api::Presenter;
+use tron_api::Renderer;
 
 #[derive(Clone)]
-pub struct HttpMetadataPresenter {
+pub struct HttpMetadataRenderer {
     addr: SocketAddr,
     state: Arc<Mutex<String>>,
 }
 
-impl HttpMetadataPresenter {
+impl HttpMetadataRenderer {
     pub fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
         let listener = TcpListener::bind(addr).context("bind metadata HTTP listener")?;
         spawn_bound(listener)
@@ -57,7 +57,7 @@ impl HttpMetadataPresenter {
     }
 }
 
-fn spawn_bound(listener: TcpListener) -> Result<HttpMetadataPresenter> {
+fn spawn_bound(listener: TcpListener) -> Result<HttpMetadataRenderer> {
     let addr = listener
         .local_addr()
         .context("read metadata HTTP address")?;
@@ -80,14 +80,14 @@ fn spawn_bound(listener: TcpListener) -> Result<HttpMetadataPresenter> {
         })
         .context("spawn metadata HTTP thread")?;
 
-    Ok(HttpMetadataPresenter { addr, state })
+    Ok(HttpMetadataRenderer { addr, state })
 }
 
-impl<V> Presenter<V> for HttpMetadataPresenter
+impl<V> Renderer<V> for HttpMetadataRenderer
 where
     V: serde::Serialize,
 {
-    fn present(&mut self, view: V) -> Result<()> {
+    fn render(&mut self, view: V) -> Result<()> {
         let body = serde_json::to_string(&view).context("serialize metadata HTTP view")?;
         *self.state.lock().expect("metadata state lock poisoned") = body;
         Ok(())

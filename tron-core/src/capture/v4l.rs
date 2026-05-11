@@ -4,9 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 use tron_api::{
-    CameraOpenRequest, CameraOpener, CameraSelector, CaptureFormat, CapturedFrame, EncodedFormat,
-    EncodedFrame, Frame, FrameMeta, FrameSource, FrameTimestamp, OpenedCameraInfo, PixelFormat,
-    SensorKind, Size, TimestampSource,
+    CameraOpenRequest, CameraOpener, CameraSelector, CaptureFormat, Frame, FrameMeta, FrameSource,
+    FrameTimestamp, OpenedCameraInfo, PixelFormat, SensorKind, Size, TimestampSource,
 };
 use v4l::FourCC;
 use v4l::buffer::{Flags, Metadata, Type};
@@ -16,12 +15,25 @@ use v4l::video::Capture;
 use v4l::video::capture::Parameters;
 use v4l::{v4l_sys, v4l2};
 
+use crate::decode::mjpeg::TurboMjpegDecoder;
+use crate::decode::{EncodedFormat, EncodedFrame, FrameDecoder};
+
 const DEFAULT_DEVICE: &str = "/dev/video53";
 const DEFAULT_BUFFERS: u32 = 4;
 const UVCM_METADATA_ID_FRAME_ILLUMINATION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct V4lCameraOpener;
+pub struct V4lCameraOpener {
+    decoded_mjpeg_format: Option<PixelFormat>,
+}
+
+impl V4lCameraOpener {
+    pub fn with_decoded_mjpeg_format(decoded_mjpeg_format: PixelFormat) -> Self {
+        Self {
+            decoded_mjpeg_format: Some(decoded_mjpeg_format),
+        }
+    }
+}
 
 impl CameraOpener for V4lCameraOpener {
     type Source = V4lFrameSource;
@@ -67,6 +79,13 @@ impl CameraOpener for V4lCameraOpener {
         let stream = MmapStream::with_buffers(&dev, Type::VideoCapture, buffers)
             .with_context(|| format!("create V4L mmap stream on {path} with {buffers} buffers"))?;
 
+        let decoder = match format {
+            CaptureFormat::Mjpeg => Some(TurboMjpegDecoder::new(
+                self.decoded_mjpeg_format.unwrap_or(PixelFormat::Bgra8),
+            )?),
+            CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => None,
+        };
+
         Ok(V4lFrameSource {
             info: OpenedCameraInfo {
                 id: path,
@@ -75,6 +94,7 @@ impl CameraOpener for V4lCameraOpener {
                 size,
             },
             stream,
+            decoder,
             next_id: 0,
         })
     }
@@ -83,6 +103,7 @@ impl CameraOpener for V4lCameraOpener {
 pub struct V4lFrameSource {
     info: OpenedCameraInfo,
     stream: MmapStream<'static>,
+    decoder: Option<TurboMjpegDecoder>,
     next_id: u64,
 }
 
@@ -168,7 +189,7 @@ impl FrameSource for V4lFrameSource {
         &self.info
     }
 
-    fn next_frame(&mut self) -> Result<Option<CapturedFrame<'_>>> {
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
 
@@ -178,25 +199,27 @@ impl FrameSource for V4lFrameSource {
         let meta = frame_meta(id, self.info.sensor, self.info.size, v4l_meta);
 
         match self.info.format {
-            CaptureFormat::Mjpeg => Ok(Some(
-                EncodedFrame {
-                    meta,
-                    format: EncodedFormat::Mjpeg,
-                    data,
-                }
-                .into(),
-            )),
+            CaptureFormat::Mjpeg => {
+                let decoder = self
+                    .decoder
+                    .as_mut()
+                    .context("V4L MJPEG source has no decoder")?;
+                decoder
+                    .decode(EncodedFrame {
+                        meta,
+                        format: EncodedFormat::Mjpeg,
+                        data,
+                    })
+                    .map(Some)
+            }
             CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
                 let format = PixelFormat::try_from(self.info.format)?;
-                Ok(Some(
-                    Frame {
-                        meta,
-                        format,
-                        stride: stride(format, self.info.size.width),
-                        data,
-                    }
-                    .into(),
-                ))
+                Ok(Some(Frame {
+                    meta,
+                    format,
+                    stride: stride(format, self.info.size.width),
+                    data,
+                }))
             }
         }
     }

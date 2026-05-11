@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Frame, PixelFormat, Presenter, Size};
+use tron_api::{Frame, PixelFormat, Renderer, Size};
 use wgpu::util::DeviceExt;
 
 mod surface;
@@ -48,7 +48,7 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
 };
 
-pub struct WgpuFramePresenter {
+pub struct WgpuFrameRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -73,7 +73,7 @@ struct FrameTexture {
     height: u32,
 }
 
-impl WgpuFramePresenter {
+impl WgpuFrameRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -156,8 +156,8 @@ impl WgpuFramePresenter {
     }
 }
 
-impl<'frame, 'pass> Presenter<WgpuFrameView<'frame, 'pass>> for WgpuFramePresenter {
-    fn present(&mut self, view: WgpuFrameView<'frame, 'pass>) -> Result<()> {
+impl<'frame, 'pass> Renderer<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer {
+    fn render(&mut self, view: WgpuFrameView<'frame, 'pass>) -> Result<()> {
         let frame = view.frame;
         self.ensure_texture(view.device, frame.meta.size);
         self.update_vertices(view.queue, frame.meta.size, view.rect, view.target_size);
@@ -166,14 +166,14 @@ impl<'frame, 'pass> Presenter<WgpuFrameView<'frame, 'pass>> for WgpuFramePresent
             PixelFormat::Bgra8 => {
                 anyhow::ensure!(
                     frame.stride == frame.meta.size.width as usize * 4,
-                    "WgpuFramePresenter requires tightly packed BGRA8 frames"
+                    "WgpuFrameRenderer requires tightly packed BGRA8 frames"
                 );
                 (frame.data, frame.stride)
             }
             PixelFormat::Gray8 => {
                 anyhow::ensure!(
                     frame.stride == frame.meta.size.width as usize,
-                    "WgpuFramePresenter requires tightly packed Gray8 frames"
+                    "WgpuFrameRenderer requires tightly packed Gray8 frames"
                 );
                 let pixel_count = frame.meta.size.width as usize * frame.meta.size.height as usize;
                 self.bgra_scratch.resize(pixel_count * 4, 255);
@@ -187,7 +187,7 @@ impl<'frame, 'pass> Presenter<WgpuFrameView<'frame, 'pass>> for WgpuFramePresent
                 (&self.bgra_scratch[..], frame.meta.size.width as usize * 4)
             }
             PixelFormat::Yuyv422 => {
-                anyhow::bail!("WgpuFramePresenter does not support YUYV422 yet")
+                anyhow::bail!("WgpuFrameRenderer does not support YUYV422 yet")
             }
         };
 
@@ -220,7 +220,7 @@ impl<'frame, 'pass> Presenter<WgpuFrameView<'frame, 'pass>> for WgpuFramePresent
     }
 }
 
-impl WgpuFramePresenter {
+impl WgpuFrameRenderer {
     fn ensure_texture(&mut self, device: &wgpu::Device, size: Size) {
         let needs_texture = self
             .texture

@@ -3,15 +3,16 @@ use std::time::Instant;
 use std::{fs::File, path::PathBuf};
 
 use anyhow::{Context, Result};
+use tron_api::FrameSource;
 use tron_api::{
-    CheckerboardDetection, CheckerboardSample, CheckerboardSpec, OwnedFrame, Presenter, Processor,
+    CheckerboardDetection, CheckerboardSample, CheckerboardSpec, OwnedFrame, Processor, Renderer,
     Size,
 };
 use tron_core::calib::checkerboard::{
     CheckerboardSampleBuilder, OpenCvCheckerboardConfig, OpenCvCheckerboardDetector,
     calibrate_stereo_checkerboard, calibration_frame_side,
 };
-use tron_core::pipeline::{FrameStream, FrameSynchronizer};
+use tron_core::pipeline::FrameSynchronizer;
 use tron_core::view::IntoView;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -20,7 +21,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{WindowAttributes, WindowId};
 
 use crate::latency::{CalibrationLatencyLog, CalibrationLatencySample};
-use crate::presenter::{CalibrationPresenter, CalibrationView};
+use crate::renderer::{CalibrationRenderer, CalibrationView};
 
 pub struct CalibrationRunConfig {
     pub checkerboard: CheckerboardSpec,
@@ -31,8 +32,8 @@ pub struct CalibrationRunConfig {
 
 pub fn run<R, I>(rgb: R, ir: I, config: CalibrationRunConfig) -> Result<()>
 where
-    R: FrameStream,
-    I: FrameStream,
+    R: FrameSource,
+    I: FrameSource,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -52,7 +53,7 @@ struct WindowApp<R, I> {
     min_samples: usize,
     output: PathBuf,
     window_id: Option<WindowId>,
-    presenter: Option<CalibrationPresenter>,
+    renderer: Option<CalibrationRenderer>,
     window: Option<Arc<winit::window::Window>>,
     latency: CalibrationLatencyLog,
     result: Result<()>,
@@ -60,8 +61,8 @@ struct WindowApp<R, I> {
 
 impl<R, I> WindowApp<R, I>
 where
-    R: FrameStream,
-    I: FrameStream,
+    R: FrameSource,
+    I: FrameSource,
 {
     fn new(rgb: R, ir: I, config: CalibrationRunConfig) -> Self {
         let checkerboard = OpenCvCheckerboardConfig::new(config.checkerboard);
@@ -77,7 +78,7 @@ where
             output: config.output,
             window_id: None,
             window: None,
-            presenter: None,
+            renderer: None,
             latency: CalibrationLatencyLog::default(),
             result: Ok(()),
         }
@@ -162,11 +163,11 @@ where
 
 impl<R, I> ApplicationHandler for WindowApp<R, I>
 where
-    R: FrameStream,
-    I: FrameStream,
+    R: FrameSource,
+    I: FrameSource,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.presenter.is_some() {
+        if self.renderer.is_some() {
             return;
         }
 
@@ -180,16 +181,16 @@ where
         };
         self.window_id = Some(window.id());
         let size = window.inner_size();
-        match pollster::block_on(CalibrationPresenter::new(
+        match pollster::block_on(CalibrationRenderer::new(
             window.clone(),
             Size {
                 width: size.width,
                 height: size.height,
             },
         )) {
-            Ok(presenter) => {
+            Ok(renderer) => {
                 self.window = Some(window);
-                self.presenter = Some(presenter);
+                self.renderer = Some(renderer);
             }
             Err(err) => self.set_error(event_loop, err),
         }
@@ -208,8 +209,8 @@ where
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(presenter) = self.presenter.as_mut() {
-                    presenter.resize(Size {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(Size {
                         width: size.width,
                         height: size.height,
                     });
@@ -238,7 +239,7 @@ where
                 // calibration window startup behavior. Keep FrameSynchronizer
                 // in place, but only use it as a temporary owner for both
                 // streams.
-                // let pair = match tron_core::pipeline::FramePairStream::next_pair(&mut self.synchronizer) {
+                // let pair = match tron_core::pipeline::FramePairSource::next_pair(&mut self.synchronizer) {
                 let pair = match self.synchronizer.next_unsynchronized_pair() {
                     Ok(pair) => pair,
                     Err(err) => {
@@ -292,10 +293,10 @@ where
                 let ir_checkerboard = self.ir_checkerboard.detection();
 
                 let present_start = Instant::now();
-                let Some(presenter) = self.presenter.as_mut() else {
+                let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
-                if let Err(err) = presenter.present(CalibrationView {
+                if let Err(err) = renderer.render(CalibrationView {
                     rgb: Some(rgb.as_frame()),
                     ir: Some(ir.as_frame()),
                     rgb_checkerboard,
@@ -304,13 +305,13 @@ where
                     self.set_error(event_loop, err);
                     return;
                 }
-                let present = present_start.elapsed();
+                let render = present_start.elapsed();
                 let finished_at = Instant::now();
                 self.latency.record(CalibrationLatencySample {
                     latest,
                     rgb_detect,
                     ir_detect,
-                    present,
+                    render,
                     total: finished_at.saturating_duration_since(redraw_start),
                     finished_at,
                     rgb: Some(&rgb),

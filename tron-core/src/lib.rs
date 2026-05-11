@@ -1,13 +1,10 @@
 pub mod calib;
 pub mod capture;
-pub mod decode;
+mod decode;
 pub mod pipeline;
-pub mod present;
 pub mod process;
+pub mod render;
 pub mod roi;
 pub mod view;
 
-pub use pipeline::{
-    DecodeStream, FramePairStream, FrameStream, FrameSynchronizer, PassthroughStream,
-    SyncedFramePair,
-};
+pub use pipeline::{BufferedFrameSource, FramePairSource, FrameSynchronizer, SyncedFramePair};

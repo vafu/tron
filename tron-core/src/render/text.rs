@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::time::{Duration, Instant};
-use tron_api::{Frame, Presenter};
+use tron_api::{Frame, Renderer};
 
 #[derive(Clone, Copy, Debug)]
 pub struct TextFrameView<'a> {
@@ -9,14 +9,14 @@ pub struct TextFrameView<'a> {
     pub acquire_us: u64,
 }
 
-pub struct TextStatsPresenter {
+pub struct TextStatsRenderer {
     interval: Duration,
     last_log: Instant,
     frames: u32,
     acquire_us: u64,
 }
 
-impl TextStatsPresenter {
+impl TextStatsRenderer {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval,
@@ -27,8 +27,8 @@ impl TextStatsPresenter {
     }
 }
 
-impl<'a> Presenter<TextFrameView<'a>> for TextStatsPresenter {
-    fn present(&mut self, view: TextFrameView<'a>) -> Result<()> {
+impl<'a> Renderer<TextFrameView<'a>> for TextStatsRenderer {
+    fn render(&mut self, view: TextFrameView<'a>) -> Result<()> {
         self.frames += 1;
         self.acquire_us += view.acquire_us;
 

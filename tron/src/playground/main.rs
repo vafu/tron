@@ -6,7 +6,7 @@ use tron::capture::open_v4l_stream;
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind};
 use tron_core::capture::v4l_control::V4lCameraRoiControl;
-use tron_core::present::http::HttpMetadataPresenter;
+use tron_core::render::http::HttpMetadataRenderer;
 
 use crate::camera_roi::{CameraRoiConfig, CameraRoiDriver};
 use crate::pipeline::PlaygroundPipelineConfig;
@@ -15,12 +15,12 @@ mod camera_roi;
 mod exposure_roi;
 mod metadata;
 mod pipeline;
-mod presenter;
+mod renderer;
 mod window;
 
 #[derive(Debug, Parser)]
 #[command(name = "tron-playground")]
-#[command(about = "Composable playground for capture/decode/process/present experiments")]
+#[command(about = "Composable playground for capture/decode/process/render experiments")]
 struct Cli {
     #[command(flatten)]
     camera: CameraArgs,
@@ -129,13 +129,12 @@ fn run(cli: Cli) -> Result<()> {
     let metadata = if cli.no_metadata_http {
         None
     } else {
-        let presenter =
-            HttpMetadataPresenter::bind_available(("127.0.0.1", cli.metadata_port), 20)?;
+        let renderer = HttpMetadataRenderer::bind_available(("127.0.0.1", cli.metadata_port), 20)?;
         eprintln!(
             "tron-playground: metadata http://{}/metadata",
-            presenter.local_addr()
+            renderer.local_addr()
         );
-        Some(presenter)
+        Some(renderer)
     };
     window::run(
         rgb_latest,

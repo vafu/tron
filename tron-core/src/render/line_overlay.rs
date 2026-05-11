@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::Presenter;
+use tron_api::Renderer;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -22,13 +22,13 @@ pub struct LineOverlayView<'frame, 'pass> {
     pub vertices: &'frame [LineVertex],
 }
 
-pub struct LineOverlayPresenter {
+pub struct LineOverlayRenderer {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
 }
 
-impl LineOverlayPresenter {
+impl LineOverlayRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat, label: &str) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("{label}-shader")),
@@ -86,8 +86,8 @@ impl LineOverlayPresenter {
     }
 }
 
-impl<'frame, 'pass> Presenter<LineOverlayView<'frame, 'pass>> for LineOverlayPresenter {
-    fn present(&mut self, view: LineOverlayView<'frame, 'pass>) -> Result<()> {
+impl<'frame, 'pass> Renderer<LineOverlayView<'frame, 'pass>> for LineOverlayRenderer {
+    fn render(&mut self, view: LineOverlayView<'frame, 'pass>) -> Result<()> {
         if view.vertices.is_empty() {
             return Ok(());
         }

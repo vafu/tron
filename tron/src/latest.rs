@@ -2,22 +2,24 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anyhow::Result;
-use tron_api::{Frame, OwnedFrame};
-use tron_core::pipeline::FrameStream;
+use tron_api::{Frame, FrameSource, OpenedCameraInfo, OwnedFrame};
 
 #[derive(Clone)]
 pub struct LatestFrameSource {
+    info: OpenedCameraInfo,
     latest: Arc<Mutex<Option<Arc<OwnedFrame>>>>,
+    current: Option<Arc<OwnedFrame>>,
 }
 
 impl LatestFrameSource {
-    pub fn spawn(name: &'static str, mut stream: Box<dyn FrameStream + Send + 'static>) -> Self {
+    pub fn spawn(name: &'static str, mut source: Box<dyn FrameSource + Send + 'static>) -> Self {
+        let info = source.info().clone();
         let latest = Arc::new(Mutex::new(None));
         let thread_latest = latest.clone();
 
         thread::spawn(move || {
             loop {
-                match stream.next_frame() {
+                match source.next_frame() {
                     Ok(Some(frame)) => {
                         let owned = Arc::new(own_frame(frame));
                         if let Ok(mut latest) = thread_latest.lock() {
@@ -33,11 +35,26 @@ impl LatestFrameSource {
             }
         });
 
-        Self { latest }
+        Self {
+            info,
+            latest,
+            current: None,
+        }
     }
 
     pub fn next_frame(&self) -> Result<Option<Arc<OwnedFrame>>> {
         Ok(self.latest.lock().ok().and_then(|latest| latest.clone()))
+    }
+}
+
+impl FrameSource for LatestFrameSource {
+    fn info(&self) -> &OpenedCameraInfo {
+        &self.info
+    }
+
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
+        self.current = self.latest.lock().ok().and_then(|latest| latest.clone());
+        Ok(self.current.as_ref().map(|frame| frame.as_frame()))
     }
 }
 

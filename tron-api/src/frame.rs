@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use crate::Size;
+use anyhow::Result;
+
+use crate::{OpenedCameraInfo, Size};
 
 pub type FrameId = u64;
 
@@ -16,11 +18,6 @@ pub enum CaptureFormat {
     Mjpeg,
     Gray8,
     Yuyv422,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EncodedFormat {
-    Mjpeg,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,31 +63,6 @@ pub struct FrameMeta {
     pub size: Size,
     pub timestamp: FrameTimestamp,
     pub sequence: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct EncodedFrame<'a> {
-    pub meta: FrameMeta,
-    pub format: EncodedFormat,
-    pub data: &'a [u8],
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum CapturedFrame<'a> {
-    Encoded(EncodedFrame<'a>),
-    Frame(Frame<'a>),
-}
-
-impl<'a> From<EncodedFrame<'a>> for CapturedFrame<'a> {
-    fn from(value: EncodedFrame<'a>) -> Self {
-        Self::Encoded(value)
-    }
-}
-
-impl<'a> From<Frame<'a>> for CapturedFrame<'a> {
-    fn from(value: Frame<'a>) -> Self {
-        Self::Frame(value)
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -146,4 +118,13 @@ impl OwnedFrame {
             data: &mut self.data,
         }
     }
+}
+
+// TODO: FrameSource will also cover non-camera inputs such as file-backed
+// streams. This should become a more general StreamInfo enum that can compose
+// OpenedCameraInfo, FileInfo, and future source-specific metadata.
+pub trait FrameSource {
+    fn info(&self) -> &OpenedCameraInfo;
+
+    fn next_frame(&mut self) -> Result<Option<Frame<'_>>>;
 }

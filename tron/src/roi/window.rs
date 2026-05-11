@@ -1,13 +1,12 @@
-use crate::overlay::{RoiOverlayPresenter, RoiOverlayView};
+use crate::overlay::{RoiOverlayRenderer, RoiOverlayView};
 use crate::roi::RoiController;
 use crate::sweep::RoiSweep;
 use crate::uvc_step::UvcStepper;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Instant;
-use tron_api::{Frame, Presenter, Rect, Size};
-use tron_core::pipeline::FrameStream;
-use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView};
+use tron_api::{Frame, FrameSource, Rect, Renderer, Size};
+use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -16,7 +15,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
 pub fn run(
-    stream: Box<dyn FrameStream + 'static>,
+    stream: Box<dyn FrameSource + 'static>,
     controller: RoiController,
     sweep_speed: f32,
     uvc_stepper: Option<UvcStepper>,
@@ -29,11 +28,11 @@ pub fn run(
 }
 
 struct WindowApp {
-    stream: Box<dyn FrameStream>,
+    stream: Box<dyn FrameSource>,
     controller: RoiController,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
-    presenter: Option<RoiWindowPresenter>,
+    renderer: Option<RoiWindowRenderer>,
     latest_size: Option<Size>,
     window_size: Size,
     cursor_position: Option<PhysicalPosition<f64>>,
@@ -45,7 +44,7 @@ struct WindowApp {
 
 impl WindowApp {
     fn new(
-        stream: Box<dyn FrameStream>,
+        stream: Box<dyn FrameSource>,
         controller: RoiController,
         sweep_speed: f32,
         uvc_stepper: Option<UvcStepper>,
@@ -55,7 +54,7 @@ impl WindowApp {
             controller,
             window_id: None,
             window: None,
-            presenter: None,
+            renderer: None,
             latest_size: None,
             window_size: Size {
                 width: 1,
@@ -209,7 +208,7 @@ impl WindowApp {
 
 impl ApplicationHandler for WindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.presenter.is_some() {
+        if self.renderer.is_some() {
             return;
         }
 
@@ -227,20 +226,20 @@ impl ApplicationHandler for WindowApp {
             width: size.width.max(1),
             height: size.height.max(1),
         };
-        match pollster::block_on(RoiWindowPresenter::new(
+        match pollster::block_on(RoiWindowRenderer::new(
             window.clone(),
             Size {
                 width: size.width,
                 height: size.height,
             },
         )) {
-            Ok(presenter) => {
+            Ok(renderer) => {
                 if let Err(err) = self.controller.apply() {
                     self.set_error(event_loop, err);
                     return;
                 }
                 self.window = Some(window);
-                self.presenter = Some(presenter);
+                self.renderer = Some(renderer);
             }
             Err(err) => self.set_error(event_loop, err),
         }
@@ -255,7 +254,7 @@ impl ApplicationHandler for WindowApp {
         if Some(window_id) != self.window_id {
             return;
         }
-        let Some(presenter) = self.presenter.as_mut() else {
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
 
@@ -274,7 +273,7 @@ impl ApplicationHandler for WindowApp {
                     width: size.width.max(1),
                     height: size.height.max(1),
                 };
-                presenter.resize(Size {
+                renderer.resize(Size {
                     width: size.width,
                     height: size.height,
                 });
@@ -288,7 +287,7 @@ impl ApplicationHandler for WindowApp {
                             .update(&mut self.controller, frame.meta.size, now)?;
                         self.sweep
                             .maybe_log(frame, self.controller.rect(), Instant::now());
-                        presenter.present(RoiView {
+                        renderer.render(RoiView {
                             frame,
                             roi: self.controller.rect(),
                         })
@@ -364,17 +363,17 @@ struct RoiView<'a> {
     roi: Rect,
 }
 
-struct RoiWindowPresenter {
+struct RoiWindowRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: Size,
-    frame: WgpuFramePresenter,
-    overlay: RoiOverlayPresenter,
+    frame: WgpuFrameRenderer,
+    overlay: RoiOverlayRenderer,
 }
 
-impl RoiWindowPresenter {
+impl RoiWindowRenderer {
     async fn new(target: impl Into<wgpu::SurfaceTarget<'static>>, size: Size) -> Result<Self> {
         anyhow::ensure!(
             size.width > 0 && size.height > 0,
@@ -426,8 +425,8 @@ impl RoiWindowPresenter {
 
         Ok(Self {
             surface,
-            frame: WgpuFramePresenter::new(&device, format),
-            overlay: RoiOverlayPresenter::new(&device, format),
+            frame: WgpuFrameRenderer::new(&device, format),
+            overlay: RoiOverlayRenderer::new(&device, format),
             device,
             queue,
             config,
@@ -446,8 +445,8 @@ impl RoiWindowPresenter {
     }
 }
 
-impl<'a> Presenter<RoiView<'a>> for RoiWindowPresenter {
-    fn present(&mut self, view: RoiView<'a>) -> Result<()> {
+impl<'a> Renderer<RoiView<'a>> for RoiWindowRenderer {
+    fn render(&mut self, view: RoiView<'a>) -> Result<()> {
         let surface_frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -487,7 +486,7 @@ impl<'a> Presenter<RoiView<'a>> for RoiWindowPresenter {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.frame.present(WgpuFrameView {
+            self.frame.render(WgpuFrameView {
                 device: &self.device,
                 queue: &self.queue,
                 pass: &mut pass,
@@ -495,7 +494,7 @@ impl<'a> Presenter<RoiView<'a>> for RoiWindowPresenter {
                 rect: NdcRect::FULL,
                 target_size: self.size,
             })?;
-            self.overlay.present(RoiOverlayView {
+            self.overlay.render(RoiOverlayView {
                 queue: &self.queue,
                 pass: &mut pass,
                 roi: view.roi,

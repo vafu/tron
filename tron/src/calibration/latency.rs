@@ -9,7 +9,7 @@ pub struct CalibrationLatencyLog {
     latest: DurationStats,
     rgb_detect: DurationStats,
     ir_detect: DurationStats,
-    present: DurationStats,
+    render: DurationStats,
     total: DurationStats,
     rgb_age: DurationStats,
     ir_age: DurationStats,
@@ -25,7 +25,7 @@ impl CalibrationLatencyLog {
         self.latest.record(sample.latest);
         self.rgb_detect.record(sample.rgb_detect);
         self.ir_detect.record(sample.ir_detect);
-        self.present.record(sample.present);
+        self.render.record(sample.render);
         self.total.record(sample.total);
         if sample.rgb_detected {
             self.rgb_detected += 1;
@@ -59,11 +59,11 @@ impl CalibrationLatencyLog {
         let fps = self.frames as f64 / elapsed.as_secs_f64().max(0.001);
         tracing::info!(
             target: "calibration::latency",
-            "fps={fps:.1} latest={} rgb_detect={} ir_detect={} present={} total={} rgb_age={} ir_age={} sync_delta={} detections=rgb:{}/{} ir:{}/{}",
+            "fps={fps:.1} latest={} rgb_detect={} ir_detect={} render={} total={} rgb_age={} ir_age={} sync_delta={} detections=rgb:{}/{} ir:{}/{}",
             self.latest,
             self.rgb_detect,
             self.ir_detect,
-            self.present,
+            self.render,
             self.total,
             self.rgb_age,
             self.ir_age,
@@ -88,7 +88,7 @@ pub struct CalibrationLatencySample<'a> {
     pub latest: Duration,
     pub rgb_detect: Duration,
     pub ir_detect: Duration,
-    pub present: Duration,
+    pub render: Duration,
     pub total: Duration,
     pub finished_at: Instant,
     pub rgb: Option<&'a OwnedFrame>,

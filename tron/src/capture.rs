@@ -1,42 +1,16 @@
 use anyhow::Result;
 use tron_api::{
-    CameraOpenRequest, CameraOpener, CaptureFormat, Frame, FrameSource, OpenedCameraInfo,
-    PixelFormat, SensorKind,
+    CameraOpenRequest, CameraOpener, Frame, FrameSource, OpenedCameraInfo, PixelFormat, SensorKind,
 };
-use tron_core::capture::v4l::{V4lCameraOpener, V4lFrameSource, V4lUvcmMetadataSource};
-use tron_core::decode::mjpeg::TurboMjpegDecoder;
-use tron_core::pipeline::{DecodeStream, FrameStream, PassthroughStream};
+use tron_core::capture::v4l::{V4lCameraOpener, V4lUvcmMetadataSource};
 
 pub fn open_v4l_stream(
     request: CameraOpenRequest,
     decoded_mjpeg_format: PixelFormat,
-) -> Result<(OpenedCameraInfo, V4lFrameStream)> {
-    let source = V4lCameraOpener.open(request)?;
+) -> Result<(OpenedCameraInfo, impl FrameSource)> {
+    let source = V4lCameraOpener::with_decoded_mjpeg_format(decoded_mjpeg_format).open(request)?;
     let info = source.info().clone();
-    let stream = match info.format {
-        CaptureFormat::Mjpeg => {
-            let decoder = TurboMjpegDecoder::new(decoded_mjpeg_format)?;
-            V4lFrameStream::Decode(DecodeStream::new(source, decoder))
-        }
-        CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
-            V4lFrameStream::Passthrough(PassthroughStream::new(source))
-        }
-    };
-    Ok((info, stream))
-}
-
-pub enum V4lFrameStream {
-    Decode(DecodeStream<V4lFrameSource, TurboMjpegDecoder>),
-    Passthrough(PassthroughStream<V4lFrameSource>),
-}
-
-impl FrameStream for V4lFrameStream {
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
-        match self {
-            Self::Decode(stream) => stream.next_frame(),
-            Self::Passthrough(stream) => stream.next_frame(),
-        }
-    }
+    Ok((info, source))
 }
 
 pub fn force_sensor(mut request: CameraOpenRequest, sensor: SensorKind) -> CameraOpenRequest {
@@ -60,10 +34,14 @@ impl<S> LitIrFrameStream<S> {
     }
 }
 
-impl<S> FrameStream for LitIrFrameStream<S>
+impl<S> FrameSource for LitIrFrameStream<S>
 where
-    S: FrameStream,
+    S: FrameSource,
 {
+    fn info(&self) -> &OpenedCameraInfo {
+        self.inner.info()
+    }
+
     fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         let Self {
             inner,

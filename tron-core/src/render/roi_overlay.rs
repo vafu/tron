@@ -1,8 +1,8 @@
 use anyhow::Result;
-use tron_api::{Presenter, Rect, Size};
+use tron_api::{Rect, Renderer, Size};
 
-use crate::present::line_overlay::{LineOverlayPresenter, LineOverlayView, LineVertex};
-use crate::present::wgpu::{NdcRect, project_frame_point};
+use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
+use crate::render::wgpu::{NdcRect, project_frame_point};
 
 pub struct RoiOverlayView<'frame, 'pass> {
     pub device: &'frame wgpu::Device,
@@ -15,15 +15,15 @@ pub struct RoiOverlayView<'frame, 'pass> {
     pub target_size: Size,
 }
 
-pub struct RoiOverlayPresenter {
-    lines: LineOverlayPresenter,
+pub struct RoiOverlayRenderer {
+    lines: LineOverlayRenderer,
     vertices: [LineVertex; 8],
 }
 
-impl RoiOverlayPresenter {
+impl RoiOverlayRenderer {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         Self {
-            lines: LineOverlayPresenter::new(device, surface_format, "tron-roi-overlay"),
+            lines: LineOverlayRenderer::new(device, surface_format, "tron-roi-overlay"),
             vertices: [LineVertex {
                 position: [0.0, 0.0],
                 color: [0.0, 0.0, 0.0, 0.0],
@@ -32,8 +32,8 @@ impl RoiOverlayPresenter {
     }
 }
 
-impl<'frame, 'pass> Presenter<RoiOverlayView<'frame, 'pass>> for RoiOverlayPresenter {
-    fn present(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
+impl<'frame, 'pass> Renderer<RoiOverlayView<'frame, 'pass>> for RoiOverlayRenderer {
+    fn render(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
         self.vertices = roi_vertices(
             view.roi,
             view.color,
@@ -41,7 +41,7 @@ impl<'frame, 'pass> Presenter<RoiOverlayView<'frame, 'pass>> for RoiOverlayPrese
             view.rect,
             view.target_size,
         );
-        self.lines.present(LineOverlayView {
+        self.lines.render(LineOverlayView {
             device: view.device,
             queue: view.queue,
             pass: view.pass,

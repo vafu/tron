@@ -70,7 +70,7 @@ impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
                         queue: surface.queue,
                         pass: &mut pass,
                         detection,
-                        color: [0.1, 0.9, 1.0, 1.0],
+                        color: [1.0, 0.05, 0.05, 1.0],
                         rect: NdcRect::LEFT,
                         target_size: surface.size,
                     })?;

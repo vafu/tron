@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -38,10 +36,6 @@ struct Cli {
     /// Physical square size in millimeters.
     #[arg(long, default_value_t = 25.0)]
     checkerboard_square_mm: f64,
-
-    /// Minimum interval between checkerboard searches per feed. Set to 0 to search every new frame.
-    #[arg(long, default_value_t = 250)]
-    checkerboard_detect_ms: u64,
 }
 
 fn main() -> Result<()> {
@@ -84,12 +78,7 @@ fn run(cli: Cli) -> Result<()> {
 
     let rgb = LatestFrameSource::spawn("calibration-rgb", rgb_stream);
     let ir = LatestFrameSource::spawn("calibration-ir", ir_stream);
-    window::run(
-        rgb,
-        ir,
-        checkerboard_spec(&cli),
-        Duration::from_millis(cli.checkerboard_detect_ms),
-    )
+    window::run(rgb, ir, checkerboard_spec(&cli))
 }
 
 fn checkerboard_spec(cli: &Cli) -> CheckerboardSpec {

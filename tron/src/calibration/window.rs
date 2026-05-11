@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tron::latest::LatestFrameSource;
@@ -18,11 +18,10 @@ pub fn run(
     rgb: LatestFrameSource,
     ir: LatestFrameSource,
     checkerboard: CheckerboardSpec,
-    checkerboard_detect_interval: Duration,
 ) -> Result<()> {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(rgb, ir, checkerboard, checkerboard_detect_interval);
+    let mut app = WindowApp::new(rgb, ir, checkerboard);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -40,18 +39,13 @@ struct WindowApp {
 }
 
 impl WindowApp {
-    fn new(
-        rgb: LatestFrameSource,
-        ir: LatestFrameSource,
-        checkerboard: CheckerboardSpec,
-        checkerboard_detect_interval: Duration,
-    ) -> Self {
+    fn new(rgb: LatestFrameSource, ir: LatestFrameSource, checkerboard: CheckerboardSpec) -> Self {
         let config = OpenCvCheckerboardConfig::new(checkerboard);
         Self {
             rgb,
             ir,
-            rgb_checkerboard: CheckerboardDetectionState::new(config, checkerboard_detect_interval),
-            ir_checkerboard: CheckerboardDetectionState::new(config, checkerboard_detect_interval),
+            rgb_checkerboard: CheckerboardDetectionState::new(config),
+            ir_checkerboard: CheckerboardDetectionState::new(config),
             window_id: None,
             window: None,
             presenter: None,
@@ -135,16 +129,15 @@ impl ApplicationHandler for WindowApp {
                 };
                 let latest = latest_start.elapsed();
 
-                let now = Instant::now();
                 let rgb_detect_start = Instant::now();
-                if let Err(err) = self.rgb_checkerboard.update(rgb.as_deref(), now) {
+                if let Err(err) = self.rgb_checkerboard.update(rgb.as_deref()) {
                     self.set_error(event_loop, err);
                     return;
                 }
                 let rgb_detect = rgb_detect_start.elapsed();
 
                 let ir_detect_start = Instant::now();
-                if let Err(err) = self.ir_checkerboard.update(ir.as_deref(), now) {
+                if let Err(err) = self.ir_checkerboard.update(ir.as_deref()) {
                     self.set_error(event_loop, err);
                     return;
                 }
@@ -194,24 +187,20 @@ impl ApplicationHandler for WindowApp {
 
 struct CheckerboardDetectionState {
     detector: OpenCvCheckerboardDetector,
-    interval: Duration,
     last_frame_id: Option<u64>,
-    last_run: Option<Instant>,
     detection: Option<CheckerboardDetection>,
 }
 
 impl CheckerboardDetectionState {
-    fn new(config: OpenCvCheckerboardConfig, interval: Duration) -> Self {
+    fn new(config: OpenCvCheckerboardConfig) -> Self {
         Self {
             detector: OpenCvCheckerboardDetector::new(config),
-            interval,
             last_frame_id: None,
-            last_run: None,
             detection: None,
         }
     }
 
-    fn update(&mut self, frame: Option<&OwnedFrame>, now: Instant) -> Result<()> {
+    fn update(&mut self, frame: Option<&OwnedFrame>) -> Result<()> {
         let Some(frame) = frame else {
             self.detection = None;
             return Ok(());
@@ -220,16 +209,8 @@ impl CheckerboardDetectionState {
         if self.last_frame_id == Some(frame_id) {
             return Ok(());
         }
-        if self
-            .last_run
-            .map(|last_run| now.saturating_duration_since(last_run) < self.interval)
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
 
         self.last_frame_id = Some(frame_id);
-        self.last_run = Some(now);
         self.detection = self
             .detector
             .process(frame.as_frame().view(), tron_api::NoContext)?;

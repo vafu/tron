@@ -5,14 +5,24 @@ namespace {
 
 constexpr uint32_t kBaud = 115200;
 constexpr uint8_t kLpnPin = 17;
+constexpr uint8_t kIntPin = 16;
 constexpr uint8_t kResolution = 64;
 constexpr uint8_t kFrequencyHz = 15;
 constexpr uint32_t kI2cClockHz = 400000;
 constexpr uint16_t kInvalidDistance = 0;
+constexpr uint32_t kPollFallbackUs = 5000;
 
 Adafruit_VL53L5CX sensor;
 VL53L5CX_ResultsData results;
 uint32_t sequence = 0;
+volatile bool interrupt_ready = false;
+volatile uint32_t interrupt_ready_us = 0;
+uint32_t last_poll_us = 0;
+
+void on_tof_interrupt() {
+  interrupt_ready_us = micros();
+  interrupt_ready = true;
+}
 
 void halt(const __FlashStringHelper *message) {
   Serial.println(message);
@@ -38,7 +48,7 @@ void print_zones(uint8_t resolution) {
   }
 }
 
-void print_sample(uint8_t resolution) {
+void print_sample(uint8_t resolution, uint32_t ready_us) {
   uint16_t min_mm = UINT16_MAX;
   uint16_t max_mm = 0;
   uint32_t sum_mm = 0;
@@ -64,6 +74,8 @@ void print_sample(uint8_t resolution) {
   Serial.print(sequence++);
   Serial.print(F(" t_ms="));
   Serial.print(millis());
+  Serial.print(F(" irq_us="));
+  Serial.print(ready_us);
   Serial.print(F(" res="));
   Serial.print(resolution);
   Serial.print(F(" center_mm="));
@@ -83,6 +95,7 @@ void print_sample(uint8_t resolution) {
 
 void setup() {
   pinMode(kLpnPin, OUTPUT);
+  pinMode(kIntPin, INPUT_PULLUP);
   digitalWrite(kLpnPin, LOW);
   delay(10);
   digitalWrite(kLpnPin, HIGH);
@@ -115,15 +128,38 @@ void setup() {
     halt(F("tof status=error stage=start_ranging"));
   }
 
+  attachInterrupt(digitalPinToInterrupt(kIntPin), on_tof_interrupt, FALLING);
+
   Serial.print(F("tof status=ready res="));
   Serial.print(sensor.getResolution());
   Serial.print(F(" hz="));
-  Serial.println(sensor.getRangingFrequency());
+  Serial.print(sensor.getRangingFrequency());
+  Serial.print(F(" int_pin="));
+  Serial.println(kIntPin);
 }
 
 void loop() {
-  if (sensor.isDataReady() && sensor.getRangingData(&results)) {
-    print_sample(sensor.getResolution());
+  uint32_t ready_us = 0;
+  bool should_check = false;
+
+  noInterrupts();
+  if (interrupt_ready) {
+    ready_us = interrupt_ready_us;
+    interrupt_ready = false;
+    should_check = true;
   }
-  delay(2);
+  interrupts();
+
+  const uint32_t now_us = micros();
+  if (!should_check && now_us - last_poll_us >= kPollFallbackUs) {
+    last_poll_us = now_us;
+    should_check = true;
+  }
+
+  if (should_check && sensor.isDataReady() && sensor.getRangingData(&results)) {
+    if (ready_us == 0) {
+      ready_us = micros();
+    }
+    print_sample(sensor.getResolution(), ready_us);
+  }
 }

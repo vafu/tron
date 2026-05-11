@@ -198,10 +198,6 @@ pub fn calibrate_stereo_checkerboard(
     let spec = samples[0].spec;
     let left_size = samples[0].left.frame_size;
     let right_size = samples[0].right.frame_size;
-    anyhow::ensure!(
-        left_size == right_size,
-        "stereo calibration currently requires matching left/right image sizes"
-    );
 
     let expected_corners = (spec.inner_corners.width * spec.inner_corners.height) as usize;
     for (index, sample) in samples.iter().enumerate() {
@@ -210,8 +206,12 @@ pub fn calibrate_stereo_checkerboard(
             "sample {index} uses a different checkerboard spec"
         );
         anyhow::ensure!(
-            sample.left.frame_size == left_size && sample.right.frame_size == right_size,
-            "sample {index} uses a different frame size"
+            sample.left.frame_size == left_size,
+            "sample {index} uses a different left frame size"
+        );
+        anyhow::ensure!(
+            sample.right.frame_size == right_size,
+            "sample {index} uses a different right frame size"
         );
         anyhow::ensure!(
             sample.object_points.len() == expected_corners
@@ -224,7 +224,8 @@ pub fn calibrate_stereo_checkerboard(
     let object_points = cv_object_points(samples);
     let left_points = cv_image_points(samples, |sample| &sample.left.corners);
     let right_points = cv_image_points(samples, |sample| &sample.right.corners);
-    let image_size = cv_size(left_size)?;
+    let left_image_size = cv_size(left_size)?;
+    let right_image_size = cv_size(right_size)?;
 
     let mut left_camera = Mat::eye(3, 3, core::CV_64F)
         .context("create left camera matrix")?
@@ -250,7 +251,7 @@ pub fn calibrate_stereo_checkerboard(
     let left_error = calib3d::calibrate_camera(
         &object_points,
         &left_points,
-        image_size,
+        left_image_size,
         &mut left_camera,
         &mut left_dist,
         &mut rvecs,
@@ -262,7 +263,7 @@ pub fn calibrate_stereo_checkerboard(
     let right_error = calib3d::calibrate_camera(
         &object_points,
         &right_points,
-        image_size,
+        right_image_size,
         &mut right_camera,
         &mut right_dist,
         &mut rvecs,
@@ -292,7 +293,9 @@ pub fn calibrate_stereo_checkerboard(
         &mut left_dist,
         &mut right_camera,
         &mut right_dist,
-        image_size,
+        // OpenCV's pinhole stereo API accepts a single image size. Intrinsics
+        // are already calibrated with per-camera sizes above and fixed here.
+        left_image_size,
         &mut rotation,
         &mut translation,
         &mut essential,

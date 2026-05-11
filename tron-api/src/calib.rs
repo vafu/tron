@@ -1,12 +1,12 @@
 use crate::{FrameMeta, NoContext, Point2d, Point3d, Processor, Size};
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CheckerboardSpec {
     pub inner_corners: Size,
     pub square_size_mm: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CheckerboardDetection {
     pub spec: CheckerboardSpec,
     pub frame_size: Size,
@@ -30,7 +30,7 @@ pub struct CheckerboardSample {
     pub right: CalibrationFrameSide,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct CameraCalibration {
     pub image_size: Size,
     pub camera_matrix: [[f64; 3]; 3],
@@ -38,7 +38,7 @@ pub struct CameraCalibration {
     pub reprojection_error: f64,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct CheckerboardStereoCalibration {
     pub spec: CheckerboardSpec,
     pub sample_count: usize,

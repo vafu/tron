@@ -12,7 +12,7 @@ use tron_core::calib::checkerboard::{
     CheckerboardSampleBuilder, OpenCvCheckerboardConfig, OpenCvCheckerboardDetector,
     calibrate_stereo_checkerboard, calibration_frame_side,
 };
-use tron_core::pipeline::FrameSynchronizer;
+use tron_core::pipeline::{FramePairSource, FrameSynchronizer};
 use tron_core::view::IntoView;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -235,12 +235,7 @@ where
             WindowEvent::RedrawRequested => {
                 let redraw_start = Instant::now();
                 let sync_start = Instant::now();
-                // Timestamp pairing is intentionally disabled while we diagnose
-                // calibration window startup behavior. Keep FrameSynchronizer
-                // in place, but only use it as a temporary owner for both
-                // streams.
-                // let pair = match tron_core::pipeline::FramePairSource::next_pair(&mut self.synchronizer) {
-                let pair = match self.synchronizer.next_unsynchronized_pair() {
+                let pair = match FramePairSource::next_pair(&mut self.synchronizer) {
                     Ok(pair) => pair,
                     Err(err) => {
                         self.set_error(event_loop, err);

@@ -5,7 +5,7 @@ pub mod process;
 pub mod render;
 pub mod roi;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Size {
     pub width: u32,
     pub height: u32,
@@ -44,13 +44,13 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Point2d {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Point3d {
     pub x: f64,
     pub y: f64,

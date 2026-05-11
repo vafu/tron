@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use tron::capture::{LitIrFrameStream, WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
+use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
-use tron_api::{CameraOpenRequest, CaptureFormat, CheckerboardSpec, PixelFormat, SensorKind, Size};
-use tron_core::capture::v4l::V4lUvcmMetadataSource;
+use tron_api::{
+    CameraOpenRequest, CaptureFormat, CheckerboardSpec, CheckerboardStereoCalibration, PixelFormat,
+    SensorKind, Size,
+};
 use tron_core::pipeline::BufferedFrameSource;
 
+mod check;
 mod latency;
 mod renderer;
 mod window;
@@ -55,6 +58,14 @@ struct Cli {
     /// Path for stereo calibration JSON output.
     #[arg(long, default_value = "calibration.json")]
     output: PathBuf,
+
+    /// Load a calibration JSON and display RGB with a translucent IR overlay.
+    #[arg(long)]
+    check: Option<PathBuf>,
+
+    /// Assumed RGB-camera depth, in millimeters, for --check RGB-to-IR overlay projection.
+    #[arg(long, default_value_t = 700.0)]
+    check_depth_mm: f64,
 }
 
 fn main() -> Result<()> {
@@ -95,16 +106,36 @@ fn run(cli: Cli) -> Result<()> {
         streams.rgb_info.size.height
     );
 
-    let ir_metadata = V4lUvcmMetadataSource::open(&streams.ir_metadata_id)?;
-    let ir_stream = LitIrFrameStream::new(streams.ir_stream, ir_metadata);
+    let ir_stream = streams.ir_stream;
     eprintln!(
-        "tron-calibration: opened ir {} {:?} {}x{} using lit-frame metadata {}",
+        "tron-calibration: opened ir {} {:?} {}x{}",
         streams.ir_info.id,
         streams.ir_info.format,
         streams.ir_info.size.width,
-        streams.ir_info.size.height,
-        streams.ir_metadata_id
+        streams.ir_info.size.height
     );
+
+    if let Some(path) = cli.check.as_ref() {
+        let file = std::fs::File::open(path)
+            .map(std::io::BufReader::new)
+            .map_err(anyhow::Error::from)?;
+        let calibration: CheckerboardStereoCalibration = serde_json::from_reader(file)?;
+        eprintln!(
+            "tron-calibration: checking {} with RGB+IR overlay",
+            path.display()
+        );
+        let rgb_stream = BufferedFrameSource::spawn("calibration-check-rgb", streams.rgb_stream, 4);
+        let ir_stream = BufferedFrameSource::spawn("calibration-check-ir", ir_stream, 4);
+        return check::run(
+            rgb_stream,
+            ir_stream,
+            check::CalibrationCheckConfig {
+                calibration,
+                max_sync_delta_us: cli.max_sync_delta_us,
+                depth_mm: cli.check_depth_mm,
+            },
+        );
+    }
 
     eprintln!(
         "tron-calibration: press Space to capture a paired checkerboard sample; press C to calibrate and write {}",

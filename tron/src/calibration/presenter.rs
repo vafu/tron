@@ -1,16 +1,23 @@
 use anyhow::Result;
-use tron_api::{Frame, Presenter, Size};
+use tron_api::{CheckerboardDetection, Frame, Presenter, Size};
+use tron_core::present::checkerboard_overlay::{
+    CheckerboardOverlayPresenter, CheckerboardOverlayView,
+};
 use tron_core::present::wgpu::{NdcRect, WgpuFramePresenter, WgpuFrameView, WgpuSurfaceContext};
 
 pub struct CalibrationView<'a> {
     pub rgb: Option<Frame<'a>>,
     pub ir: Option<Frame<'a>>,
+    pub rgb_checkerboard: Option<&'a CheckerboardDetection>,
+    pub ir_checkerboard: Option<&'a CheckerboardDetection>,
 }
 
 pub struct CalibrationPresenter {
     surface: WgpuSurfaceContext,
     rgb: WgpuFramePresenter,
     ir: WgpuFramePresenter,
+    rgb_checkerboard: CheckerboardOverlayPresenter,
+    ir_checkerboard: CheckerboardOverlayPresenter,
 }
 
 impl CalibrationPresenter {
@@ -19,7 +26,15 @@ impl CalibrationPresenter {
         let format = surface.format();
         let rgb = WgpuFramePresenter::new(surface.device(), format);
         let ir = WgpuFramePresenter::new(surface.device(), format);
-        Ok(Self { surface, rgb, ir })
+        let rgb_checkerboard = CheckerboardOverlayPresenter::new(surface.device(), format);
+        let ir_checkerboard = CheckerboardOverlayPresenter::new(surface.device(), format);
+        Ok(Self {
+            surface,
+            rgb,
+            ir,
+            rgb_checkerboard,
+            ir_checkerboard,
+        })
     }
 
     pub fn resize(&mut self, size: Size) {
@@ -49,12 +64,34 @@ impl<'a> Presenter<CalibrationView<'a>> for CalibrationPresenter {
                         target_size: surface.size,
                     })?;
                 }
+                if let Some(detection) = view.rgb_checkerboard {
+                    self.rgb_checkerboard.present(CheckerboardOverlayView {
+                        device: surface.device,
+                        queue: surface.queue,
+                        pass: &mut pass,
+                        detection,
+                        color: [0.1, 0.9, 1.0, 1.0],
+                        rect: NdcRect::LEFT,
+                        target_size: surface.size,
+                    })?;
+                }
                 if let Some(ir) = view.ir {
                     self.ir.present(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
                         frame: ir,
+                        rect: NdcRect::RIGHT,
+                        target_size: surface.size,
+                    })?;
+                }
+                if let Some(detection) = view.ir_checkerboard {
+                    self.ir_checkerboard.present(CheckerboardOverlayView {
+                        device: surface.device,
+                        queue: surface.queue,
+                        pass: &mut pass,
+                        detection,
+                        color: [1.0, 0.35, 0.1, 1.0],
                         rect: NdcRect::RIGHT,
                         target_size: surface.size,
                     })?;

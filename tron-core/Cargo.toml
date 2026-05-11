@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytemuck.workspace = true
-opencv = { workspace = true, features = ["clang-runtime", "imgproc"] }
+opencv = { workspace = true, features = ["calib3d", "clang-runtime", "imgproc"] }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "ndarray"] }
 serde.workspace = true
 serde_json.workspace = true

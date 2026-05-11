@@ -1,3 +1,4 @@
+pub mod calib;
 pub mod capture;
 pub mod decode;
 pub mod frame;
@@ -45,6 +46,19 @@ impl Rect {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Point2d {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Point3d {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a> {
     pub meta: frame::FrameMeta,
@@ -54,6 +68,10 @@ pub struct View<'a> {
     pub data: &'a [u8],
 }
 
+pub use calib::{
+    CalibrationFrameSide, CheckerboardDetection, CheckerboardProcessor, CheckerboardSample,
+    CheckerboardSpec, StereoCalibrationProcessor,
+};
 pub use capture::{
     CameraOpenRequest, CameraOpener, CameraRoiControl, CameraSelector, OpenedCameraInfo,
 };

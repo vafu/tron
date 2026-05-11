@@ -101,6 +101,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                     })?;
                     if let Some(roi) = view.roi {
                         self.roi_overlay.present(RoiOverlayView {
+                            device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
                             roi: roi.rect,
@@ -112,6 +113,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                     }
                     if let Some(camera_roi) = view.camera_roi {
                         self.camera_roi_overlay.present(RoiOverlayView {
+                            device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
                             roi: camera_roi,
@@ -139,6 +141,7 @@ impl<'a> Presenter<PlaygroundView<'a>> for PlaygroundPresenter {
                     })?;
                     if let Some(rgb_roi) = view.rgb_roi {
                         self.rgb_roi_overlay.present(RoiOverlayView {
+                            device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
                             roi: rgb_roi.rect,

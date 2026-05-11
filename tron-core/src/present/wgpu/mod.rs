@@ -275,7 +275,7 @@ impl WgpuFramePresenter {
         rect: NdcRect,
         target_size: Size,
     ) {
-        let (x0, y0, x1, y1) = letterbox(frame_size, rect, target_size);
+        let [x0, y0, x1, y1] = letterbox(frame_size, rect, target_size);
         queue.write_buffer(
             &self.vertex_buffer,
             0,
@@ -284,7 +284,14 @@ impl WgpuFramePresenter {
     }
 }
 
-fn letterbox(frame: Size, rect: NdcRect, target: Size) -> (f32, f32, f32, f32) {
+pub fn project_frame_point(point: [f32; 2], frame: Size, rect: NdcRect, target: Size) -> [f32; 2] {
+    let [x0, y0, x1, y1] = letterbox(frame, rect, target);
+    let fx = point[0] / frame.width.max(1) as f32;
+    let fy = point[1] / frame.height.max(1) as f32;
+    [lerp(x0, x1, fx), lerp(y1, y0, fy)]
+}
+
+pub fn letterbox(frame: Size, rect: NdcRect, target: Size) -> [f32; 4] {
     let rect_width_ndc = (rect.x1 - rect.x0).abs();
     let rect_height_ndc = (rect.y1 - rect.y0).abs();
     let rect_pixel_width = target.width as f32 * rect_width_ndc / 2.0;
@@ -295,17 +302,21 @@ fn letterbox(frame: Size, rect: NdcRect, target: Size) -> (f32, f32, f32, f32) {
     if rect_aspect > frame_aspect {
         let width_ndc = rect_width_ndc * frame_aspect / rect_aspect;
         let cx = (rect.x0 + rect.x1) * 0.5;
-        (cx - width_ndc * 0.5, rect.y0, cx + width_ndc * 0.5, rect.y1)
+        [cx - width_ndc * 0.5, rect.y0, cx + width_ndc * 0.5, rect.y1]
     } else {
         let height_ndc = rect_height_ndc * rect_aspect / frame_aspect;
         let cy = (rect.y0 + rect.y1) * 0.5;
-        (
+        [
             rect.x0,
             cy - height_ndc * 0.5,
             rect.x1,
             cy + height_ndc * 0.5,
-        )
+        ]
     }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Vertex; 6] {

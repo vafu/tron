@@ -1,23 +1,11 @@
 use anyhow::Result;
 use tron_api::{Presenter, Rect, Size};
-use wgpu::util::DeviceExt;
 
-use crate::present::wgpu::NdcRect;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
-    color: [f32; 4],
-}
-
-const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-    step_mode: wgpu::VertexStepMode::Vertex,
-    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
-};
+use crate::present::line_overlay::{LineOverlayPresenter, LineOverlayView, LineVertex};
+use crate::present::wgpu::{NdcRect, project_frame_point};
 
 pub struct RoiOverlayView<'frame, 'pass> {
+    pub device: &'frame wgpu::Device,
     pub queue: &'frame wgpu::Queue,
     pub pass: &'frame mut wgpu::RenderPass<'pass>,
     pub roi: Rect,
@@ -28,81 +16,37 @@ pub struct RoiOverlayView<'frame, 'pass> {
 }
 
 pub struct RoiOverlayPresenter {
-    pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
+    lines: LineOverlayPresenter,
+    vertices: [LineVertex; 8],
 }
 
 impl RoiOverlayPresenter {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tron-roi-overlay-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tron-roi-overlay-pipeline-layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tron-roi-overlay-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs",
-                buffers: &[VERTEX_LAYOUT],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("tron-roi-overlay-vertices"),
-            contents: bytemuck::cast_slice(
-                &[Vertex {
-                    position: [0.0, 0.0],
-                    color: [0.0, 0.0, 0.0, 0.0],
-                }; 8],
-            ),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
         Self {
-            pipeline,
-            vertex_buffer,
+            lines: LineOverlayPresenter::new(device, surface_format, "tron-roi-overlay"),
+            vertices: [LineVertex {
+                position: [0.0, 0.0],
+                color: [0.0, 0.0, 0.0, 0.0],
+            }; 8],
         }
     }
 }
 
 impl<'frame, 'pass> Presenter<RoiOverlayView<'frame, 'pass>> for RoiOverlayPresenter {
     fn present(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
-        let vertices = roi_vertices(
+        self.vertices = roi_vertices(
             view.roi,
             view.color,
             view.frame_size,
             view.rect,
             view.target_size,
         );
-        view.queue
-            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-        view.pass.set_pipeline(&self.pipeline);
-        view.pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        view.pass.draw(0..8, 0..1);
-        Ok(())
+        self.lines.present(LineOverlayView {
+            device: view.device,
+            queue: view.queue,
+            pass: view.pass,
+            vertices: &self.vertices,
+        })
     }
 }
 
@@ -112,96 +56,61 @@ fn roi_vertices(
     frame_size: Size,
     rect: NdcRect,
     target_size: Size,
-) -> [Vertex; 8] {
-    let (x0, y0, x1, y1) = letterbox(frame_size, rect, target_size);
-    let fx0 = roi.x as f32 / frame_size.width.max(1) as f32;
-    let fy0 = roi.y as f32 / frame_size.height.max(1) as f32;
-    let fx1 = (roi.x + roi.size.width) as f32 / frame_size.width.max(1) as f32;
-    let fy1 = (roi.y + roi.size.height) as f32 / frame_size.height.max(1) as f32;
-    let left = lerp(x0, x1, fx0);
-    let right = lerp(x0, x1, fx1);
-    let top = lerp(y1, y0, fy0);
-    let bottom = lerp(y1, y0, fy1);
+) -> [LineVertex; 8] {
+    let left_top = project_frame_point([roi.x as f32, roi.y as f32], frame_size, rect, target_size);
+    let right_top = project_frame_point(
+        [(roi.x + roi.size.width) as f32, roi.y as f32],
+        frame_size,
+        rect,
+        target_size,
+    );
+    let right_bottom = project_frame_point(
+        [
+            (roi.x + roi.size.width) as f32,
+            (roi.y + roi.size.height) as f32,
+        ],
+        frame_size,
+        rect,
+        target_size,
+    );
+    let left_bottom = project_frame_point(
+        [roi.x as f32, (roi.y + roi.size.height) as f32],
+        frame_size,
+        rect,
+        target_size,
+    );
     [
-        Vertex {
-            position: [left, top],
+        LineVertex {
+            position: left_top,
             color,
         },
-        Vertex {
-            position: [right, top],
+        LineVertex {
+            position: right_top,
             color,
         },
-        Vertex {
-            position: [right, top],
+        LineVertex {
+            position: right_top,
             color,
         },
-        Vertex {
-            position: [right, bottom],
+        LineVertex {
+            position: right_bottom,
             color,
         },
-        Vertex {
-            position: [right, bottom],
+        LineVertex {
+            position: right_bottom,
             color,
         },
-        Vertex {
-            position: [left, bottom],
+        LineVertex {
+            position: left_bottom,
             color,
         },
-        Vertex {
-            position: [left, bottom],
+        LineVertex {
+            position: left_bottom,
             color,
         },
-        Vertex {
-            position: [left, top],
+        LineVertex {
+            position: left_top,
             color,
         },
     ]
 }
-
-fn letterbox(frame: Size, rect: NdcRect, target: Size) -> (f32, f32, f32, f32) {
-    let rect_width_ndc = (rect.x1 - rect.x0).abs();
-    let rect_height_ndc = (rect.y1 - rect.y0).abs();
-    let rect_pixel_width = target.width as f32 * rect_width_ndc / 2.0;
-    let rect_pixel_height = target.height as f32 * rect_height_ndc / 2.0;
-    let frame_aspect = frame.width as f32 / frame.height.max(1) as f32;
-    let rect_aspect = rect_pixel_width / rect_pixel_height.max(1.0);
-
-    if rect_aspect > frame_aspect {
-        let width_ndc = rect_width_ndc * frame_aspect / rect_aspect;
-        let cx = (rect.x0 + rect.x1) * 0.5;
-        (cx - width_ndc * 0.5, rect.y0, cx + width_ndc * 0.5, rect.y1)
-    } else {
-        let height_ndc = rect_height_ndc * rect_aspect / frame_aspect;
-        let cy = (rect.y0 + rect.y1) * 0.5;
-        (
-            rect.x0,
-            cy - height_ndc * 0.5,
-            rect.x1,
-            cy + height_ndc * 0.5,
-        )
-    }
-}
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
-const SHADER: &str = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs(@location(0) position: vec2<f32>, @location(1) color: vec4<f32>) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(position, 0.0, 1.0);
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
-}
-"#;

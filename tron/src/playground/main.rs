@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
-use tron::capture::open_v4l_stream;
+use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind};
 use tron_core::capture::v4l_control::V4lCameraRoiControl;
@@ -94,27 +94,36 @@ fn run(cli: Cli) -> Result<()> {
         );
     }
 
-    let rgb_request = rgb_request(&cli);
-    let (rgb_info, rgb_stream) =
-        open_v4l_stream(rgb_request, PixelFormat::from(cli.decode_format))?;
+    let streams = open_windows_hello_v4l_streams(WindowsHelloV4lConfig {
+        rgb_request: rgb_request(&cli),
+        ir_request: ir_request(&cli),
+        ir_metadata_id: None,
+        decoded_rgb_format: PixelFormat::from(cli.decode_format),
+        decoded_ir_format: PixelFormat::Bgra8,
+    })?;
     eprintln!(
         "tron-playground: opened rgb {} {:?} {}x{}",
-        rgb_info.id, rgb_info.format, rgb_info.size.width, rgb_info.size.height
+        streams.rgb_info.id,
+        streams.rgb_info.format,
+        streams.rgb_info.size.width,
+        streams.rgb_info.size.height
     );
     anyhow::ensure!(
-        rgb_info.format == CaptureFormat::Mjpeg,
+        streams.rgb_info.format == CaptureFormat::Mjpeg,
         "playground RGB feed currently requires MJPEG"
     );
 
-    let (ir_info, ir_stream) = open_v4l_stream(ir_request(&cli), PixelFormat::Bgra8)?;
     eprintln!(
         "tron-playground: opened ir {} {:?} {}x{}",
-        ir_info.id, ir_info.format, ir_info.size.width, ir_info.size.height
+        streams.ir_info.id,
+        streams.ir_info.format,
+        streams.ir_info.size.width,
+        streams.ir_info.size.height
     );
-    let ir_device_id = ir_info.id.clone();
+    let ir_device_id = streams.ir_device_id.clone();
 
-    let rgb_latest = tron::latest::LatestFrameSource::spawn("rgb", Box::new(rgb_stream));
-    let ir_latest = tron::latest::LatestFrameSource::spawn("ir", Box::new(ir_stream));
+    let rgb_latest = tron::latest::LatestFrameSource::spawn("rgb", Box::new(streams.rgb_stream));
+    let ir_latest = tron::latest::LatestFrameSource::spawn("ir", Box::new(streams.ir_stream));
     let camera_roi = if cli.camera_roi_from_detection {
         Some(CameraRoiDriver::new(
             CameraRoiConfig {

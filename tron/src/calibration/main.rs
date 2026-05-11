@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use tron::capture::{LitIrFrameStream, open_v4l_stream};
+use tron::capture::{LitIrFrameStream, WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CaptureFormat, CheckerboardSpec, PixelFormat, SensorKind, Size};
 use tron_core::capture::v4l::V4lUvcmMetadataSource;
@@ -76,37 +76,41 @@ fn run(cli: Cli) -> Result<()> {
         eprintln!("tron-calibration: resolving --camera {camera:?}");
     }
 
-    let (ir_info, ir_stream) = open_v4l_stream(ir_request(&cli), PixelFormat::Bgra8)?;
-    let ir_metadata_id = cli
-        .ir_metadata_id
-        .clone()
-        .or_else(|| infer_metadata_node(&ir_info.id));
-    let ir_metadata_id = ir_metadata_id.ok_or_else(|| {
-        anyhow::anyhow!("--ir-metadata-id is required when IR node is not /dev/videoN")
+    let streams = open_windows_hello_v4l_streams(WindowsHelloV4lConfig {
+        rgb_request: rgb_request(&cli),
+        ir_request: ir_request(&cli),
+        ir_metadata_id: cli.ir_metadata_id.clone(),
+        decoded_rgb_format: PixelFormat::from(cli.decode_format),
+        decoded_ir_format: PixelFormat::Bgra8,
     })?;
-    let ir_metadata = V4lUvcmMetadataSource::open(&ir_metadata_id)?;
-    let ir_stream = LitIrFrameStream::new(ir_stream, ir_metadata);
-    eprintln!(
-        "tron-calibration: opened ir {} {:?} {}x{} using lit-frame metadata {}",
-        ir_info.id, ir_info.format, ir_info.size.width, ir_info.size.height, ir_metadata_id
-    );
-
-    let (rgb_info, rgb_stream) =
-        open_v4l_stream(rgb_request(&cli), PixelFormat::from(cli.decode_format))?;
     anyhow::ensure!(
-        rgb_info.format == CaptureFormat::Mjpeg,
+        streams.rgb_info.format == CaptureFormat::Mjpeg,
         "calibration RGB feed currently requires MJPEG"
     );
     eprintln!(
         "tron-calibration: opened rgb {} {:?} {}x{}",
-        rgb_info.id, rgb_info.format, rgb_info.size.width, rgb_info.size.height
+        streams.rgb_info.id,
+        streams.rgb_info.format,
+        streams.rgb_info.size.width,
+        streams.rgb_info.size.height
+    );
+
+    let ir_metadata = V4lUvcmMetadataSource::open(&streams.ir_metadata_id)?;
+    let ir_stream = LitIrFrameStream::new(streams.ir_stream, ir_metadata);
+    eprintln!(
+        "tron-calibration: opened ir {} {:?} {}x{} using lit-frame metadata {}",
+        streams.ir_info.id,
+        streams.ir_info.format,
+        streams.ir_info.size.width,
+        streams.ir_info.size.height,
+        streams.ir_metadata_id
     );
 
     eprintln!(
         "tron-calibration: press Space to capture a paired checkerboard sample; press C to calibrate and write {}",
         cli.output.display()
     );
-    let rgb_stream = BufferedFrameSource::spawn("calibration-rgb", rgb_stream, 4);
+    let rgb_stream = BufferedFrameSource::spawn("calibration-rgb", streams.rgb_stream, 4);
     let ir_stream = BufferedFrameSource::spawn("calibration-ir", ir_stream, 4);
     window::run(
         rgb_stream,
@@ -151,9 +155,4 @@ fn ir_request(cli: &Cli) -> CameraOpenRequest {
     request.selector.id = cli.ir_camera_id.clone();
     request.format = None;
     request
-}
-
-fn infer_metadata_node(video_node: &str) -> Option<String> {
-    let number = video_node.strip_prefix("/dev/video")?.parse::<u32>().ok()?;
-    Some(format!("/dev/video{}", number + 1))
 }

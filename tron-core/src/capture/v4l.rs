@@ -51,6 +51,7 @@ impl CameraOpener for V4lCameraOpener {
         }
 
         let requested_fourcc = request.format.map(fourcc);
+        let requested_size = request.size;
         let fmt = dev
             .set_format(&fmt)
             .with_context(|| format!("set V4L format on {path}"))?;
@@ -60,6 +61,17 @@ impl CameraOpener for V4lCameraOpener {
                 "V4L negotiated {} but requested {} on {}",
                 fmt.fourcc,
                 requested_fourcc,
+                path
+            );
+        }
+        if let Some(requested_size) = requested_size {
+            anyhow::ensure!(
+                fmt.width == requested_size.width && fmt.height == requested_size.height,
+                "V4L negotiated {}x{} but requested {}x{} on {}",
+                fmt.width,
+                fmt.height,
+                requested_size.width,
+                requested_size.height,
                 path
             );
         }
@@ -95,6 +107,7 @@ impl CameraOpener for V4lCameraOpener {
             },
             stream,
             decoder,
+            dropped_mjpeg_buffers: 0,
             next_id: 0,
         })
     }
@@ -104,6 +117,7 @@ pub struct V4lFrameSource {
     info: OpenedCameraInfo,
     stream: MmapStream<'static>,
     decoder: Option<TurboMjpegDecoder>,
+    dropped_mjpeg_buffers: u32,
     next_id: u64,
 }
 
@@ -195,7 +209,11 @@ impl FrameSource for V4lFrameSource {
 
         let (buf, v4l_meta) = self.stream.next().context("dequeue V4L frame")?;
         let used_len = (v4l_meta.bytesused as usize).min(buf.len());
-        let data = if used_len > 0 { &buf[..used_len] } else { buf };
+        if used_len == 0 {
+            return Ok(None);
+        }
+
+        let data = &buf[..used_len];
         let meta = frame_meta(id, self.info.sensor, self.info.size, v4l_meta);
 
         match self.info.format {
@@ -204,6 +222,35 @@ impl FrameSource for V4lFrameSource {
                     .decoder
                     .as_mut()
                     .context("V4L MJPEG source has no decoder")?;
+                let header = match decoder.read_header(data) {
+                    Ok(header) => header,
+                    Err(err) => {
+                        note_dropped_mjpeg_buffer(
+                            &self.info,
+                            &mut self.dropped_mjpeg_buffers,
+                            v4l_meta,
+                            &format!("{err:#}"),
+                        );
+                        return Ok(None);
+                    }
+                };
+                if header.width as u32 != self.info.size.width
+                    || header.height as u32 != self.info.size.height
+                {
+                    note_dropped_mjpeg_buffer(
+                        &self.info,
+                        &mut self.dropped_mjpeg_buffers,
+                        v4l_meta,
+                        &format!(
+                            "payload dimensions {}x{} do not match negotiated {}x{}",
+                            header.width,
+                            header.height,
+                            self.info.size.width,
+                            self.info.size.height
+                        ),
+                    );
+                    return Ok(None);
+                }
                 decoder
                     .decode(EncodedFrame {
                         meta,
@@ -225,6 +272,21 @@ impl FrameSource for V4lFrameSource {
     }
 }
 
+fn note_dropped_mjpeg_buffer(
+    info: &OpenedCameraInfo,
+    dropped_count: &mut u32,
+    meta: &Metadata,
+    reason: &str,
+) {
+    *dropped_count = dropped_count.saturating_add(1);
+    if *dropped_count == 1 || *dropped_count % 120 == 0 {
+        eprintln!(
+            "v4l: dropped MJPEG buffer from {} seq={} bytesused={} flags={:?}: {}",
+            info.id, meta.sequence, meta.bytesused, meta.flags, reason
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 struct VideoDevice {
     path: String,
@@ -233,7 +295,7 @@ struct VideoDevice {
     number: u32,
 }
 
-fn resolve_device(selector: &CameraSelector) -> Result<String> {
+pub fn resolve_device(selector: &CameraSelector) -> Result<String> {
     if let Some(id) = &selector.id {
         return Ok(id.clone());
     }

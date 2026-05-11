@@ -3,6 +3,12 @@ use tron_api::{Frame, PixelFormat};
 
 use crate::decode::{EncodedFormat, EncodedFrame, FrameDecoder};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MjpegHeader {
+    pub width: usize,
+    pub height: usize,
+}
+
 pub struct TurboMjpegDecoder {
     decompressor: turbojpeg::Decompressor,
     output_format: PixelFormat,
@@ -20,6 +26,17 @@ impl TurboMjpegDecoder {
             buffer: Vec::new(),
         })
     }
+
+    pub fn read_header(&mut self, data: &[u8]) -> Result<MjpegHeader> {
+        let header = self
+            .decompressor
+            .read_header(data)
+            .context("read MJPEG header")?;
+        Ok(MjpegHeader {
+            width: header.width,
+            height: header.height,
+        })
+    }
 }
 
 impl FrameDecoder for TurboMjpegDecoder {
@@ -27,10 +44,7 @@ impl FrameDecoder for TurboMjpegDecoder {
         if frame.format != EncodedFormat::Mjpeg {
             anyhow::bail!("TurboJPEG decoder only supports MJPEG frames");
         }
-        let header = self
-            .decompressor
-            .read_header(frame.data)
-            .context("read MJPEG header")?;
+        let header = self.read_header(frame.data)?;
         let header_width = header.width as u32;
         let header_height = header.height as u32;
         anyhow::ensure!(

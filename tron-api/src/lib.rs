@@ -7,7 +7,7 @@ pub mod process;
 pub mod roi;
 pub mod stream;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Size {
     pub width: u32,
     pub height: u32,
@@ -46,13 +46,13 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct Point2d {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct Point3d {
     pub x: f64,
     pub y: f64,
@@ -69,8 +69,9 @@ pub struct View<'a> {
 }
 
 pub use calib::{
-    CalibrationFrameSide, CheckerboardDetection, CheckerboardProcessor, CheckerboardSample,
-    CheckerboardSpec, StereoCalibrationProcessor,
+    CalibrationFrameSide, CameraCalibration, CheckerboardDetection, CheckerboardProcessor,
+    CheckerboardSample, CheckerboardSpec, CheckerboardStereoCalibration,
+    StereoCalibrationProcessor,
 };
 pub use capture::{
     CameraOpenRequest, CameraOpener, CameraRoiControl, CameraSelector, OpenedCameraInfo,

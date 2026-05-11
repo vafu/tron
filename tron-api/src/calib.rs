@@ -1,12 +1,12 @@
-use crate::{Frame, FrameId, NoContext, Point2d, Point3d, Processor, Size, frame::FrameTimestamp};
+use crate::{FrameMeta, NoContext, Point2d, Point3d, Processor, Size};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct CheckerboardSpec {
     pub inner_corners: Size,
     pub square_size_mm: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct CheckerboardDetection {
     pub spec: CheckerboardSpec,
     pub frame_size: Size,
@@ -14,24 +14,42 @@ pub struct CheckerboardDetection {
     pub score: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct CalibrationFrameSide<'a> {
-    pub frame: Frame<'a>,
-    pub detection: Option<&'a CheckerboardDetection>,
+#[derive(Clone, Debug)]
+pub struct CalibrationFrameSide {
+    pub frame_meta: FrameMeta,
+    pub frame_size: Size,
+    pub corners: Vec<Point2d>,
+    pub score: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CheckerboardSample {
     pub spec: CheckerboardSpec,
     pub object_points: Vec<Point3d>,
-    pub left_corners: Vec<Point2d>,
-    pub right_corners: Vec<Point2d>,
-    pub left_frame_id: FrameId,
-    pub right_frame_id: FrameId,
-    pub left_frame_size: Size,
-    pub right_frame_size: Size,
-    pub left_timestamp: FrameTimestamp,
-    pub right_timestamp: FrameTimestamp,
+    pub left: CalibrationFrameSide,
+    pub right: CalibrationFrameSide,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CameraCalibration {
+    pub image_size: Size,
+    pub camera_matrix: [[f64; 3]; 3],
+    pub distortion: Vec<f64>,
+    pub reprojection_error: f64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CheckerboardStereoCalibration {
+    pub spec: CheckerboardSpec,
+    pub sample_count: usize,
+    pub left: CameraCalibration,
+    pub right: CameraCalibration,
+    pub rotation: [[f64; 3]; 3],
+    pub translation: [f64; 3],
+    pub essential: [[f64; 3]; 3],
+    pub fundamental: [[f64; 3]; 3],
+    pub stereo_reprojection_error: f64,
+    pub per_view_errors: Vec<f64>,
 }
 
 pub type CheckerboardProcessor<I, C = NoContext> =

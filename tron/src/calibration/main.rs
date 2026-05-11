@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use tron::capture::open_v4l_stream;
+use tron::capture::{LitIrFrameStream, open_v4l_stream};
 use tron::config::{CameraArgs, PixelFormatArg};
-use tron::latest::LatestFrameSource;
 use tron_api::{CameraOpenRequest, CaptureFormat, CheckerboardSpec, PixelFormat, SensorKind, Size};
+use tron_core::capture::v4l::V4lUvcmMetadataSource;
 
 mod latency;
 mod presenter;
@@ -25,6 +27,10 @@ struct Cli {
     #[arg(long)]
     ir_camera_id: Option<String>,
 
+    /// Backend-native IR metadata node. Defaults to the next /dev/videoN after the IR node.
+    #[arg(long)]
+    ir_metadata_id: Option<String>,
+
     /// Number of inner checkerboard corners horizontally.
     #[arg(long, default_value_t = 7)]
     checkerboard_cols: u32,
@@ -36,6 +42,18 @@ struct Cli {
     /// Physical square size in millimeters.
     #[arg(long, default_value_t = 25.0)]
     checkerboard_square_mm: f64,
+
+    /// Minimum paired checkerboard samples before allowing calibration.
+    #[arg(long, default_value_t = 8)]
+    min_samples: usize,
+
+    /// Maximum allowed RGB/IR timestamp delta for a synchronized pair, in microseconds.
+    #[arg(long, default_value_t = 20_000)]
+    max_sync_delta_us: i64,
+
+    /// Path for stereo calibration JSON output.
+    #[arg(long, default_value = "calibration.json")]
+    output: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -58,9 +76,18 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let (ir_info, ir_stream) = open_v4l_stream(ir_request(&cli), PixelFormat::Bgra8)?;
+    let ir_metadata_id = cli
+        .ir_metadata_id
+        .clone()
+        .or_else(|| infer_metadata_node(&ir_info.id));
+    let ir_metadata_id = ir_metadata_id.ok_or_else(|| {
+        anyhow::anyhow!("--ir-metadata-id is required when IR node is not /dev/videoN")
+    })?;
+    let ir_metadata = V4lUvcmMetadataSource::open(&ir_metadata_id)?;
+    let ir_stream = LitIrFrameStream::new(ir_stream, ir_metadata);
     eprintln!(
-        "tron-calibration: opened ir {} {:?} {}x{}",
-        ir_info.id, ir_info.format, ir_info.size.width, ir_info.size.height
+        "tron-calibration: opened ir {} {:?} {}x{} using lit-frame metadata {}",
+        ir_info.id, ir_info.format, ir_info.size.width, ir_info.size.height, ir_metadata_id
     );
 
     let (rgb_info, rgb_stream) = open_v4l_stream(
@@ -76,9 +103,20 @@ fn run(cli: Cli) -> Result<()> {
         rgb_info.id, rgb_info.format, rgb_info.size.width, rgb_info.size.height
     );
 
-    let rgb = LatestFrameSource::spawn("calibration-rgb", rgb_stream);
-    let ir = LatestFrameSource::spawn("calibration-ir", ir_stream);
-    window::run(rgb, ir, checkerboard_spec(&cli))
+    eprintln!(
+        "tron-calibration: press Space to capture a paired checkerboard sample; press C to calibrate and write {}",
+        cli.output.display()
+    );
+    window::run(
+        rgb_stream,
+        ir_stream,
+        window::CalibrationRunConfig {
+            checkerboard: checkerboard_spec(&cli),
+            min_samples: cli.min_samples,
+            max_sync_delta_us: cli.max_sync_delta_us,
+            output: cli.output,
+        },
+    )
 }
 
 fn checkerboard_spec(cli: &Cli) -> CheckerboardSpec {
@@ -109,4 +147,9 @@ fn ir_request(cli: &Cli) -> CameraOpenRequest {
     request.selector.id = cli.ir_camera_id.clone();
     request.format = None;
     request
+}
+
+fn infer_metadata_node(video_node: &str) -> Option<String> {
+    let number = video_node.strip_prefix("/dev/video")?.parse::<u32>().ok()?;
+    Some(format!("/dev/video{}", number + 1))
 }

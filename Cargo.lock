@@ -2450,6 +2450,7 @@ dependencies = [
  "pollster",
  "rustix 1.1.4",
  "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "tron-api",

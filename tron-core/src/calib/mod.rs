@@ -2,5 +2,6 @@ pub mod checkerboard;
 
 pub use checkerboard::{
     CheckerboardSampleBuilder, OpenCvCheckerboardConfig, OpenCvCheckerboardDetector,
-    checkerboard_object_points,
+    calibrate_stereo_checkerboard, calibration_frame_side, checkerboard_object_points,
+    checkerboard_sample,
 };

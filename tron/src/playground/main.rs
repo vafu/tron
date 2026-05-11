@@ -113,8 +113,8 @@ fn run(cli: Cli) -> Result<()> {
     );
     let ir_device_id = ir_info.id.clone();
 
-    let rgb_latest = tron::latest::LatestFrameSource::spawn("rgb", rgb_stream);
-    let ir_latest = tron::latest::LatestFrameSource::spawn("ir", ir_stream);
+    let rgb_latest = tron::latest::LatestFrameSource::spawn("rgb", Box::new(rgb_stream));
+    let ir_latest = tron::latest::LatestFrameSource::spawn("ir", Box::new(ir_stream));
     let camera_roi = if cli.camera_roi_from_detection {
         Some(CameraRoiDriver::new(
             CameraRoiConfig {

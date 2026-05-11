@@ -13,6 +13,7 @@ pub struct CalibrationLatencyLog {
     total: DurationStats,
     rgb_age: DurationStats,
     ir_age: DurationStats,
+    sync_delta: MicrosecondStats,
     rgb_detected: u32,
     ir_detected: u32,
 }
@@ -46,6 +47,9 @@ impl CalibrationLatencyLog {
                     .saturating_duration_since(frame.meta.timestamp.received_at),
             );
         }
+        if let Some(delta_us) = sample.sync_delta_us {
+            self.sync_delta.record(delta_us);
+        }
 
         let elapsed = sample.finished_at.saturating_duration_since(window_start);
         if elapsed < Duration::from_secs(1) {
@@ -55,7 +59,7 @@ impl CalibrationLatencyLog {
         let fps = self.frames as f64 / elapsed.as_secs_f64().max(0.001);
         tracing::info!(
             target: "calibration::latency",
-            "fps={fps:.1} latest={} rgb_detect={} ir_detect={} present={} total={} rgb_age={} ir_age={} detections=rgb:{}/{} ir:{}/{}",
+            "fps={fps:.1} latest={} rgb_detect={} ir_detect={} present={} total={} rgb_age={} ir_age={} sync_delta={} detections=rgb:{}/{} ir:{}/{}",
             self.latest,
             self.rgb_detect,
             self.ir_detect,
@@ -63,6 +67,7 @@ impl CalibrationLatencyLog {
             self.total,
             self.rgb_age,
             self.ir_age,
+            self.sync_delta,
             self.rgb_detected,
             self.frames,
             self.ir_detected,
@@ -88,6 +93,7 @@ pub struct CalibrationLatencySample<'a> {
     pub finished_at: Instant,
     pub rgb: Option<&'a OwnedFrame>,
     pub ir: Option<&'a OwnedFrame>,
+    pub sync_delta_us: Option<i64>,
     pub rgb_detected: bool,
     pub ir_detected: bool,
 }
@@ -122,6 +128,41 @@ impl std::fmt::Display for DurationStats {
             "avg={:.2}ms max={:.2}ms",
             self.average().as_secs_f64() * 1000.0,
             self.max.as_secs_f64() * 1000.0
+        )
+    }
+}
+
+#[derive(Default)]
+struct MicrosecondStats {
+    count: u32,
+    total_abs_us: u128,
+    max_abs_us: u64,
+}
+
+impl MicrosecondStats {
+    fn record(&mut self, value_us: i64) {
+        let abs_us = value_us.unsigned_abs();
+        self.count += 1;
+        self.total_abs_us += abs_us as u128;
+        self.max_abs_us = self.max_abs_us.max(abs_us);
+    }
+
+    fn average_abs_us(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.total_abs_us as f64 / self.count as f64
+        }
+    }
+}
+
+impl std::fmt::Display for MicrosecondStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "avg_abs={:.2}ms max_abs={:.2}ms",
+            self.average_abs_us() / 1000.0,
+            self.max_abs_us as f64 / 1000.0
         )
     }
 }

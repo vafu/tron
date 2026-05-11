@@ -7,4 +7,7 @@ pub mod process;
 pub mod roi;
 pub mod view;
 
-pub use pipeline::{DecodeStream, FrameStream, PassthroughStream};
+pub use pipeline::{
+    DecodeStream, FramePairStream, FrameStream, FrameSynchronizer, PassthroughStream,
+    SyncedFramePair,
+};

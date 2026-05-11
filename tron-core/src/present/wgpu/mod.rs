@@ -2,6 +2,10 @@ use anyhow::Result;
 use tron_api::{Frame, PixelFormat, Presenter, Size};
 use wgpu::util::DeviceExt;
 
+mod surface;
+
+pub use surface::{WgpuSurfaceContext, WgpuSurfaceFrame};
+
 #[derive(Clone, Copy, Debug)]
 pub struct NdcRect {
     pub x0: f32,
@@ -13,6 +17,18 @@ pub struct NdcRect {
 impl NdcRect {
     pub const FULL: Self = Self {
         x0: -1.0,
+        y0: -1.0,
+        x1: 1.0,
+        y1: 1.0,
+    };
+    pub const LEFT: Self = Self {
+        x0: -1.0,
+        y0: -1.0,
+        x1: 0.0,
+        y1: 1.0,
+    };
+    pub const RIGHT: Self = Self {
+        x0: 0.0,
         y0: -1.0,
         x1: 1.0,
         y1: 1.0,

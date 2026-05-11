@@ -26,7 +26,7 @@ impl LatestFrameSource {
                     }
                     Ok(None) => thread::yield_now(),
                     Err(err) => {
-                        eprintln!("playground capture {name}: stopped: {err:#}");
+                        eprintln!("capture {name}: stopped: {err:#}");
                         return;
                     }
                 }

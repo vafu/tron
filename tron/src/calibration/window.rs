@@ -1,26 +1,19 @@
-use crate::camera_roi::CameraRoiDriver;
-use crate::pipeline::{PlaygroundInput, PlaygroundPipeline, PlaygroundPipelineConfig};
-use crate::presenter::{PlaygroundPresenter, PlaygroundView};
-use anyhow::{Context, Result};
 use std::sync::Arc;
+
+use anyhow::{Context, Result};
 use tron::latest::LatestFrameSource;
 use tron_api::{Presenter, Size};
-use tron_core::present::http::HttpMetadataPresenter;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
 
-pub fn run(
-    rgb: LatestFrameSource,
-    ir: LatestFrameSource,
-    metadata: Option<HttpMetadataPresenter>,
-    camera_roi: Option<CameraRoiDriver>,
-    pipeline_config: PlaygroundPipelineConfig,
-) -> Result<()> {
+use crate::presenter::{CalibrationPresenter, CalibrationView};
+
+pub fn run(rgb: LatestFrameSource, ir: LatestFrameSource) -> Result<()> {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(rgb, ir, metadata, camera_roi, pipeline_config)?;
+    let mut app = WindowApp::new(rgb, ir);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -30,32 +23,20 @@ struct WindowApp {
     ir: LatestFrameSource,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
-    presenter: Option<PlaygroundPresenter>,
-    metadata: Option<HttpMetadataPresenter>,
-    camera_roi: Option<CameraRoiDriver>,
-    pipeline: PlaygroundPipeline,
+    presenter: Option<CalibrationPresenter>,
     result: Result<()>,
 }
 
 impl WindowApp {
-    fn new(
-        rgb: LatestFrameSource,
-        ir: LatestFrameSource,
-        metadata: Option<HttpMetadataPresenter>,
-        camera_roi: Option<CameraRoiDriver>,
-        pipeline_config: PlaygroundPipelineConfig,
-    ) -> Result<Self> {
-        Ok(Self {
+    fn new(rgb: LatestFrameSource, ir: LatestFrameSource) -> Self {
+        Self {
             rgb,
             ir,
             window_id: None,
             window: None,
             presenter: None,
-            metadata,
-            camera_roi,
-            pipeline: PlaygroundPipeline::new(pipeline_config)?,
             result: Ok(()),
-        })
+        }
     }
 
     fn set_error(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
@@ -70,7 +51,7 @@ impl ApplicationHandler for WindowApp {
             return;
         }
 
-        let attrs = WindowAttributes::default().with_title("tron playground");
+        let attrs = WindowAttributes::default().with_title("tron calibration");
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -80,7 +61,7 @@ impl ApplicationHandler for WindowApp {
         };
         self.window_id = Some(window.id());
         let size = window.inner_size();
-        match pollster::block_on(PlaygroundPresenter::new(
+        match pollster::block_on(CalibrationPresenter::new(
             window.clone(),
             Size {
                 width: size.width,
@@ -129,45 +110,10 @@ impl ApplicationHandler for WindowApp {
                         return;
                     }
                 };
-                let output = match self.pipeline.process(PlaygroundInput { rgb, ir }) {
-                    Ok(output) => output,
-                    Err(err) => {
-                        self.set_error(event_loop, err);
-                        return;
-                    }
-                };
-                let mut camera_roi_rect = None;
-                if let Some(camera_roi) = self.camera_roi.as_mut()
-                    && let Some(ir_diff) = output.ir_diff
-                {
-                    if let Err(err) = camera_roi.update(
-                        output.exposure_roi,
-                        output.roi.map(|roi| roi.rect),
-                        ir_diff.meta.size,
-                    ) {
-                        self.set_error(event_loop, err);
-                        return;
-                    }
-                    camera_roi_rect = camera_roi.current_rect();
-                }
-                match presenter.present(PlaygroundView {
-                    rgb: output.rgb.as_ref().map(|frame| frame.as_frame()),
-                    depth_cue: output.depth_cue,
-                    ir_diff: output.ir_diff,
-                    roi: output.roi,
-                    rgb_roi: output.rgb_roi,
-                    camera_roi: camera_roi_rect,
-                    metadata: output.metadata,
+                if let Err(err) = presenter.present(CalibrationView {
+                    rgb: rgb.as_deref().map(|frame| frame.as_frame()),
+                    ir: ir.as_deref().map(|frame| frame.as_frame()),
                 }) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        self.set_error(event_loop, err);
-                        return;
-                    }
-                }
-                if let Some(metadata) = self.metadata.as_mut()
-                    && let Err(err) = metadata.present(output.metadata)
-                {
                     self.set_error(event_loop, err);
                     return;
                 }

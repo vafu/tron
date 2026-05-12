@@ -6,7 +6,7 @@ use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind};
 use tron_core::capture::{LitIrFrameStream, StereoFrameSource, V4lUvcmMetadataSource};
-use tron_core::roi::mediapipe::MediaPipeRoiConfig;
+use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 
 mod renderer;
 mod window;
@@ -34,13 +34,25 @@ struct Cli {
     #[arg(long, default_value = "models/hand_detector/model.onnx")]
     rgb_mediapipe_model: PathBuf,
 
+    /// ONNX model path for RGB MediaPipe hand landmark extraction.
+    #[arg(long, default_value = "models/hand_landmark/hand_landmark.onnx")]
+    rgb_mediapipe_landmark_model: PathBuf,
+
     /// Minimum MediaPipe palm detector confidence for RGB ROI.
     #[arg(long, default_value_t = 0.75)]
     rgb_mediapipe_min_score: f32,
 
+    /// Minimum MediaPipe landmark presence confidence.
+    #[arg(long, default_value_t = 0.5)]
+    rgb_mediapipe_landmark_min_presence: f32,
+
     /// Scale applied around the raw MediaPipe palm detector box before rendering ROI.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 2.5)]
     rgb_mediapipe_box_scale: f32,
+
+    /// Scale applied around the landmark bounding rect before rendering ROI.
+    #[arg(long, default_value_t = 1.2)]
+    rgb_mediapipe_landmark_roi_scale: f32,
 }
 
 #[tokio::main]
@@ -88,6 +100,11 @@ async fn run(cli: Cli) -> Result<()> {
         MediaPipeRoiConfig {
             min_score: cli.rgb_mediapipe_min_score,
             box_scale: cli.rgb_mediapipe_box_scale,
+        },
+        cli.rgb_mediapipe_landmark_model,
+        MediaPipeHandLandmarkConfig {
+            min_presence: cli.rgb_mediapipe_landmark_min_presence,
+            roi_scale: cli.rgb_mediapipe_landmark_roi_scale,
         },
     )
 }

@@ -4,7 +4,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tron_api::{FrameSource, NoContext, Processor, Renderer, RoiResult, Size};
 use tron_core::capture::StereoFrameSource;
-use tron_core::roi::mediapipe::{MediaPipeRoiConfig, MediaPipeRoiProcessor};
+use tron_core::roi::mediapipe::{
+    MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput, MediaPipeHandLandmarkProcessor,
+    MediaPipeRoiConfig, MediaPipeRoiProcessor,
+};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -16,6 +19,8 @@ pub fn run<L, R>(
     frames: StereoFrameSource<L, R>,
     mediapipe_model: PathBuf,
     mediapipe_config: MediaPipeRoiConfig,
+    landmark_model: PathBuf,
+    landmark_config: MediaPipeHandLandmarkConfig,
 ) -> Result<()>
 where
     L: FrameSource + Send,
@@ -23,7 +28,13 @@ where
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(frames, mediapipe_model, mediapipe_config)?;
+    let mut app = WindowApp::new(
+        frames,
+        mediapipe_model,
+        mediapipe_config,
+        landmark_model,
+        landmark_config,
+    )?;
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -31,6 +42,7 @@ where
 struct WindowApp<L, R> {
     frames: StereoFrameSource<L, R>,
     mediapipe: MediaPipeRoiProcessor,
+    landmarks: MediaPipeHandLandmarkProcessor,
     rendered_pair_id: Option<(u64, u64)>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
@@ -47,10 +59,13 @@ where
         frames: StereoFrameSource<L, R>,
         mediapipe_model: PathBuf,
         mediapipe_config: MediaPipeRoiConfig,
+        landmark_model: PathBuf,
+        landmark_config: MediaPipeHandLandmarkConfig,
     ) -> Result<Self> {
         Ok(Self {
             frames,
             mediapipe: MediaPipeRoiProcessor::new(mediapipe_model, mediapipe_config)?,
+            landmarks: MediaPipeHandLandmarkProcessor::new(landmark_model, landmark_config)?,
             rendered_pair_id: None,
             window_id: None,
             window: None,
@@ -145,13 +160,30 @@ where
 
                 let rgb = pair.left;
                 let ir = pair.right;
-                let rgb_roi: Option<RoiResult> = match self.mediapipe.process(rgb, NoContext) {
+                let palm_roi: Option<RoiResult> = match self.mediapipe.process(rgb, NoContext) {
                     Ok(roi) => roi,
                     Err(err) => {
                         self.set_error(event_loop, err);
                         return;
                     }
                 };
+                let landmarks = match self.landmarks.process(
+                    MediaPipeHandLandmarkInput {
+                        frame: rgb,
+                        roi: palm_roi.map(|roi| roi.rect),
+                    },
+                    NoContext,
+                ) {
+                    Ok(landmarks) => landmarks,
+                    Err(err) => {
+                        self.set_error(event_loop, err);
+                        return;
+                    }
+                };
+                let landmark_roi = landmarks.as_ref().and_then(|landmarks| {
+                    landmarks.bounding_roi(rgb.meta.size, self.landmarks.config().roi_scale)
+                });
+                let rgb_roi = landmark_roi.or(palm_roi);
 
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
@@ -159,7 +191,9 @@ where
                 if let Err(err) = renderer.render(CollectorView {
                     rgb: Some(rgb),
                     ir: Some(ir),
+                    rgb_palm_roi: palm_roi,
                     rgb_roi,
+                    rgb_landmarks: landmarks.as_ref(),
                 }) {
                     self.set_error(event_loop, err);
                     return;

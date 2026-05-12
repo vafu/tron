@@ -29,6 +29,10 @@ name = "calibration"
 path = "src/calibration/main.rs"
 
 [[bin]]
+name = "collector"
+path = "src/collector/main.rs"
+
+[[bin]]
 name = "roi-control"
 path = "src/roi/main.rs"
 

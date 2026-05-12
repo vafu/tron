@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -13,14 +12,12 @@ use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
 use v4l::video::capture::Parameters;
-use v4l::{v4l_sys, v4l2};
 
 use crate::decode::mjpeg::TurboMjpegDecoder;
 use crate::decode::{EncodedFormat, EncodedFrame, FrameDecoder};
 
 const DEFAULT_DEVICE: &str = "/dev/video53";
 const DEFAULT_BUFFERS: u32 = 4;
-const UVCM_METADATA_ID_FRAME_ILLUMINATION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct V4lCameraOpener {
@@ -119,83 +116,6 @@ pub struct V4lFrameSource {
     decoder: Option<TurboMjpegDecoder>,
     dropped_mjpeg_buffers: u32,
     next_id: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UvcmFrameIllumination {
-    pub sequence: Option<u64>,
-    pub illumination_on: bool,
-}
-
-pub struct V4lUvcmMetadataSource {
-    stream: MmapStream<'static>,
-    pending: VecDeque<UvcmFrameIllumination>,
-}
-
-impl V4lUvcmMetadataSource {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let dev = Device::with_path(path).with_context(|| format!("open {}", path.display()))?;
-        set_uvcm_meta_format(&dev)
-            .with_context(|| format!("set UVCM metadata format on {}", path.display()))?;
-        let stream = MmapStream::with_buffers(&dev, Type::MetaCapture, DEFAULT_BUFFERS)
-            .with_context(|| format!("create V4L metadata mmap stream on {}", path.display()))?;
-        Ok(Self {
-            stream,
-            pending: VecDeque::new(),
-        })
-    }
-
-    pub fn next_illumination(&mut self) -> Result<Option<UvcmFrameIllumination>> {
-        if let Some(illumination) = self.pending.pop_front() {
-            return Ok(Some(illumination));
-        }
-
-        let (buf, meta) = self.stream.next().context("dequeue V4L UVCM metadata")?;
-        let used_len = (meta.bytesused as usize).min(buf.len());
-        parse_uvcm_frame_illumination(&buf[..used_len], meta, &mut self.pending)?;
-        Ok(self.pending.pop_front())
-    }
-
-    pub fn illumination_for_sequence(&mut self, sequence: u64) -> Result<Option<bool>> {
-        loop {
-            if let Some(index) = self
-                .pending
-                .iter()
-                .position(|illumination| illumination.sequence == Some(sequence))
-            {
-                return Ok(Some(
-                    self.pending
-                        .remove(index)
-                        .expect("pending illumination index disappeared")
-                        .illumination_on,
-                ));
-            }
-
-            if self
-                .pending
-                .front()
-                .and_then(|illumination| illumination.sequence)
-                .is_some_and(|pending_sequence| pending_sequence > sequence)
-            {
-                return Ok(None);
-            }
-
-            let Some(next) = self.next_illumination()? else {
-                return Ok(None);
-            };
-            if next.sequence == Some(sequence) {
-                return Ok(Some(next.illumination_on));
-            }
-            if next
-                .sequence
-                .is_some_and(|next_sequence| next_sequence > sequence)
-            {
-                self.pending.push_front(next);
-                return Ok(None);
-            }
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -446,85 +366,5 @@ fn timestamp_source(flags: Flags) -> TimestampSource {
         TimestampSource::EndOfFrame
     } else {
         TimestampSource::Unknown
-    }
-}
-
-fn set_uvcm_meta_format(dev: &Device) -> Result<()> {
-    let mut format = v4l_sys::v4l2_format {
-        type_: Type::MetaCapture as u32,
-        fmt: v4l_sys::v4l2_format__bindgen_ty_1 {
-            meta: v4l_sys::v4l2_meta_format {
-                dataformat: fourcc_bytes(*b"UVCM"),
-                buffersize: 0,
-                width: 0,
-                height: 0,
-                bytesperline: 0,
-            },
-        },
-    };
-    unsafe {
-        v4l2::ioctl(
-            dev.handle().fd(),
-            v4l2::vidioc::VIDIOC_S_FMT,
-            &mut format as *mut _ as *mut std::os::raw::c_void,
-        )
-        .context("VIDIOC_S_FMT UVCM metadata")?;
-    }
-    Ok(())
-}
-
-fn parse_uvcm_frame_illumination(
-    data: &[u8],
-    meta: &Metadata,
-    output: &mut VecDeque<UvcmFrameIllumination>,
-) -> Result<()> {
-    if let Some(illumination_on) = find_frame_illumination(data) {
-        output.push_back(UvcmFrameIllumination {
-            sequence: Some(meta.sequence as u64),
-            illumination_on,
-        });
-    }
-    Ok(())
-}
-
-fn find_frame_illumination(data: &[u8]) -> Option<bool> {
-    let mut offset = 0;
-    while offset + 8 <= data.len() {
-        let id = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?);
-        let size = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?);
-        let size = size as usize;
-        let payload_start = offset + 8;
-        let payload_end = payload_start.checked_add(size)?;
-        if payload_end > data.len() {
-            offset += 1;
-            continue;
-        }
-        if id == UVCM_METADATA_ID_FRAME_ILLUMINATION && size > 0 {
-            return Some((data[payload_start] & 0x01) != 0);
-        }
-        offset = payload_end;
-    }
-    None
-}
-
-fn fourcc_bytes(bytes: [u8; 4]) -> u32 {
-    u32::from_le_bytes(bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_uvcm_frame_illumination_metadata() {
-        let mut data = Vec::new();
-        data.extend_from_slice(&UVCM_METADATA_ID_FRAME_ILLUMINATION.to_le_bytes());
-        data.extend_from_slice(&16_u32.to_le_bytes());
-        data.push(1);
-        data.extend_from_slice(&[0; 15]);
-
-        assert_eq!(find_frame_illumination(&data), Some(true));
-        data[8] = 0;
-        assert_eq!(find_frame_illumination(&data), Some(false));
     }
 }

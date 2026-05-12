@@ -1,5 +1,6 @@
 pub mod calib;
 pub mod capture;
+pub mod depth;
 pub mod frame;
 pub mod process;
 pub mod projection;
@@ -75,6 +76,7 @@ pub use calib::{
 pub use capture::{
     CameraOpenRequest, CameraOpener, CameraRoiControl, CameraSelector, OpenedCameraInfo,
 };
+pub use depth::{DepthSample, DepthSource};
 pub use frame::{
     CaptureFormat, Frame, FrameId, FrameMeta, FrameMut, FrameSource, FrameTimestamp, OwnedFrame,
     PixelFormat, SensorKind, TimestampSource,

@@ -280,7 +280,7 @@ impl ApplicationHandler for WindowApp {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                match self.stream.next_frame().and_then(|frame| match frame {
+                match pollster::block_on(self.stream.next_frame()).and_then(|frame| match frame {
                     Some(frame) => {
                         self.latest_size = Some(frame.meta.size);
                         self.sweep

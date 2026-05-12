@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::Result;
 
 pub trait DepthProjectionMap {
@@ -6,19 +8,22 @@ pub trait DepthProjectionMap {
     fn map(&self, depth_mm: f64) -> Result<Self::Map>;
 }
 
+#[async_trait::async_trait]
 pub trait ProjectionMapSource {
     type Map;
 
-    fn next_map(&mut self) -> Result<Self::Map>;
+    async fn next_map(&mut self, timestamp: Instant) -> Result<Self::Map>;
 }
 
+#[async_trait::async_trait]
 impl<F, M> ProjectionMapSource for F
 where
-    F: FnMut() -> Result<M>,
+    F: FnMut(Instant) -> Result<M> + Send,
+    M: Send,
 {
     type Map = M;
 
-    fn next_map(&mut self) -> Result<Self::Map> {
-        self()
+    async fn next_map(&mut self, timestamp: Instant) -> Result<Self::Map> {
+        self(timestamp)
     }
 }

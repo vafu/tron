@@ -38,7 +38,6 @@ struct CheckApp<R, I> {
     window: Option<Arc<winit::window::Window>>,
     composite: CompositeFrame,
     result: Result<()>,
-    logged_first_redraw: bool,
 }
 
 impl<R, I> CheckApp<R, I>
@@ -54,7 +53,6 @@ where
             window: None,
             composite: CompositeFrame::default(),
             result: Ok(()),
-            logged_first_redraw: false,
         }
     }
 
@@ -123,10 +121,6 @@ where
                 }
             }
             WindowEvent::RedrawRequested => {
-                if !self.logged_first_redraw {
-                    self.logged_first_redraw = true;
-                    eprintln!("tron-calibration: first calibration check redraw");
-                }
                 let pair = match pollster::block_on(self.frames.next_pair()) {
                     Ok(pair) => pair,
                     Err(err) => {

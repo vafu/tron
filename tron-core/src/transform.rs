@@ -16,11 +16,11 @@ pub struct ProjectedFrameSource<S, M> {
 
 impl<S, M> ProjectedFrameSource<S, M>
 where
-    S: FrameSource,
-    M: ProjectionMapSource<Map = FrameProjectionMap>,
+    S: FrameSource + Send,
+    M: ProjectionMapSource<Map = FrameProjectionMap> + Send,
 {
     pub fn new(source: S, mut map_source: M) -> Result<Self> {
-        let current_map = map_source.next_map()?;
+        let current_map = pollster::block_on(map_source.next_map(std::time::Instant::now()))?;
         let mut info = source.info().clone();
         info.size = current_map.output_size;
         Ok(Self {
@@ -33,20 +33,24 @@ where
     }
 }
 
+#[async_trait::async_trait]
 impl<S, M> FrameSource for ProjectedFrameSource<S, M>
 where
-    S: FrameSource,
-    M: ProjectionMapSource<Map = FrameProjectionMap>,
+    S: FrameSource + Send,
+    M: ProjectionMapSource<Map = FrameProjectionMap> + Send,
 {
     fn info(&self) -> &OpenedCameraInfo {
         &self.info
     }
 
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
-        let Some(frame) = self.source.next_frame()? else {
+    async fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
+        let Some(frame) = self.source.next_frame().await? else {
             return Ok(None);
         };
-        self.current_map = self.map_source.next_map()?;
+        self.current_map = self
+            .map_source
+            .next_map(frame.meta.timestamp.received_at)
+            .await?;
         anyhow::ensure!(
             frame.meta.size == self.current_map.input_size,
             "projected source frame size {:?} does not match projection input size {:?}",

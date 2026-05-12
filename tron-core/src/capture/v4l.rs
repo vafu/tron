@@ -198,12 +198,13 @@ impl V4lUvcmMetadataSource {
     }
 }
 
+#[async_trait::async_trait]
 impl FrameSource for V4lFrameSource {
     fn info(&self) -> &OpenedCameraInfo {
         &self.info
     }
 
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
+    async fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
 

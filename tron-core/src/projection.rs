@@ -1,8 +1,12 @@
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use opencv::calib3d;
 use opencv::core::{Mat, Point2f, Point3f, Vector};
 use opencv::prelude::*;
-use tron_api::{CheckerboardStereoCalibration, DepthProjectionMap, Size};
+use tron_api::{
+    CheckerboardStereoCalibration, DepthProjectionMap, DepthSource, ProjectionMapSource, Size,
+};
 
 #[derive(Clone, Debug)]
 pub struct CheckerboardDepthProjection {
@@ -21,6 +25,51 @@ impl DepthProjectionMap for CheckerboardDepthProjection {
     fn map(&self, depth_mm: f64) -> Result<FrameProjectionMap> {
         anyhow::ensure!(depth_mm > 0.0, "projection depth must be positive");
         build_projection_map(&self.calibration, depth_mm)
+    }
+}
+
+pub struct DepthProjectionMapSource<P, D>
+where
+    P: DepthProjectionMap,
+{
+    projection: P,
+    depth_source: D,
+    latest_depth_mm: f64,
+}
+
+impl<P, D> DepthProjectionMapSource<P, D>
+where
+    P: DepthProjectionMap,
+{
+    pub fn new(projection: P, depth_source: D) -> Result<Self> {
+        Ok(Self {
+            projection,
+            depth_source,
+            latest_depth_mm: 0.0,
+        })
+    }
+
+    pub fn latest_depth_mm(&self) -> f64 {
+        self.latest_depth_mm
+    }
+}
+
+#[async_trait::async_trait]
+impl<P, D> ProjectionMapSource for DepthProjectionMapSource<P, D>
+where
+    P: DepthProjectionMap + Send,
+    P::Map: Send,
+    D: DepthSource + Send,
+{
+    type Map = P::Map;
+
+    async fn next_map(&mut self, timestamp: Instant) -> Result<Self::Map> {
+        if let Some(sample) = self.depth_source.depth_at(timestamp).await? {
+            if let Some(min_mm) = sample.min_mm.filter(|min_mm| *min_mm > 0) {
+                self.latest_depth_mm = f64::from(min_mm);
+            }
+        }
+        self.projection.map(self.latest_depth_mm)
     }
 }
 

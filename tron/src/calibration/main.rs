@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -6,10 +7,11 @@ use tracing_subscriber::EnvFilter;
 use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{
-    CameraOpenRequest, CaptureFormat, CheckerboardSpec, CheckerboardStereoCalibration, PixelFormat,
-    SensorKind, Size,
+    CameraOpenRequest, CaptureFormat, CheckerboardSpec, CheckerboardStereoCalibration,
+    DepthProjectionMap, PixelFormat, SensorKind, Size,
 };
-use tron_core::pipeline::BufferedFrameSource;
+use tron_core::projection::{CheckerboardDepthProjection, DepthProjectionMapSource};
+use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
 
 mod check;
 mod latency;
@@ -53,7 +55,7 @@ struct Cli {
 
     /// Maximum allowed RGB/IR timestamp delta for a synchronized pair, in microseconds.
     #[arg(long, default_value_t = 20_000)]
-    max_sync_delta_us: i64,
+    max_sync_delta_us: u64,
 
     /// Path for stereo calibration JSON output.
     #[arg(long, default_value = "calibration.json")]
@@ -66,9 +68,22 @@ struct Cli {
     /// Assumed RGB-camera depth, in millimeters, for --check RGB-to-IR overlay projection.
     #[arg(long, default_value_t = 700.0)]
     check_depth_mm: f64,
+
+    /// VL53L5CX serial port to use as live projection depth for --check.
+    #[arg(long)]
+    check_tof_serial: Option<PathBuf>,
+
+    /// Baud rate for --check-tof-serial.
+    #[arg(long, default_value_t = 115200)]
+    check_tof_baud: u32,
+
+    /// Serial read timeout for --check-tof-serial, in milliseconds.
+    #[arg(long, default_value_t = 1)]
+    check_tof_timeout_ms: u64,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     init_tracing();
     run(Cli::parse())
 }
@@ -107,6 +122,7 @@ fn run(cli: Cli) -> Result<()> {
     );
 
     let ir_stream = streams.ir_stream;
+    let rgb_stream = streams.rgb_stream;
     eprintln!(
         "tron-calibration: opened ir {} {:?} {}x{}",
         streams.ir_info.id,
@@ -124,25 +140,33 @@ fn run(cli: Cli) -> Result<()> {
             "tron-calibration: checking {} with RGB+IR overlay",
             path.display()
         );
-        let rgb_stream = BufferedFrameSource::spawn("calibration-check-rgb", streams.rgb_stream, 4);
-        let ir_stream = BufferedFrameSource::spawn("calibration-check-ir", ir_stream, 4);
-        return check::run(
-            rgb_stream,
-            ir_stream,
-            check::CalibrationCheckConfig {
-                calibration,
-                max_sync_delta_us: cli.max_sync_delta_us,
-                depth_mm: cli.check_depth_mm,
-            },
-        );
+        let projection = CheckerboardDepthProjection::new(calibration);
+        let config = check::CalibrationCheckConfig {
+            max_sync_delta_us: cli.max_sync_delta_us,
+        };
+        if let Some(port) = cli.check_tof_serial.as_ref() {
+            eprintln!(
+                "tron-calibration: using TOF depth from {} at {} baud",
+                port.display(),
+                cli.check_tof_baud
+            );
+            let depth_source = Vl53l5cxSerialDepthSource::open(
+                port,
+                cli.check_tof_baud,
+                Duration::from_millis(cli.check_tof_timeout_ms),
+            )?;
+            let map_source = DepthProjectionMapSource::new(projection, depth_source)?;
+            return check::run(rgb_stream, ir_stream, map_source, config);
+        }
+
+        let map = projection.map(cli.check_depth_mm)?;
+        return check::run(rgb_stream, ir_stream, move |_| Ok(map.clone()), config);
     }
 
     eprintln!(
         "tron-calibration: press Space to capture a paired checkerboard sample; press C to calibrate and write {}",
         cli.output.display()
     );
-    let rgb_stream = BufferedFrameSource::spawn("calibration-rgb", streams.rgb_stream, 4);
-    let ir_stream = BufferedFrameSource::spawn("calibration-ir", ir_stream, 4);
     window::run(
         rgb_stream,
         ir_stream,

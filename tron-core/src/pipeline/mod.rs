@@ -113,4 +113,3 @@ unsafe fn detach_frame_lifetime<'a>(frame: Frame<'_>) -> Frame<'a> {
         data: unsafe { std::slice::from_raw_parts(frame.data.as_ptr(), frame.data.len()) },
     }
 }
-

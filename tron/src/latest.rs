@@ -19,7 +19,7 @@ impl LatestFrameSource {
 
         thread::spawn(move || {
             loop {
-                match source.next_frame() {
+                match pollster::block_on(source.next_frame()) {
                     Ok(Some(frame)) => {
                         let owned = Arc::new(own_frame(frame));
                         if let Ok(mut latest) = thread_latest.lock() {
@@ -47,12 +47,13 @@ impl LatestFrameSource {
     }
 }
 
+#[async_trait::async_trait]
 impl FrameSource for LatestFrameSource {
     fn info(&self) -> &OpenedCameraInfo {
         &self.info
     }
 
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
+    async fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         self.current = self.latest.lock().ok().and_then(|latest| latest.clone());
         Ok(self.current.as_ref().map(|frame| frame.as_frame()))
     }

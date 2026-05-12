@@ -5,11 +5,15 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 bytemuck.workspace = true
 opencv = { workspace = true, features = ["calib3d", "clang-runtime", "imgproc"] }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "ndarray"] }
+pollster.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tokio-serial.workspace = true
 tron-api.workspace = true
 turbojpeg = { version = "1.4", default-features = false, features = ["pkg-config", "require-simd"] }
 v4l = "0.14"

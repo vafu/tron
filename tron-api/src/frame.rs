@@ -121,8 +121,9 @@ impl OwnedFrame {
 // TODO: FrameSource will also cover non-camera inputs such as file-backed
 // streams. This should become a more general StreamInfo enum that can compose
 // OpenedCameraInfo, FileInfo, and future source-specific metadata.
+#[async_trait::async_trait]
 pub trait FrameSource {
     fn info(&self) -> &OpenedCameraInfo;
 
-    fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>>;
+    async fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>>;
 }

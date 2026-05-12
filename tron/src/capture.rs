@@ -77,7 +77,7 @@ pub fn open_windows_hello_v4l_streams(
 
 fn warm_up_stream(source: &mut impl FrameSource, label: &str) -> Result<()> {
     for _ in 0..30 {
-        if source.next_frame()?.is_some() {
+        if pollster::block_on(source.next_frame())?.is_some() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(1));
@@ -111,21 +111,22 @@ impl<S> LitIrFrameStream<S> {
     }
 }
 
+#[async_trait::async_trait]
 impl<S> FrameSource for LitIrFrameStream<S>
 where
-    S: FrameSource,
+    S: FrameSource + Send,
 {
     fn info(&self) -> &OpenedCameraInfo {
         self.inner.info()
     }
 
-    fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
+    async fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         let Self {
             inner,
             metadata,
             sequence_mismatch_count,
         } = self;
-        let Some(frame) = inner.next_frame()? else {
+        let Some(frame) = inner.next_frame().await? else {
             return Ok(None);
         };
         let illumination_on = if let Some(sequence) = frame.meta.sequence {

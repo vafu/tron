@@ -6,7 +6,8 @@ pub mod process;
 pub mod projection;
 pub mod render;
 pub mod roi;
+pub mod sensor;
 pub mod transform;
 pub mod view;
 
-pub use pipeline::{BufferedFrameSource, FramePairSource, FrameSynchronizer, SyncedFramePair};
+pub use pipeline::{StereoFrameSource, SyncedFramePair};

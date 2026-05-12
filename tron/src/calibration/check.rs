@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tron_api::{
-    CheckerboardStereoCalibration, DepthProjectionMap, Frame, FrameMeta, FrameSource, OwnedFrame,
-    PixelFormat, Renderer, Size,
-};
-use tron_core::pipeline::{FramePairSource, FrameSynchronizer};
-use tron_core::projection::CheckerboardDepthProjection;
+use tron_api::{Frame, FrameMeta, FrameSource, PixelFormat, ProjectionMapSource, Renderer, Size};
+use tron_core::StereoFrameSource;
+use tron_core::projection::FrameProjectionMap;
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
 use tron_core::transform::ProjectedFrameSource;
 use tron_core::view::{IntoView, ViewExt};
@@ -16,48 +13,48 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
 
 pub struct CalibrationCheckConfig {
-    pub calibration: CheckerboardStereoCalibration,
-    pub max_sync_delta_us: i64,
-    pub depth_mm: f64,
+    pub max_sync_delta_us: u64,
 }
 
-pub fn run<R, I>(rgb: R, ir: I, config: CalibrationCheckConfig) -> Result<()>
+pub fn run<R, I, M>(rgb: R, ir: I, map_source: M, config: CalibrationCheckConfig) -> Result<()>
 where
-    R: FrameSource,
-    I: FrameSource,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
+    M: ProjectionMapSource<Map = FrameProjectionMap> + Send,
 {
-    let projection = CheckerboardDepthProjection::new(config.calibration.clone());
-    let map = projection.map(config.depth_mm)?;
-    let ir = ProjectedFrameSource::new(ir, move || Ok(map.clone()))?;
+    let ir = ProjectedFrameSource::new(ir, map_source)?;
+    let frames = StereoFrameSource::new(rgb, ir, config.max_sync_delta_us);
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = CheckApp::new(rgb, ir, config);
+    let mut app = CheckApp::new(frames);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
 
 struct CheckApp<R, I> {
-    synchronizer: FrameSynchronizer<R, I>,
+    frames: StereoFrameSource<R, I>,
     window_id: Option<WindowId>,
     renderer: Option<CheckRenderer>,
     window: Option<Arc<winit::window::Window>>,
     composite: CompositeFrame,
     result: Result<()>,
+    logged_first_redraw: bool,
 }
 
 impl<R, I> CheckApp<R, I>
 where
-    R: FrameSource,
-    I: FrameSource,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
-    fn new(rgb: R, ir: I, config: CalibrationCheckConfig) -> Self {
+    fn new(frames: StereoFrameSource<R, I>) -> Self {
         Self {
-            synchronizer: FrameSynchronizer::new(rgb, ir, config.max_sync_delta_us),
+            frames,
             window_id: None,
             renderer: None,
             window: None,
             composite: CompositeFrame::default(),
             result: Ok(()),
+            logged_first_redraw: false,
         }
     }
 
@@ -69,8 +66,8 @@ where
 
 impl<R, I> ApplicationHandler for CheckApp<R, I>
 where
-    R: FrameSource,
-    I: FrameSource,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
@@ -97,6 +94,9 @@ where
             Ok(renderer) => {
                 self.window = Some(window);
                 self.renderer = Some(renderer);
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
             }
             Err(err) => self.set_error(event_loop, err),
         }
@@ -123,7 +123,11 @@ where
                 }
             }
             WindowEvent::RedrawRequested => {
-                let pair = match FramePairSource::next_pair(&mut self.synchronizer) {
+                if !self.logged_first_redraw {
+                    self.logged_first_redraw = true;
+                    eprintln!("tron-calibration: first calibration check redraw");
+                }
+                let pair = match pollster::block_on(self.frames.next_pair()) {
                     Ok(pair) => pair,
                     Err(err) => {
                         self.set_error(event_loop, err);
@@ -217,7 +221,7 @@ struct CompositeFrame {
 }
 
 impl CompositeFrame {
-    fn update(&mut self, rgb: &OwnedFrame, ir: &OwnedFrame) -> Result<()> {
+    fn update(&mut self, rgb: &Frame<'_>, ir: &Frame<'_>) -> Result<()> {
         anyhow::ensure!(
             rgb.meta.size == ir.meta.size,
             "RGB frame size {:?} does not match projected IR frame size {:?}",
@@ -229,8 +233,8 @@ impl CompositeFrame {
         let pixel_count = size.width as usize * size.height as usize;
         self.data.resize(pixel_count * 4, 255);
 
-        let rgb_view = rgb.as_frame().view();
-        let ir_view = ir.as_frame().view();
+        let rgb_view = rgb.view();
+        let ir_view = ir.view();
         for y in 0..size.height {
             let rgb_row = rgb_view.row(y)?;
             let ir_row = ir_view.row(y)?;

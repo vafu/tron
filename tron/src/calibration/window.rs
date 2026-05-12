@@ -3,16 +3,15 @@ use std::time::Instant;
 use std::{fs::File, path::PathBuf};
 
 use anyhow::{Context, Result};
-use tron_api::FrameSource;
 use tron_api::{
-    CheckerboardDetection, CheckerboardSample, CheckerboardSpec, OwnedFrame, Processor, Renderer,
-    Size,
+    CheckerboardDetection, CheckerboardSample, CheckerboardSpec, Frame, FrameSource, Processor,
+    Renderer, Size,
 };
+use tron_core::StereoFrameSource;
 use tron_core::calib::checkerboard::{
     CheckerboardSampleBuilder, OpenCvCheckerboardConfig, OpenCvCheckerboardDetector,
     calibrate_stereo_checkerboard, calibration_frame_side,
 };
-use tron_core::pipeline::{FramePairSource, FrameSynchronizer};
 use tron_core::view::IntoView;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -26,24 +25,25 @@ use crate::renderer::{CalibrationRenderer, CalibrationView};
 pub struct CalibrationRunConfig {
     pub checkerboard: CheckerboardSpec,
     pub min_samples: usize,
-    pub max_sync_delta_us: i64,
+    pub max_sync_delta_us: u64,
     pub output: PathBuf,
 }
 
 pub fn run<R, I>(rgb: R, ir: I, config: CalibrationRunConfig) -> Result<()>
 where
-    R: FrameSource,
-    I: FrameSource,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(rgb, ir, config);
+    let frames = StereoFrameSource::new(rgb, ir, config.max_sync_delta_us);
+    let mut app = WindowApp::new(frames, config);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
 
 struct WindowApp<R, I> {
-    synchronizer: FrameSynchronizer<R, I>,
+    frames: StereoFrameSource<R, I>,
     rgb_checkerboard: CheckerboardDetectionState,
     ir_checkerboard: CheckerboardDetectionState,
     sample_builder: CheckerboardSampleBuilder,
@@ -61,13 +61,13 @@ struct WindowApp<R, I> {
 
 impl<R, I> WindowApp<R, I>
 where
-    R: FrameSource,
-    I: FrameSource,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
-    fn new(rgb: R, ir: I, config: CalibrationRunConfig) -> Self {
+    fn new(frames: StereoFrameSource<R, I>, config: CalibrationRunConfig) -> Self {
         let checkerboard = OpenCvCheckerboardConfig::new(config.checkerboard);
         Self {
-            synchronizer: FrameSynchronizer::new(rgb, ir, config.max_sync_delta_us),
+            frames,
             rgb_checkerboard: CheckerboardDetectionState::new(checkerboard),
             ir_checkerboard: CheckerboardDetectionState::new(checkerboard),
             sample_builder: CheckerboardSampleBuilder::new(config.checkerboard),
@@ -87,56 +87,6 @@ where
     fn set_error(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
         self.result = Err(err);
         event_loop.exit();
-    }
-
-    fn capture_sample(
-        &mut self,
-        rgb: Option<&OwnedFrame>,
-        ir: Option<&OwnedFrame>,
-        rgb_detection: Option<&CheckerboardDetection>,
-        ir_detection: Option<&CheckerboardDetection>,
-    ) -> Result<()> {
-        let Some(rgb) = rgb else {
-            eprintln!("tron-calibration: cannot capture sample, RGB frame is not available");
-            return Ok(());
-        };
-        let Some(ir) = ir else {
-            eprintln!("tron-calibration: cannot capture sample, IR frame is not available");
-            return Ok(());
-        };
-        let pair = (rgb.meta.id, ir.meta.id);
-        if self.last_sample_pair == Some(pair) {
-            eprintln!(
-                "tron-calibration: skipped duplicate sample for frames {} / {}",
-                pair.0, pair.1
-            );
-            return Ok(());
-        }
-
-        let sample = self.sample_builder.process(
-            (
-                rgb_detection.map(|detection| calibration_frame_side(rgb.meta, detection)),
-                ir_detection.map(|detection| calibration_frame_side(ir.meta, detection)),
-            ),
-            tron_api::NoContext,
-        )?;
-
-        let Some(sample) = sample else {
-            eprintln!(
-                "tron-calibration: cannot capture sample, checkerboard is not detected in both feeds"
-            );
-            return Ok(());
-        };
-
-        self.samples.push(sample);
-        self.last_sample_pair = Some(pair);
-        eprintln!(
-            "tron-calibration: captured sample {} from frames {} / {}",
-            self.samples.len(),
-            pair.0,
-            pair.1
-        );
-        Ok(())
     }
 
     fn write_calibration(&self) -> Result<()> {
@@ -163,8 +113,8 @@ where
 
 impl<R, I> ApplicationHandler for WindowApp<R, I>
 where
-    R: FrameSource,
-    I: FrameSource,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
@@ -191,6 +141,9 @@ where
             Ok(renderer) => {
                 self.window = Some(window);
                 self.renderer = Some(renderer);
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
             }
             Err(err) => self.set_error(event_loop, err),
         }
@@ -234,24 +187,21 @@ where
             }
             WindowEvent::RedrawRequested => {
                 let redraw_start = Instant::now();
-                let sync_start = Instant::now();
-                let pair = match FramePairSource::next_pair(&mut self.synchronizer) {
+                let pair = match pollster::block_on(self.frames.next_pair()) {
                     Ok(pair) => pair,
                     Err(err) => {
                         self.set_error(event_loop, err);
                         return;
                     }
                 };
-                let latest = sync_start.elapsed();
+                let latest = redraw_start.elapsed();
                 let Some(pair) = pair else {
-                    self.rgb_checkerboard.clear();
-                    self.ir_checkerboard.clear();
                     if let Some(window) = self.window.as_ref() {
+                        eprintln!("nothing to present");
                         window.request_redraw();
                     }
                     return;
                 };
-                let sync_delta_us = pair.delta_us;
                 let rgb = pair.left;
                 let ir = pair.right;
 
@@ -273,9 +223,12 @@ where
                     self.capture_requested = false;
                     let rgb_checkerboard = self.rgb_checkerboard.detection().cloned();
                     let ir_checkerboard = self.ir_checkerboard.detection().cloned();
-                    if let Err(err) = self.capture_sample(
-                        Some(&rgb),
-                        Some(&ir),
+                    if let Err(err) = capture_sample(
+                        &mut self.sample_builder,
+                        &mut self.samples,
+                        &mut self.last_sample_pair,
+                        &rgb,
+                        &ir,
                         rgb_checkerboard.as_ref(),
                         ir_checkerboard.as_ref(),
                     ) {
@@ -292,8 +245,8 @@ where
                     return;
                 };
                 if let Err(err) = renderer.render(CalibrationView {
-                    rgb: Some(rgb.as_frame()),
-                    ir: Some(ir.as_frame()),
+                    rgb: Some(rgb),
+                    ir: Some(ir),
                     rgb_checkerboard,
                     ir_checkerboard,
                 }) {
@@ -311,7 +264,6 @@ where
                     finished_at,
                     rgb: Some(&rgb),
                     ir: Some(&ir),
-                    sync_delta_us: Some(sync_delta_us),
                     rgb_detected: rgb_checkerboard.is_some(),
                     ir_detected: ir_checkerboard.is_some(),
                 });
@@ -330,6 +282,50 @@ where
     }
 }
 
+fn capture_sample(
+    sample_builder: &mut CheckerboardSampleBuilder,
+    samples: &mut Vec<CheckerboardSample>,
+    last_sample_pair: &mut Option<(u64, u64)>,
+    rgb: &Frame<'_>,
+    ir: &Frame<'_>,
+    rgb_detection: Option<&CheckerboardDetection>,
+    ir_detection: Option<&CheckerboardDetection>,
+) -> Result<()> {
+    let pair = (rgb.meta.id, ir.meta.id);
+    if *last_sample_pair == Some(pair) {
+        eprintln!(
+            "tron-calibration: skipped duplicate sample for frames {} / {}",
+            pair.0, pair.1
+        );
+        return Ok(());
+    }
+
+    let sample = sample_builder.process(
+        (
+            rgb_detection.map(|detection| calibration_frame_side(rgb.meta, detection)),
+            ir_detection.map(|detection| calibration_frame_side(ir.meta, detection)),
+        ),
+        tron_api::NoContext,
+    )?;
+
+    let Some(sample) = sample else {
+        eprintln!(
+            "tron-calibration: cannot capture sample, checkerboard is not detected in both feeds"
+        );
+        return Ok(());
+    };
+
+    samples.push(sample);
+    *last_sample_pair = Some(pair);
+    eprintln!(
+        "tron-calibration: captured sample {} from frames {} / {}",
+        samples.len(),
+        pair.0,
+        pair.1
+    );
+    Ok(())
+}
+
 struct CheckerboardDetectionState {
     detector: OpenCvCheckerboardDetector,
     last_frame_id: Option<u64>,
@@ -345,7 +341,7 @@ impl CheckerboardDetectionState {
         }
     }
 
-    fn update(&mut self, frame: Option<&OwnedFrame>) -> Result<()> {
+    fn update(&mut self, frame: Option<&Frame<'_>>) -> Result<()> {
         let Some(frame) = frame else {
             self.detection = None;
             return Ok(());
@@ -356,17 +352,11 @@ impl CheckerboardDetectionState {
         }
 
         self.last_frame_id = Some(frame_id);
-        self.detection = self
-            .detector
-            .process(frame.as_frame().view(), tron_api::NoContext)?;
+        self.detection = self.detector.process(frame.view(), tron_api::NoContext)?;
         Ok(())
     }
 
     fn detection(&self) -> Option<&CheckerboardDetection> {
         self.detection.as_ref()
-    }
-
-    fn clear(&mut self) {
-        self.detection = None;
     }
 }

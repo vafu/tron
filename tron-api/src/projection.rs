@@ -12,7 +12,7 @@ pub trait DepthProjectionMap {
 pub trait ProjectionMapSource {
     type Map;
 
-    async fn next_map(&mut self, timestamp: Instant) -> Result<Self::Map>;
+    async fn next_map(&mut self, timestamp: Instant) -> Result<Option<Self::Map>>;
 }
 
 #[async_trait::async_trait]
@@ -23,7 +23,7 @@ where
 {
     type Map = M;
 
-    async fn next_map(&mut self, timestamp: Instant) -> Result<Self::Map> {
-        self(timestamp)
+    async fn next_map(&mut self, timestamp: Instant) -> Result<Option<Self::Map>> {
+        self(timestamp).map(Some)
     }
 }

@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_serial::SerialPortBuilderExt;
 use tron_api::{DepthSample, DepthSource};
@@ -52,13 +51,19 @@ impl Vl53l5cxSerialDepthSource {
         })
     }
 
-    async fn closest_sample(&self, timestamp: Instant) -> Result<Option<DepthSample>> {
-        let mut shared = self.shared.lock().await;
-        if let Some(err) = shared.error.take() {
-            return Err(err);
-        }
-        Ok(shared
-            .samples
+    fn closest_sample(&self, timestamp: Instant) -> Result<Option<DepthSample>> {
+        let samples: Vec<_> = match self.shared.try_lock() {
+            Ok(mut shared) => {
+                if let Some(err) = shared.error.take() {
+                    return Err(err);
+                }
+                shared.samples.iter().copied().collect()
+            }
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Poisoned(_)) => anyhow::bail!("VL53L5CX sample lock poisoned"),
+        };
+
+        Ok(samples
             .iter()
             .min_by_key(|sample| instant_distance(sample.sampled_at, timestamp))
             .copied())
@@ -74,7 +79,7 @@ impl Drop for Vl53l5cxSerialDepthSource {
 #[async_trait::async_trait]
 impl DepthSource for Vl53l5cxSerialDepthSource {
     async fn depth_at(&mut self, timestamp: Instant) -> Result<Option<DepthSample>> {
-        self.closest_sample(timestamp).await
+        self.closest_sample(timestamp)
     }
 }
 
@@ -91,25 +96,35 @@ async fn read_samples(
                 let received_at = Instant::now();
                 match parse_sample(&line, received_at) {
                     Ok(Some(sample)) => {
-                        let mut shared = shared.lock().await;
-                        if shared.samples.len() >= shared.capacity {
-                            shared.samples.pop_front();
+                        if let Ok(mut shared) = shared.try_lock() {
+                            if shared.samples.len() >= shared.capacity {
+                                shared.samples.pop_front();
+                            }
+                            shared.samples.push_back(sample);
                         }
-                        shared.samples.push_back(sample);
                     }
                     Ok(None) => {}
                     Err(err) => {
-                        shared.lock().await.error = Some(err);
+                        set_error(&shared, err);
                         return;
                     }
                 }
             }
             Err(err) => {
-                shared.lock().await.error =
-                    Some(anyhow::Error::new(err).context("read VL53L5CX serial sample"));
+                set_error(
+                    &shared,
+                    anyhow::Error::new(err).context("read VL53L5CX serial sample"),
+                );
                 return;
             }
         }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn set_error(shared: &Arc<Mutex<SharedSamples>>, err: anyhow::Error) {
+    if let Ok(mut shared) = shared.lock() {
+        shared.error = Some(err);
     }
 }
 

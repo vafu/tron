@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tron_api::{Frame, FrameMeta, FrameSource, PixelFormat, ProjectionMapSource, Renderer, Size};
@@ -18,40 +18,123 @@ pub struct CalibrationCheckConfig {
 
 pub fn run<R, I, M>(rgb: R, ir: I, map_source: M, config: CalibrationCheckConfig) -> Result<()>
 where
-    R: FrameSource + Send,
-    I: FrameSource + Send,
-    M: ProjectionMapSource<Map = FrameProjectionMap> + Send,
+    R: FrameSource + Send + 'static,
+    I: FrameSource + Send + 'static,
+    M: ProjectionMapSource<Map = FrameProjectionMap> + Send + 'static,
 {
     let ir = ProjectedFrameSource::new(ir, map_source)?;
+    run_projected(rgb, ir, config)
+}
+
+fn run_projected<R, I>(rgb: R, ir: I, config: CalibrationCheckConfig) -> Result<()>
+where
+    R: FrameSource + Send + 'static,
+    I: FrameSource + Send + 'static,
+{
     let frames = StereoFrameSource::new(rgb, ir, config.max_sync_delta_us);
+    let latest = LatestCompositeFrame::default();
+    let producer = latest.clone();
+    tokio::spawn(async move {
+        produce_composite_frames(frames, producer).await;
+    });
+
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = CheckApp::new(frames);
+    let mut app = CheckApp::new(latest);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
 
-struct CheckApp<R, I> {
-    frames: StereoFrameSource<R, I>,
-    window_id: Option<WindowId>,
-    renderer: Option<CheckRenderer>,
-    window: Option<Arc<winit::window::Window>>,
-    composite: CompositeFrame,
-    result: Result<()>,
+#[derive(Clone, Default)]
+struct LatestCompositeFrame {
+    state: Arc<Mutex<LatestCompositeState>>,
 }
 
-impl<R, I> CheckApp<R, I>
-where
+#[derive(Default)]
+struct LatestCompositeState {
+    frame: Option<Arc<CompositeFrame>>,
+    error: Option<anyhow::Error>,
+}
+
+impl LatestCompositeFrame {
+    fn set_frame(&self, frame: CompositeFrame) -> CompositeFrame {
+        let Ok(mut state) = self.state.lock() else {
+            return frame;
+        };
+
+        let previous = state.frame.replace(Arc::new(frame));
+        if let Some(previous) = previous {
+            Arc::try_unwrap(previous).unwrap_or_default()
+        } else {
+            CompositeFrame::default()
+        }
+    }
+
+    fn set_error(&self, err: anyhow::Error) {
+        if let Ok(mut state) = self.state.lock() {
+            state.error = Some(err);
+        }
+    }
+
+    fn take_error(&self) -> Option<anyhow::Error> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.error.take())
+    }
+
+    fn latest(&self) -> Option<Arc<CompositeFrame>> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| state.frame.as_ref().cloned())
+    }
+}
+
+async fn produce_composite_frames<R, I>(
+    mut frames: StereoFrameSource<R, I>,
+    latest: LatestCompositeFrame,
+) where
     R: FrameSource + Send,
     I: FrameSource + Send,
 {
-    fn new(frames: StereoFrameSource<R, I>) -> Self {
+    let mut composite = CompositeFrame::default();
+    loop {
+        match frames.next_pair().await {
+            Ok(Some(pair)) => match composite.update(&pair.left, &pair.right) {
+                Ok(()) => composite = latest.set_frame(composite),
+                Err(err) => {
+                    latest.set_error(err);
+                    return;
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                latest.set_error(err);
+                return;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+struct CheckApp {
+    latest: LatestCompositeFrame,
+    rendered_id: Option<u64>,
+    window_id: Option<WindowId>,
+    renderer: Option<CheckRenderer>,
+    window: Option<Arc<winit::window::Window>>,
+    result: Result<()>,
+}
+
+impl CheckApp {
+    fn new(latest: LatestCompositeFrame) -> Self {
         Self {
-            frames,
+            latest,
+            rendered_id: None,
             window_id: None,
             renderer: None,
             window: None,
-            composite: CompositeFrame::default(),
             result: Ok(()),
         }
     }
@@ -62,11 +145,7 @@ where
     }
 }
 
-impl<R, I> ApplicationHandler for CheckApp<R, I>
-where
-    R: FrameSource + Send,
-    I: FrameSource + Send,
-{
+impl ApplicationHandler for CheckApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             return;
@@ -118,35 +197,30 @@ where
                         width: size.width,
                         height: size.height,
                     });
+                    self.rendered_id = None;
                 }
             }
             WindowEvent::RedrawRequested => {
-                let pair = match pollster::block_on(self.frames.next_pair()) {
-                    Ok(pair) => pair,
-                    Err(err) => {
-                        self.set_error(event_loop, err);
-                        return;
-                    }
-                };
-                let Some(pair) = pair else {
-                    if let Some(window) = self.window.as_ref() {
-                        window.request_redraw();
-                    }
-                    return;
-                };
-
-                if let Err(err) = self.composite.update(&pair.left, &pair.right) {
+                if let Some(err) = self.latest.take_error() {
                     self.set_error(event_loop, err);
                     return;
                 }
 
+                let Some(frame) = self.latest.latest() else {
+                    return;
+                };
+                let frame_id = frame.id();
+                if self.rendered_id == frame_id {
+                    return;
+                }
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
-                if let Err(err) = renderer.render(self.composite.frame()) {
+                if let Err(err) = renderer.render(frame.frame()) {
                     self.set_error(event_loop, err);
                     return;
                 }
+                self.rendered_id = frame_id;
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
@@ -254,6 +328,10 @@ impl CompositeFrame {
             stride: meta.size.width as usize * 4,
             data: &self.data,
         }
+    }
+
+    fn id(&self) -> Option<u64> {
+        self.meta.map(|meta| meta.id)
     }
 }
 

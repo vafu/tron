@@ -10,7 +10,9 @@ use tron_api::{
     CameraOpenRequest, CaptureFormat, CheckerboardSpec, CheckerboardStereoCalibration,
     DepthProjectionMap, PixelFormat, SensorKind, Size,
 };
-use tron_core::projection::{CheckerboardDepthProjection, DepthProjectionMapSource};
+use tron_core::projection::{
+    CheckerboardDepthProjection, DepthProjectionMapSource, StaticProjectionMapSource,
+};
 use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
 
 mod check;
@@ -160,7 +162,12 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         let map = projection.map(cli.check_depth_mm)?;
-        return check::run(rgb_stream, ir_stream, move |_| Ok(map.clone()), config);
+        return check::run(
+            rgb_stream,
+            ir_stream,
+            StaticProjectionMapSource::new(map),
+            config,
+        );
     }
 
     eprintln!(

@@ -87,14 +87,16 @@ impl LandmarkBounds {
             return None;
         }
 
-        let axis_y = [middle_mcp.x - wrist.x, middle_mcp.y - wrist.y];
+        // MediaPipe Hand Landmark model expects fingertips at the top (y=0).
+        // The orientation axis should point from middle-MCP to wrist.
+        let axis_y = [wrist.x - middle_mcp.x, wrist.y - middle_mcp.y];
         let axis_len = hypot(axis_y[0], axis_y[1]);
         if axis_len < 1.0 || !axis_len.is_finite() {
             return self.to_axis_aligned_roi(frame_size, scale);
         }
         let axis_y = [axis_y[0] / axis_len, axis_y[1] / axis_len];
         let axis_x = [-axis_y[1], axis_y[0]];
-        let origin = [wrist.x, wrist.y];
+        let origin = [middle_mcp.x, middle_mcp.y];
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut min_y = f32::INFINITY;
@@ -119,7 +121,9 @@ impl LandmarkBounds {
         let raw_width = (max_x - min_x).max(1.0);
         let raw_height = (max_y - min_y).max(1.0);
         let center_x = (min_x + max_x) * 0.5;
-        let center_y = (min_y + max_y) * 0.5 - MEDIAPIPE_LANDMARK_SHIFT_Y * raw_height;
+        // Shift center along axis_y (middle-MCP to wrist).
+        // Negative shift moves towards fingertips.
+        let center_y = (min_y + max_y) * 0.5 + MEDIAPIPE_LANDMARK_SHIFT_Y * raw_height;
         let side = raw_width.max(raw_height) * scale.max(1.0);
         let half_side = side * 0.5;
         let center = add(add(origin, mul(axis_x, center_x)), mul(axis_y, center_y));
@@ -414,18 +418,40 @@ fn preprocess_bgra(
         let ny = (y as f32 + 0.5) / input_sizef;
         for x in 0..input_size {
             let nx = (x as f32 + 0.5) / input_sizef;
-            let src_x = crop
-                .frame_x(nx, ny)
-                .floor()
-                .clamp(0.0, (source_w - 1) as f32) as usize;
-            let src_y = crop
-                .frame_y(nx, ny)
-                .floor()
-                .clamp(0.0, (source_h - 1) as f32) as usize;
+            let src_xf = crop.frame_x(nx, ny) - 0.5;
+            let src_yf = crop.frame_y(nx, ny) - 0.5;
+
+            let x0 = src_xf.floor() as isize;
+            let y0 = src_yf.floor() as isize;
+            let x1 = x0 + 1;
+            let y1 = y0 + 1;
+
+            let dx = src_xf - x0 as f32;
+            let dy = src_yf - y0 as f32;
+
+            let mut r = 0.0;
+            let mut g = 0.0;
+            let mut b = 0.0;
+
+            for (iy, weight_y) in [(y0, 1.0 - dy), (y1, dy)] {
+                if iy < 0 || iy >= source_h as isize {
+                    continue;
+                }
+                for (ix, weight_x) in [(x0, 1.0 - dx), (x1, dx)] {
+                    if ix < 0 || ix >= source_w as isize {
+                        continue;
+                    }
+                    let weight = weight_x * weight_y;
+                    r += pixels[[iy as usize, ix as usize, 2]] as f32 * weight;
+                    g += pixels[[iy as usize, ix as usize, 1]] as f32 * weight;
+                    b += pixels[[iy as usize, ix as usize, 0]] as f32 * weight;
+                }
+            }
+
             let dst = y * input_size + x;
-            output[dst] = pixels[[src_y, src_x, 2]] as f32 / 255.0;
-            output[input_size * input_size + dst] = pixels[[src_y, src_x, 1]] as f32 / 255.0;
-            output[2 * input_size * input_size + dst] = pixels[[src_y, src_x, 0]] as f32 / 255.0;
+            output[dst] = r / 255.0;
+            output[input_size * input_size + dst] = g / 255.0;
+            output[2 * input_size * input_size + dst] = b / 255.0;
         }
     }
     Ok(())

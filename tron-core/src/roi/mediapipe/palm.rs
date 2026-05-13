@@ -128,7 +128,10 @@ impl Detection {
         let center = self.center_to_frame(resize);
         let wrist = self.keypoint_to_frame(WRIST_KEYPOINT, resize);
         let middle_mcp = self.keypoint_to_frame(MIDDLE_MCP_KEYPOINT, resize);
-        let axis_y = [middle_mcp[0] - wrist[0], middle_mcp[1] - wrist[1]];
+
+        // MediaPipe Hand Landmark model expects fingertips at the top (y=0).
+        // The orientation axis should point from middle-MCP to wrist.
+        let axis_y = [wrist[0] - middle_mcp[0], wrist[1] - middle_mcp[1]];
         let palm_len = hypot(axis_y[0], axis_y[1]);
         if palm_len < 1.0 || !palm_len.is_finite() {
             return self
@@ -140,10 +143,22 @@ impl Detection {
         let axis_x = [-axis_y[1], axis_y[0]];
         let raw_width = (self.width.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
         let raw_height = (self.height.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
-        // MediaPipe's RectTransformationCalculator shifts before square/scale.
-        // Its hand graph uses shift_y=-0.5; in our wrist->middle-MCP local axis
-        // that means moving the crop center toward the fingertips.
-        let center = add(center, mul(axis_y, -MEDIAPIPE_PALM_SHIFT_Y * raw_height));
+
+        // Shift center along axis_y (middle-MCP to wrist).
+        // Standard shift is -0.5, but since axis_y is flipped, we use +0.5.
+        // wait, MEDIAPIPE_PALM_SHIFT_Y is -0.5.
+        // If axis_y is middle-mcp to wrist, then +axis_y is towards wrist.
+        // We want to shift towards fingertips (opposite of axis_y).
+        // So we shift by -0.5 * height * axis_y.
+        // The original code was center + (-shift * height * axis_y) where axis_y was wrist to mcp.
+        // center + (-(-0.5) * height * forward) = center + 0.5 * height * forward.
+        // Now center + (-(-0.5) * height * backward) = center + 0.5 * height * backward.
+        // That's WRONG. We want center + 0.5 * height * forward.
+        // If axis_y is backward, then forward = -axis_y.
+        // center + 0.5 * height * (-axis_y) = center - 0.5 * height * axis_y.
+        // So we want + shift * height * axis_y if shift is -0.5.
+        let center = add(center, mul(axis_y, MEDIAPIPE_PALM_SHIFT_Y * raw_height));
+
         let side = raw_width.max(raw_height).max(1.0) * fingertip_scale.max(1.0);
         let half_side = side * 0.5;
         let corners = [
@@ -199,22 +214,53 @@ fn preprocess_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping
     let pad_x = (INPUT_SIZE - resized_w) / 2;
     let pad_y = (INPUT_SIZE - resized_h) / 2;
     output.fill(0.0);
+
+    let scale_x = source_w as f32 / resized_w as f32;
+    let scale_y = source_h as f32 / resized_h as f32;
+
     for y in 0..resized_h {
-        let src_y = y * source_h / resized_h;
+        let src_yf = (y as f32 + 0.5) * scale_y - 0.5;
+        let y0 = src_yf.floor() as isize;
+        let y1 = y0 + 1;
+        let dy = src_yf - y0 as f32;
+
         for x in 0..resized_w {
-            let src_x = x * source_w / resized_w;
+            let src_xf = (x as f32 + 0.5) * scale_x - 0.5;
+            let x0 = src_xf.floor() as isize;
+            let x1 = x0 + 1;
+            let dx = src_xf - x0 as f32;
+
+            let mut r = 0.0;
+            let mut g = 0.0;
+            let mut b = 0.0;
+
+            for (iy, weight_y) in [(y0, 1.0 - dy), (y1, dy)] {
+                if iy < 0 || iy >= source_h as isize {
+                    continue;
+                }
+                for (ix, weight_x) in [(x0, 1.0 - dx), (x1, dx)] {
+                    if ix < 0 || ix >= source_w as isize {
+                        continue;
+                    }
+                    let weight = weight_x * weight_y;
+                    r += pixels[[iy as usize, ix as usize, 2]] as f32 * weight;
+                    g += pixels[[iy as usize, ix as usize, 1]] as f32 * weight;
+                    b += pixels[[iy as usize, ix as usize, 0]] as f32 * weight;
+                }
+            }
+
             let dst_x = pad_x + x;
             let dst_y = pad_y + y;
             let dst = dst_y * INPUT_SIZE + dst_x;
-            output[dst] = pixels[[src_y, src_x, 2]] as f32 / 255.0;
-            output[INPUT_SIZE * INPUT_SIZE + dst] = pixels[[src_y, src_x, 1]] as f32 / 255.0;
-            output[2 * INPUT_SIZE * INPUT_SIZE + dst] = pixels[[src_y, src_x, 0]] as f32 / 255.0;
+            output[dst] = r / 255.0;
+            output[INPUT_SIZE * INPUT_SIZE + dst] = g / 255.0;
+            output[2 * INPUT_SIZE * INPUT_SIZE + dst] = b / 255.0;
         }
     }
     Ok(ResizeMapping {
-        scale: source_w as f32 / resized_w as f32,
-        pad_x: pad_x as f32 * source_w as f32 / resized_w as f32,
-        pad_y: pad_y as f32 * source_h as f32 / resized_h as f32,
+        scale: scale_x,
+        pad_x: pad_x as f32 * scale_x,
+        pad_y: pad_y as f32 * scale_y,
     })
 }
 

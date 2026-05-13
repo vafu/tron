@@ -182,12 +182,12 @@ impl FrameSource for V4lFrameSource {
             }
             CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
                 let format = PixelFormat::try_from(self.info.format)?;
-                Ok(Some(Frame {
+                Ok(Some(Frame::new(
                     meta,
                     format,
-                    stride: stride(format, self.info.size.width),
+                    stride(format, self.info.size.width),
                     data,
-                }))
+                )?))
             }
         }
     }

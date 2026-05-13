@@ -1,6 +1,5 @@
 use anyhow::Result;
 use tron_api::{Frame, PixelFormat, Rect, RoiResult, Size};
-use tron_core::view::{IntoView, ViewExt};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClippedExposureRoiConfig {
@@ -53,7 +52,6 @@ impl ClippedExposureRoiDetector {
                 size: bounds,
             });
 
-        let view = frame.view();
         let mut clipped = 0;
         let mut best: Option<InteriorRect> = None;
         let width = search.size.width as usize;
@@ -63,7 +61,7 @@ impl ClippedExposureRoiDetector {
         let y_end = search.y.saturating_add(search.size.height);
         let x_end = search.x.saturating_add(search.size.width);
         for y in search.y..y_end {
-            let row = view.row(y)?;
+            let row = frame.row(y)?;
             for (xi, x) in (search.x..x_end).enumerate() {
                 if row[x as usize] >= self.config.threshold {
                     clipped += 1;
@@ -275,8 +273,8 @@ mod tests {
     }
 
     fn frame(data: &[u8], width: u32, height: u32) -> Frame<'_> {
-        Frame {
-            meta: FrameMeta {
+        Frame::new(
+            FrameMeta {
                 id: 1,
                 sensor: SensorKind::Ir,
                 size: Size { width, height },
@@ -287,9 +285,10 @@ mod tests {
                 },
                 sequence: None,
             },
-            format: PixelFormat::Gray8,
-            stride: width as usize,
+            PixelFormat::Gray8,
+            width as usize,
             data,
-        }
+        )
+        .unwrap()
     }
 }

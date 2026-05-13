@@ -12,7 +12,6 @@ use tron_core::calib::checkerboard::{
     CheckerboardSampleBuilder, OpenCvCheckerboardConfig, OpenCvCheckerboardDetector,
     calibrate_stereo_checkerboard, calibration_frame_side,
 };
-use tron_core::view::IntoView;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -352,7 +351,7 @@ impl CheckerboardDetectionState {
         }
 
         self.last_frame_id = Some(frame_id);
-        self.detection = self.detector.process(frame.view(), tron_api::NoContext)?;
+        self.detection = self.detector.process(*frame, tron_api::NoContext)?;
         Ok(())
     }
 

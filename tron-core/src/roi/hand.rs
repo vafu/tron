@@ -1,8 +1,6 @@
 use anyhow::Result;
 use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiCandidate, RoiResult, Size};
 
-use crate::view::{IntoView, ViewExt};
-
 pub struct HandRoiInput<'a> {
     pub candidates: &'a [RoiCandidate],
     pub motion: Option<Frame<'a>>,
@@ -103,13 +101,12 @@ fn motion_overlap(rect: Rect, motion: Option<Frame<'_>>) -> Result<u32> {
     if motion.format != PixelFormat::Gray8 {
         return Ok(0);
     }
-    let view = motion.view();
-    let rect = clamp_rect(rect, view.size);
+    let rect = clamp_rect(rect, motion.meta.size);
     let mut count = 0;
     let y_end = rect.y.saturating_add(rect.size.height);
     let x_end = rect.x.saturating_add(rect.size.width);
     for y in rect.y..y_end {
-        let row = view.row(y)?;
+        let row = motion.row(y)?;
         for x in rect.x..x_end {
             if row[x as usize] > 0 {
                 count += 1;
@@ -242,8 +239,8 @@ mod tests {
     }
 
     fn frame(data: &[u8], width: u32, height: u32) -> Frame<'_> {
-        Frame {
-            meta: FrameMeta {
+        Frame::new(
+            FrameMeta {
                 id: 1,
                 sensor: SensorKind::Ir,
                 size: Size { width, height },
@@ -254,9 +251,10 @@ mod tests {
                 },
                 sequence: None,
             },
-            format: PixelFormat::Gray8,
-            stride: width as usize,
+            PixelFormat::Gray8,
+            width as usize,
             data,
-        }
+        )
+        .unwrap()
     }
 }

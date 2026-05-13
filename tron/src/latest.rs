@@ -63,7 +63,7 @@ fn own_frame(frame: Frame<'_>) -> OwnedFrame {
     OwnedFrame {
         meta: frame.meta,
         format: frame.format,
-        stride: frame.stride,
-        data: frame.data.to_vec(),
+        stride: frame.buffer.stride,
+        data: frame.buffer.data.to_vec(),
     }
 }

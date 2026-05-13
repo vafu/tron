@@ -72,12 +72,7 @@ impl FrameDecoder for TurboMjpegDecoder {
             )
             .context("decode MJPEG frame")?;
 
-        Ok(Frame {
-            meta: frame.meta,
-            format: self.output_format,
-            stride,
-            data: &self.buffer,
-        })
+        Frame::new(frame.meta, self.output_format, stride, &self.buffer)
     }
 }
 

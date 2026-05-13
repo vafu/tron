@@ -13,7 +13,6 @@ use tron_core::process::frame_diff::{
 use tron_core::roi::hand::{HandRoiInput, HandRoiTracker, HandRoiTrackerConfig};
 use tron_core::roi::mediapipe::{MediaPipeRoiConfig, MediaPipeRoiProcessor};
 use tron_core::roi::opencv::{OpenCvRoiConfig, OpenCvRoiDetector};
-use tron_core::view::IntoView;
 
 pub struct PlaygroundInput {
     pub rgb: Option<Arc<OwnedFrame>>,
@@ -128,7 +127,7 @@ impl PlaygroundPipeline {
         let roi_candidates = input
             .ir
             .as_ref()
-            .map(|frame| self.roi.detect_candidates(frame.as_frame().view()))
+            .map(|frame| self.roi.detect_candidates(frame.as_frame()))
             .transpose()?
             .unwrap_or_default();
         let roi = self.hand_roi.process(

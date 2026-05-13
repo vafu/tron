@@ -7,6 +7,5 @@ pub mod render;
 pub mod roi;
 pub mod sensor;
 pub mod transform;
-pub mod view;
 
 pub use capture::{StereoFrameSource, SyncedFramePair};

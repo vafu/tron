@@ -121,9 +121,9 @@ fn preprocess_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping
     let source_h = frame.meta.size.height as usize;
     anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
     anyhow::ensure!(
-        frame.stride >= source_w * 4,
+        frame.buffer.stride >= source_w * 4,
         "BGRA frame stride {} is smaller than width {}",
-        frame.stride,
+        frame.buffer.stride,
         source_w * 4
     );
     let (resized_w, resized_h) = if source_h >= source_w {
@@ -138,13 +138,13 @@ fn preprocess_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping
         let src_y = y * source_h / resized_h;
         for x in 0..resized_w {
             let src_x = x * source_w / resized_w;
-            let src = src_y * frame.stride + src_x * 4;
+            let src = src_y * frame.buffer.stride + src_x * 4;
             let dst_x = pad_x + x;
             let dst_y = pad_y + y;
             let dst = dst_y * INPUT_SIZE + dst_x;
-            output[dst] = frame.data[src + 2] as f32 / 255.0;
-            output[INPUT_SIZE * INPUT_SIZE + dst] = frame.data[src + 1] as f32 / 255.0;
-            output[2 * INPUT_SIZE * INPUT_SIZE + dst] = frame.data[src] as f32 / 255.0;
+            output[dst] = frame.buffer.data[src + 2] as f32 / 255.0;
+            output[INPUT_SIZE * INPUT_SIZE + dst] = frame.buffer.data[src + 1] as f32 / 255.0;
+            output[2 * INPUT_SIZE * INPUT_SIZE + dst] = frame.buffer.data[src] as f32 / 255.0;
         }
     }
     Ok(ResizeMapping {

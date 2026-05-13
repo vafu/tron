@@ -6,11 +6,9 @@ use opencv::imgproc;
 use opencv::prelude::*;
 use tron_api::{
     CalibrationFrameSide, CameraCalibration, CheckerboardDetection, CheckerboardSample,
-    CheckerboardSpec, CheckerboardStereoCalibration, FrameMeta, NoContext, PixelFormat, Point2d,
-    Point3d, Processor, Size, View,
+    CheckerboardSpec, CheckerboardStereoCalibration, Frame, FrameMeta, NoContext, PixelFormat,
+    Point2d, Point3d, Processor, Size,
 };
-
-use crate::view::ViewExt;
 
 #[derive(Clone, Copy, Debug)]
 pub struct OpenCvCheckerboardConfig {
@@ -40,22 +38,22 @@ impl OpenCvCheckerboardDetector {
         }
     }
 
-    fn gray_mat(&mut self, view: View<'_>) -> Result<BoxedRef<'_, Mat>> {
-        match view.format {
+    fn gray_mat(&mut self, frame: Frame<'_>) -> Result<BoxedRef<'_, Mat>> {
+        match frame.format {
             PixelFormat::Gray8 => {
-                pack_view(view, 1, &mut self.packed)?;
+                pack_view(frame, 1, &mut self.packed)?;
                 Mat::new_rows_cols_with_data(
-                    view.size.height as i32,
-                    view.size.width as i32,
+                    frame.meta.size.height as i32,
+                    frame.meta.size.width as i32,
                     &self.packed,
                 )
                 .context("wrap checkerboard Gray8 input as OpenCV Mat")
             }
             PixelFormat::Bgra8 => {
-                pack_gray_from_bgra(view, &mut self.packed)?;
+                pack_gray_from_bgra(frame, &mut self.packed)?;
                 Mat::new_rows_cols_with_data(
-                    view.size.height as i32,
-                    view.size.width as i32,
+                    frame.meta.size.height as i32,
+                    frame.meta.size.width as i32,
                     &self.packed,
                 )
                 .context("wrap checkerboard BGRA8-derived Gray8 input as OpenCV Mat")
@@ -67,10 +65,10 @@ impl OpenCvCheckerboardDetector {
     }
 }
 
-impl Processor<View<'_>> for OpenCvCheckerboardDetector {
+impl Processor<Frame<'_>> for OpenCvCheckerboardDetector {
     type Output = Option<CheckerboardDetection>;
 
-    fn process(&mut self, input: View<'_>, _context: NoContext) -> Result<Self::Output> {
+    fn process(&mut self, input: Frame<'_>, _context: NoContext) -> Result<Self::Output> {
         let refine_corners = self.config.refine_corners;
         let pattern = cv_size(self.config.spec.inner_corners)?;
         let gray = self.gray_mat(input)?;
@@ -97,7 +95,7 @@ impl Processor<View<'_>> for OpenCvCheckerboardDetector {
 
         Ok(Some(CheckerboardDetection {
             spec: self.config.spec,
-            frame_size: input.size,
+            frame_size: input.meta.size,
             corners: corners
                 .into_iter()
                 .map(|corner| Point2d {
@@ -338,27 +336,27 @@ fn cv_size(size: Size) -> Result<CvSize> {
     Ok(CvSize::new(size.width as i32, size.height as i32))
 }
 
-fn pack_view(view: View<'_>, bytes_per_pixel: usize, packed: &mut Vec<u8>) -> Result<()> {
-    let row_len = view.size.width as usize * bytes_per_pixel;
+fn pack_view(frame: Frame<'_>, bytes_per_pixel: usize, packed: &mut Vec<u8>) -> Result<()> {
+    let row_len = frame.meta.size.width as usize * bytes_per_pixel;
     let len = row_len
-        .checked_mul(view.size.height as usize)
+        .checked_mul(frame.meta.size.height as usize)
         .ok_or_else(|| anyhow::anyhow!("checkerboard input size overflow"))?;
     packed.resize(len, 0);
-    for (y, row) in view.rows().enumerate() {
+    for (y, row) in frame.rows().enumerate() {
         let start = y * row_len;
         packed[start..start + row_len].copy_from_slice(row);
     }
     Ok(())
 }
 
-fn pack_gray_from_bgra(view: View<'_>, packed: &mut Vec<u8>) -> Result<()> {
-    let width = view.size.width as usize;
-    let height = view.size.height as usize;
+fn pack_gray_from_bgra(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
+    let width = frame.meta.size.width as usize;
+    let height = frame.meta.size.height as usize;
     let len = width
         .checked_mul(height)
         .ok_or_else(|| anyhow::anyhow!("checkerboard input size overflow"))?;
     packed.resize(len, 0);
-    for (y, row) in view.rows().enumerate() {
+    for (y, row) in frame.rows().enumerate() {
         let dst_row_start = y * width;
         for x in 0..width {
             let src = x * 4;

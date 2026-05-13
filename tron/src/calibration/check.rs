@@ -6,7 +6,6 @@ use tron_core::StereoFrameSource;
 use tron_core::projection::FrameProjectionMap;
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
 use tron_core::transform::ProjectedFrameSource;
-use tron_core::view::{IntoView, ViewExt};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -301,17 +300,15 @@ impl CompositeFrame {
         let pixel_count = size.width as usize * size.height as usize;
         self.data.resize(pixel_count * 4, 255);
 
-        let rgb_view = rgb.view();
-        let ir_view = ir.view();
         for y in 0..size.height {
-            let rgb_row = rgb_view.row(y)?;
-            let ir_row = ir_view.row(y)?;
+            let rgb_row = rgb.row(y)?;
+            let ir_row = ir.row(y)?;
             for x in 0..size.width {
-                let rgb = bgra_at(rgb_row, rgb_view.format, x as usize)?;
+                let rgb = bgra_at(rgb_row, rgb.format, x as usize)?;
                 let dst = (y as usize * size.width as usize + x as usize) * 4;
                 self.data[dst..dst + 4].copy_from_slice(&rgb);
 
-                let ir = gray_at(ir_row, ir_view.format, x as usize)?;
+                let ir = gray_at(ir_row, ir.format, x as usize)?;
                 blend_ir(&mut self.data[dst..dst + 4], rgb, ir, 0.38);
             }
         }
@@ -322,12 +319,13 @@ impl CompositeFrame {
 
     fn frame(&self) -> Frame<'_> {
         let meta = self.meta.expect("composite frame was not initialized");
-        Frame {
+        Frame::new(
             meta,
-            format: PixelFormat::Bgra8,
-            stride: meta.size.width as usize * 4,
-            data: &self.data,
-        }
+            PixelFormat::Bgra8,
+            meta.size.width as usize * 4,
+            &self.data,
+        )
+        .expect("composite frame metadata must match backing buffer")
     }
 
     fn id(&self) -> Option<u64> {

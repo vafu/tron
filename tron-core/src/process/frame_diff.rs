@@ -82,7 +82,7 @@ impl FrameDiffProcessor {
             frame.format
         );
         anyhow::ensure!(
-            frame.stride == frame.meta.size.width as usize,
+            frame.buffer.stride == frame.meta.size.width as usize,
             "frame diff requires tightly packed Gray8 frames"
         );
         self.ensure_buffers(frame)?;
@@ -93,7 +93,7 @@ impl FrameDiffProcessor {
         compute_diff(
             self.config.mode,
             self.config.reference_policy,
-            frame.data,
+            frame.buffer.data,
             &previous.data,
             &mut self.scratch,
         )
@@ -117,34 +117,34 @@ impl FrameDiffProcessor {
         }
 
         previous.meta = frame.meta;
-        previous.data.copy_from_slice(frame.data);
+        previous.data.copy_from_slice(frame.buffer.data);
 
         Ok(output.as_frame())
     }
 
     fn ensure_buffers(&mut self, frame: Frame<'_>) -> Result<()> {
-        let len = frame.data.len();
+        let len = frame.buffer.data.len();
 
         if let Some(previous) = &self.previous {
             anyhow::ensure!(
                 previous.meta.size == frame.meta.size
                     && previous.format == frame.format
-                    && previous.stride == frame.stride
+                    && previous.stride == frame.buffer.stride
                     && previous.data.len() == len,
                 "frame diff shape changed from {:?}/stride {}/len {} to {:?}/stride {}/len {}",
                 previous.meta.size,
                 previous.stride,
                 previous.data.len(),
                 frame.meta.size,
-                frame.stride,
+                frame.buffer.stride,
                 len
             );
         } else {
             self.previous = Some(OwnedFrame {
                 meta: frame.meta,
                 format: frame.format,
-                stride: frame.stride,
-                data: frame.data.to_vec(),
+                stride: frame.buffer.stride,
+                data: frame.buffer.data.to_vec(),
             });
         }
 
@@ -152,7 +152,7 @@ impl FrameDiffProcessor {
             self.output = Some(OwnedFrame {
                 meta: frame.meta,
                 format: PixelFormat::Gray8,
-                stride: frame.stride,
+                stride: frame.buffer.stride,
                 data: vec![0; len],
             });
         }

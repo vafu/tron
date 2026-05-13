@@ -6,6 +6,7 @@ pub mod process;
 pub mod projection;
 pub mod render;
 pub mod roi;
+pub mod view_buffer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Size {
@@ -59,15 +60,6 @@ pub struct Point3d {
     pub z: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct View<'a> {
-    pub meta: frame::FrameMeta,
-    pub format: frame::PixelFormat,
-    pub size: Size,
-    pub stride: usize,
-    pub data: &'a [u8],
-}
-
 pub use calib::{
     CalibrationFrameSide, CameraCalibration, CheckerboardDetection, CheckerboardProcessor,
     CheckerboardSample, CheckerboardSpec, CheckerboardStereoCalibration,
@@ -85,3 +77,4 @@ pub use process::{InPlaceFrameProcessor, Processor};
 pub use projection::{DepthProjectionMap, ProjectionMapSource};
 pub use render::{NoContext, Renderer};
 pub use roi::{RoiCandidate, RoiProcessor, RoiResult};
+pub use view_buffer::{ViewBuffer, ViewBufferMut, ViewRows};

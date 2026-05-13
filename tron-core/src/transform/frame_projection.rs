@@ -2,10 +2,8 @@ use anyhow::Result;
 use tron_api::{Frame, FrameMeta, OwnedFrame, PixelFormat};
 
 use crate::projection::FrameProjectionMap;
-use crate::view::{IntoView, ViewExt};
 
 pub(super) fn project_frame(frame: Frame<'_>, map: &FrameProjectionMap) -> Result<OwnedFrame> {
-    let input = frame.view();
     let output_size = map.output_size;
     let mut data = vec![0_u8; output_size.width as usize * output_size.height as usize];
     for y in 0..output_size.height {
@@ -14,8 +12,8 @@ pub(super) fn project_frame(frame: Frame<'_>, map: &FrameProjectionMap) -> Resul
             let Some((src_x, src_y)) = map.get(x, y) else {
                 continue;
             };
-            let row = input.row(src_y)?;
-            data[dst_row_start + x as usize] = gray_at(row, input.format, src_x as usize)?;
+            let row = frame.row(src_y)?;
+            data[dst_row_start + x as usize] = gray_at(row, frame.format, src_x as usize)?;
         }
     }
 

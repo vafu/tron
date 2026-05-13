@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use opencv::core::{self, Mat};
 use opencv::imgproc;
 use opencv::prelude::*;
-use tron_api::{NoContext, PixelFormat, Processor, Rect, RoiCandidate, RoiResult, Size, View};
-
-use crate::view::ViewExt;
+use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiCandidate, RoiResult, Size};
 
 #[derive(Clone, Copy, Debug)]
 pub struct OpenCvRoiConfig {
@@ -46,14 +44,14 @@ impl OpenCvRoiDetector {
         }
     }
 
-    pub fn detect_candidates(&mut self, input: View<'_>) -> Result<Vec<RoiCandidate>> {
+    pub fn detect_candidates(&mut self, input: Frame<'_>) -> Result<Vec<RoiCandidate>> {
         anyhow::ensure!(
             input.format == PixelFormat::Gray8,
             "OpenCV ROI detector requires Gray8 input, got {:?}",
             input.format
         );
-        let width = input.size.width as usize;
-        let height = input.size.height as usize;
+        let width = input.meta.size.width as usize;
+        let height = input.meta.size.height as usize;
         anyhow::ensure!(
             width > 0 && height > 0,
             "OpenCV ROI detector got empty input"
@@ -83,7 +81,7 @@ impl OpenCvRoiDetector {
 
         let mut candidates = Vec::new();
         for label in 1..components {
-            let candidate = self.candidate(label, input.size)?;
+            let candidate = self.candidate(label, input.meta.size)?;
             if candidate.is_plausible(self.config) {
                 candidates.push(RoiCandidate {
                     rect: candidate.rect,
@@ -96,10 +94,10 @@ impl OpenCvRoiDetector {
     }
 }
 
-impl Processor<View<'_>> for OpenCvRoiDetector {
+impl Processor<Frame<'_>> for OpenCvRoiDetector {
     type Output = Option<RoiResult>;
 
-    fn process(&mut self, input: View<'_>, _context: NoContext) -> Result<Self::Output> {
+    fn process(&mut self, input: Frame<'_>, _context: NoContext) -> Result<Self::Output> {
         let best = self
             .detect_candidates(input)?
             .into_iter()
@@ -166,14 +164,14 @@ impl BlobCandidate {
     }
 }
 
-fn pack_gray8(view: View<'_>, packed: &mut Vec<u8>) -> Result<()> {
-    let width = view.size.width as usize;
-    let height = view.size.height as usize;
+fn pack_gray8(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
+    let width = frame.meta.size.width as usize;
+    let height = frame.meta.size.height as usize;
     let len = width
         .checked_mul(height)
         .ok_or_else(|| anyhow::anyhow!("ROI detector input size overflow"))?;
     packed.resize(len, 0);
-    for (y, row) in view.rows().enumerate() {
+    for (y, row) in frame.rows().enumerate() {
         let start = y * width;
         packed[start..start + width].copy_from_slice(row);
     }

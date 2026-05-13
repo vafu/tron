@@ -95,7 +95,9 @@ impl LandmarkBounds {
             return self.to_axis_aligned_roi(frame_size, scale);
         }
         let axis_y = [axis_y[0] / axis_len, axis_y[1] / axis_len];
-        let axis_x = [-axis_y[1], axis_y[0]];
+        // axis_x should be axis_y rotated 90 deg clockwise to maintain right-handedness.
+        // If axis_y is backward (down), axis_x should be right.
+        let axis_x = [axis_y[1], -axis_y[0]];
         let origin = [middle_mcp.x, middle_mcp.y];
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
@@ -330,6 +332,7 @@ fn square_input_size(value_type: &ValueType) -> Option<usize> {
 fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) {
     let mut landmarks_output = 0;
     let mut landmarks_size = 0;
+    let mut landmarks_priority = -1;
     let mut presence_output = None;
     let mut handedness_output = None;
     for (index, output) in session.outputs().iter().enumerate() {
@@ -344,7 +347,20 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
             ValueType::Tensor { shape, .. } => shape.num_elements(),
             _ => 0,
         };
-        if elements > landmarks_size {
+        if elements == 63 {
+            let priority = if name.contains("world") {
+                0
+            } else if name.contains("image") || name.contains("landmark") {
+                2
+            } else {
+                1
+            };
+            if priority > landmarks_priority {
+                landmarks_priority = priority;
+                landmarks_output = index;
+                landmarks_size = elements;
+            }
+        } else if elements > landmarks_size && landmarks_priority < 0 {
             landmarks_size = elements;
             landmarks_output = index;
         }
@@ -434,17 +450,13 @@ fn preprocess_bgra(
             let mut b = 0.0;
 
             for (iy, weight_y) in [(y0, 1.0 - dy), (y1, dy)] {
-                if iy < 0 || iy >= source_h as isize {
-                    continue;
-                }
+                let iy = iy.clamp(0, source_h as isize - 1) as usize;
                 for (ix, weight_x) in [(x0, 1.0 - dx), (x1, dx)] {
-                    if ix < 0 || ix >= source_w as isize {
-                        continue;
-                    }
+                    let ix = ix.clamp(0, source_w as isize - 1) as usize;
                     let weight = weight_x * weight_y;
-                    r += pixels[[iy as usize, ix as usize, 2]] as f32 * weight;
-                    g += pixels[[iy as usize, ix as usize, 1]] as f32 * weight;
-                    b += pixels[[iy as usize, ix as usize, 0]] as f32 * weight;
+                    r += pixels[[iy, ix, 2]] as f32 * weight;
+                    g += pixels[[iy, ix, 1]] as f32 * weight;
+                    b += pixels[[iy, ix, 0]] as f32 * weight;
                 }
             }
 

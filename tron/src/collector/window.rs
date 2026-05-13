@@ -159,25 +159,18 @@ where
                     return;
                 }
 
-                // Tracking loop: prioritize previous landmark ROI over palm detection.
-                let mut palm_roi = None;
-                let input_roi = if let Some(roi) = self.last_landmark_roi {
-                    Some(roi)
-                } else {
-                    palm_roi = match self.mediapipe.process(rgb, NoContext) {
-                        Ok(roi) => roi,
-                        Err(err) => {
-                            self.set_error(event_loop, err);
-                            return;
-                        }
-                    };
-                    palm_roi
+                // Per-frame detection: disable tracking loop for now.
+                let palm_roi: Option<RoiResult> = match self.mediapipe.process(rgb, NoContext) {
+                    Ok(roi) => roi,
+                    Err(err) => {
+                        self.set_error(event_loop, err);
+                        return;
+                    }
                 };
-
                 let raw_landmarks = match self.landmarks.process(
                     MediaPipeHandLandmarkInput {
                         frame: rgb,
-                        roi: input_roi,
+                        roi: palm_roi,
                     },
                     NoContext,
                 ) {
@@ -188,40 +181,12 @@ where
                     }
                 };
 
-                // If landmark detection failed or confidence is low, fall back to palm detection.
-                let (landmarks, actual_palm_roi) = if raw_landmarks.is_none()
-                    && input_roi.is_some()
-                    && self.last_landmark_roi.is_some()
-                {
-                    // Previous landmark ROI failed, try palm detection now.
-                    let roi = match self.mediapipe.process(rgb, NoContext) {
-                        Ok(roi) => roi,
-                        Err(err) => {
-                            self.set_error(event_loop, err);
-                            return;
-                        }
-                    };
-                    let landmarks = match self.landmarks.process(
-                        MediaPipeHandLandmarkInput { frame: rgb, roi },
-                        NoContext,
-                    ) {
-                        Ok(landmarks) => landmarks,
-                        Err(err) => {
-                            self.set_error(event_loop, err);
-                            return;
-                        }
-                    };
-                    (landmarks, roi)
-                } else {
-                    (raw_landmarks, palm_roi)
-                };
+                let landmarks = self.filter.process(raw_landmarks, NoContext).unwrap_or(None);
 
-                let landmarks = self.filter.process(landmarks, NoContext).unwrap_or(None);
-
-                self.last_landmark_roi = landmarks.as_ref().and_then(|landmarks| {
+                let landmark_roi = landmarks.as_ref().and_then(|landmarks| {
                     landmarks.bounding_roi(rgb.meta.size, self.landmarks.config().roi_scale)
                 });
-                let rgb_roi = self.last_landmark_roi.or(actual_palm_roi);
+                let rgb_roi = landmark_roi.or(palm_roi);
 
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
@@ -229,7 +194,7 @@ where
                 if let Err(err) = renderer.render(CollectorView {
                     rgb: Some(rgb),
                     ir: None,
-                    rgb_palm_roi: actual_palm_roi,
+                    rgb_palm_roi: palm_roi,
                     rgb_roi,
                     rgb_landmarks: landmarks.as_ref(),
                 }) {

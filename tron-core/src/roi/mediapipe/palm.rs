@@ -140,7 +140,9 @@ impl Detection {
         }
 
         let axis_y = [axis_y[0] / palm_len, axis_y[1] / palm_len];
-        let axis_x = [-axis_y[1], axis_y[0]];
+        // axis_x should be axis_y rotated 90 deg clockwise to maintain right-handedness.
+        // If axis_y is backward (down), axis_x should be right.
+        let axis_x = [axis_y[1], -axis_y[0]];
         let raw_width = (self.width.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
         let raw_height = (self.height.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
 
@@ -235,17 +237,13 @@ fn preprocess_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping
             let mut b = 0.0;
 
             for (iy, weight_y) in [(y0, 1.0 - dy), (y1, dy)] {
-                if iy < 0 || iy >= source_h as isize {
-                    continue;
-                }
+                let iy = iy.clamp(0, source_h as isize - 1) as usize;
                 for (ix, weight_x) in [(x0, 1.0 - dx), (x1, dx)] {
-                    if ix < 0 || ix >= source_w as isize {
-                        continue;
-                    }
+                    let ix = ix.clamp(0, source_w as isize - 1) as usize;
                     let weight = weight_x * weight_y;
-                    r += pixels[[iy as usize, ix as usize, 2]] as f32 * weight;
-                    g += pixels[[iy as usize, ix as usize, 1]] as f32 * weight;
-                    b += pixels[[iy as usize, ix as usize, 0]] as f32 * weight;
+                    r += pixels[[iy, ix, 2]] as f32 * weight;
+                    g += pixels[[iy, ix, 1]] as f32 * weight;
+                    b += pixels[[iy, ix, 0]] as f32 * weight;
                 }
             }
 
@@ -418,8 +416,9 @@ mod tests {
             )
             .unwrap();
         let wrist_y = 0.5 * INPUT_SIZE as f32;
-        let back = wrist_y - (box_.corners[0][1] + box_.corners[1][1]) * 0.5;
-        let forward = (box_.corners[2][1] + box_.corners[3][1]) * 0.5 - wrist_y;
+        // c0, c1 are now the "forward" (fingertips) side.
+        let forward = (box_.corners[0][1] + box_.corners[1][1]) * 0.5 - wrist_y;
+        let back = wrist_y - (box_.corners[2][1] + box_.corners[3][1]) * 0.5;
         let top_width = (box_.corners[1][0] - box_.corners[0][0]).abs();
         let side_height = (box_.corners[3][1] - box_.corners[0][1]).abs();
 

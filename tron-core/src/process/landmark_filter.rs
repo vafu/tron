@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-use tron_api::{NoContext, Processor};
-use crate::roi::mediapipe::HandLandmarks;
 use super::one_euro::OneEuroFilter;
+use crate::roi::mediapipe::HandLandmarks;
+use tron_api::{NoContext, Processor};
 
 pub struct MediaPipeLandmarkFilter {
     filters: Vec<OneEuroFilter>,
@@ -31,7 +31,11 @@ impl MediaPipeLandmarkFilter {
 impl Processor<Option<HandLandmarks>> for MediaPipeLandmarkFilter {
     type Output = Option<HandLandmarks>;
 
-    fn process(&mut self, input: Option<HandLandmarks>, _context: NoContext) -> anyhow::Result<Self::Output> {
+    fn process(
+        &mut self,
+        input: Option<HandLandmarks>,
+        _context: NoContext,
+    ) -> anyhow::Result<Self::Output> {
         let Some(mut landmarks) = input else {
             self.reset();
             return Ok(None);

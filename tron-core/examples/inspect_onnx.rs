@@ -4,7 +4,7 @@ use ort::value::ValueType;
 fn main() -> anyhow::Result<()> {
     let model_path = "models/hand_detector/model.onnx";
     let session = Session::builder()?.commit_from_file(model_path)?;
-    
+
     println!("Outputs:");
     for (i, output) in session.outputs().iter().enumerate() {
         let shape = match output.dtype() {
@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
         };
         println!("  Index {}: name={}, shape={}", i, output.name(), shape);
     }
-    
+
     if let Ok(metadata) = session.metadata() {
         println!("\nMetadata:");
         if let Ok(keys) = metadata.custom_keys() {
@@ -24,6 +24,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }

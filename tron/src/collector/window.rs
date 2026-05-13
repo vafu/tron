@@ -179,7 +179,10 @@ where
                     }
                 };
 
-                let landmarks = self.filter.process(raw_landmarks, NoContext).unwrap_or(None);
+                let landmarks = self
+                    .filter
+                    .process(raw_landmarks, NoContext)
+                    .unwrap_or(None);
 
                 if let Some(ref l) = landmarks {
                     let valid_count = l.points.iter().filter(|p| p.x.is_finite()).count();
@@ -187,7 +190,8 @@ where
                 }
 
                 let landmark_roi = landmarks.as_ref().and_then(|landmarks| {
-                    let roi = landmarks.bounding_roi(rgb.meta.size, self.landmarks.config().roi_scale);
+                    let roi =
+                        landmarks.bounding_roi(rgb.meta.size, self.landmarks.config().roi_scale);
                     if let Some(ref r) = roi {
                         tracing::info!("Landmark ROI: {:?}", r.rect);
                     }

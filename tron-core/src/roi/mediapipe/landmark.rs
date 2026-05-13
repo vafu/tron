@@ -4,7 +4,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
-use tron_api::{Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size};
+use tron_api::{
+    Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size,
+};
 
 const DEFAULT_INPUT_SIZE: usize = 224;
 const WRIST_LANDMARK: usize = 0;
@@ -15,6 +17,8 @@ const MEDIAPIPE_LANDMARK_SCALE: f32 = 1.0;
 const MEDIAPIPE_LANDMARK_SHIFT_Y: f32 = -0.1;
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH: f32 = 0.20;
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH: f32 = 0.10;
+const PINKY_MCP_EDGE_EPSILON_PX: f32 = 4.0;
+const PINKY_MCP_EDGE_EXTRA_MARGIN_OF_PALM_WIDTH: f32 = 0.12;
 
 #[derive(Clone, Debug)]
 pub struct MediaPipeHandLandmarkConfig {
@@ -61,7 +65,10 @@ pub enum Handedness {
 impl HandLandmarks {
     pub fn bounding_roi(&self, frame_size: Size, scale: f32) -> Option<RoiResult> {
         let margin = landmark_silhouette_margin(&self.points).unwrap_or(0.0);
-        landmark_bounds(&self.points).and_then(|bounds| bounds.to_rect_roi(frame_size, scale, margin))
+        landmark_bounds(&self.points).and_then(|bounds| {
+            let edge_margin = pinky_edge_margin(&self.points, bounds).unwrap_or_default();
+            bounds.to_rect_roi(frame_size, scale, margin, edge_margin)
+        })
     }
 }
 
@@ -73,17 +80,34 @@ struct LandmarkBounds {
     y1: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct EdgeMargin {
+    left: f32,
+    right: f32,
+}
+
 impl LandmarkBounds {
-    fn to_rect_roi(self, frame_size: Size, scale: f32, margin: f32) -> Option<RoiResult> {
+    fn to_rect_roi(
+        self,
+        frame_size: Size,
+        scale: f32,
+        margin: f32,
+        edge_margin: EdgeMargin,
+    ) -> Option<RoiResult> {
         let scale = scale.max(1.0);
         let margin = margin.max(0.0);
-        let w = ((self.x1 - self.x0) + margin * 2.0) * scale;
+        let left_margin = margin + edge_margin.left.max(0.0);
+        let right_margin = margin + edge_margin.right.max(0.0);
+        let w = ((self.x1 - self.x0) + left_margin + right_margin) * scale;
         let h = ((self.y1 - self.y0) + margin * 2.0) * scale;
-        let cx = (self.x0 + self.x1) * 0.5;
+        let cx = (self.x0 - left_margin + self.x1 + right_margin) * 0.5;
         let cy = (self.y0 + self.y1) * 0.5;
 
         let x0 = (cx - w * 0.5).floor().max(0.0).min(frame_size.width as f32) as u32;
-        let y0 = (cy - h * 0.5).floor().max(0.0).min(frame_size.height as f32) as u32;
+        let y0 = (cy - h * 0.5)
+            .floor()
+            .max(0.0)
+            .min(frame_size.height as f32) as u32;
         let x1 = (cx + w * 0.5).ceil().max(0.0).min(frame_size.width as f32) as u32;
         let y1 = (cy + h * 0.5).ceil().max(0.0).min(frame_size.height as f32) as u32;
 
@@ -97,8 +121,16 @@ impl LandmarkBounds {
         };
 
         tracing::debug!(
-            "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, margin={:.1}, rect={:?}",
-            self.x0, self.y0, self.x1, self.y1, scale, margin, rect
+            "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, margin={:.1}, pinky_edge=({:.1}, {:.1}), rect={:?}",
+            self.x0,
+            self.y0,
+            self.x1,
+            self.y1,
+            scale,
+            margin,
+            edge_margin.left,
+            edge_margin.right,
+            rect
         );
 
         if rect.size.width == 0 || rect.size.height == 0 {
@@ -134,16 +166,34 @@ impl LandmarkBounds {
     }
 }
 
+fn pinky_edge_margin(points: &[HandLandmark; 21], bounds: LandmarkBounds) -> Option<EdgeMargin> {
+    let pinky = points[PINKY_MCP_LANDMARK];
+    if !pinky.x.is_finite() || !pinky.y.is_finite() {
+        return None;
+    }
+    let palm_width = distance(points[INDEX_MCP_LANDMARK], points[PINKY_MCP_LANDMARK])?;
+    let extra = palm_width * PINKY_MCP_EDGE_EXTRA_MARGIN_OF_PALM_WIDTH;
+    if extra <= 0.0 || !extra.is_finite() {
+        return None;
+    }
+
+    let mut margin = EdgeMargin::default();
+    if (bounds.x1 - pinky.x).abs() <= PINKY_MCP_EDGE_EPSILON_PX {
+        margin.right = extra;
+    }
+    if (pinky.x - bounds.x0).abs() <= PINKY_MCP_EDGE_EPSILON_PX {
+        margin.left = extra;
+    }
+    Some(margin)
+}
+
 fn landmark_silhouette_margin(points: &[HandLandmark; 21]) -> Option<f32> {
     let palm_width = distance(points[INDEX_MCP_LANDMARK], points[PINKY_MCP_LANDMARK]);
     let palm_length = distance(points[WRIST_LANDMARK], points[MIDDLE_MCP_LANDMARK]);
     let margin = palm_width
         .map(|width| width * LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH)
         .into_iter()
-        .chain(
-            palm_length
-                .map(|length| length * LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH),
-        )
+        .chain(palm_length.map(|length| length * LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH))
         .fold(0.0_f32, f32::max);
     (margin > 0.0 && margin.is_finite()).then_some(margin)
 }
@@ -291,7 +341,11 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
             };
             tracing::trace!(
                 "landmark {}: crop=({:.4}, {:.4}), frame=({:.1}, {:.1})",
-                i, nx, ny, points[i].x, points[i].y
+                i,
+                nx,
+                ny,
+                points[i].x,
+                points[i].y
             );
         }
 
@@ -363,14 +417,14 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
 
     // 2. Fallback to shape-based signatures if names were generic/missing
     if landmarks_output.is_none() {
-        landmarks_output = outputs
-            .iter()
-            .position(|o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 63));
+        landmarks_output = outputs.iter().position(
+            |o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 63),
+        );
     }
     if presence_output.is_none() {
-        presence_output = outputs
-            .iter()
-            .position(|o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 1));
+        presence_output = outputs.iter().position(
+            |o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 1),
+        );
     }
 
     // 3. Absolute fallbacks (Index 0 is usually landmarks in most conversions)

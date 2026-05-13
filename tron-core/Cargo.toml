@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytemuck.workspace = true
+glam.workspace = true
 opencv = { workspace = true, features = ["calib3d", "clang-runtime", "imgproc"] }
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "ndarray"] }
 pollster.workspace = true

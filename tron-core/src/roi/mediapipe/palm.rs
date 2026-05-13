@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use glam::Vec2;
 use ort::session::Session;
 use ort::value::TensorRef;
 use tron_api::{
@@ -131,18 +132,18 @@ impl Detection {
 
         // MediaPipe Hand Landmark model expects fingertips at the top (y=0).
         // The orientation axis should point from middle-MCP to wrist.
-        let axis_y = [wrist[0] - middle_mcp[0], wrist[1] - middle_mcp[1]];
-        let palm_len = hypot(axis_y[0], axis_y[1]);
+        let axis_y = wrist - middle_mcp;
+        let palm_len = axis_y.length();
         if palm_len < 1.0 || !palm_len.is_finite() {
             return self
                 .to_frame_rect(resize, frame_size, fingertip_scale)
                 .map(rect_to_oriented_box);
         }
 
-        let axis_y = [axis_y[0] / palm_len, axis_y[1] / palm_len];
+        let axis_y = axis_y / palm_len;
         // axis_x should be axis_y rotated 90 deg clockwise to maintain right-handedness.
         // If axis_y is backward (down), axis_x should be right.
-        let axis_x = [axis_y[1], -axis_y[0]];
+        let axis_x = Vec2::new(axis_y.y, -axis_y.x);
         let raw_width = (self.width.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
         let raw_height = (self.height.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
 
@@ -159,39 +160,37 @@ impl Detection {
         // If axis_y is backward, then forward = -axis_y.
         // center + 0.5 * height * (-axis_y) = center - 0.5 * height * axis_y.
         // So we want + shift * height * axis_y if shift is -0.5.
-        let center = add(center, mul(axis_y, MEDIAPIPE_PALM_SHIFT_Y * raw_height));
+        let center = center + axis_y * (MEDIAPIPE_PALM_SHIFT_Y * raw_height);
 
         let side = raw_width.max(raw_height).max(1.0) * fingertip_scale.max(1.0);
         let half_side = side * 0.5;
         let corners = [
-            add(
-                add(center, mul(axis_x, -half_side)),
-                mul(axis_y, -half_side),
-            ),
-            add(add(center, mul(axis_x, half_side)), mul(axis_y, -half_side)),
-            add(add(center, mul(axis_x, half_side)), mul(axis_y, half_side)),
-            add(add(center, mul(axis_x, -half_side)), mul(axis_y, half_side)),
-        ];
+            center - axis_x * half_side - axis_y * half_side,
+            center + axis_x * half_side - axis_y * half_side,
+            center + axis_x * half_side + axis_y * half_side,
+            center - axis_x * half_side + axis_y * half_side,
+        ]
+        .map(|corner| corner.to_array());
         Some(OrientedBoundingBox { corners })
     }
 
-    fn center_to_frame(self, resize: ResizeMapping) -> [f32; 2] {
-        [
+    fn center_to_frame(self, resize: ResizeMapping) -> Vec2 {
+        Vec2::new(
             self.x_center * resize.scale * INPUT_SIZE as f32 - resize.pad_x,
             self.y_center * resize.scale * INPUT_SIZE as f32 - resize.pad_y,
-        ]
+        )
     }
 
-    fn keypoint_to_frame(self, index: usize, resize: ResizeMapping) -> [f32; 2] {
+    fn keypoint_to_frame(self, index: usize, resize: ResizeMapping) -> Vec2 {
         self.keypoint_to_frame_point(self.keypoints[index], resize)
     }
 
-    fn keypoint_to_frame_point(self, point: [f32; 2], resize: ResizeMapping) -> [f32; 2] {
+    fn keypoint_to_frame_point(self, point: [f32; 2], resize: ResizeMapping) -> Vec2 {
         let [x, y] = point;
-        [
+        Vec2::new(
             x * resize.scale * INPUT_SIZE as f32 - resize.pad_x,
             y * resize.scale * INPUT_SIZE as f32 - resize.pad_y,
-        ]
+        )
     }
 }
 
@@ -316,18 +315,6 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     OrientedBoundingBox {
         corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
     }
-}
-
-fn hypot(x: f32, y: f32) -> f32 {
-    (x * x + y * y).sqrt()
-}
-
-fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    [a[0] + b[0], a[1] + b[1]]
-}
-
-fn mul(v: [f32; 2], scale: f32) -> [f32; 2] {
-    [v[0] * scale, v[1] * scale]
 }
 
 fn generate_palm_anchors() -> Vec<Anchor> {

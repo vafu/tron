@@ -2,19 +2,19 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use glam::Vec2;
 use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
-use tron_api::{
-    Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size,
-};
+use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
 
 const DEFAULT_INPUT_SIZE: usize = 224;
+const HAND_LANDMARKS: usize = 21;
+const LANDMARK_COORDS: usize = 3;
 const WRIST_LANDMARK: usize = 0;
 const INDEX_MCP_LANDMARK: usize = 5;
 const MIDDLE_MCP_LANDMARK: usize = 9;
 const PINKY_MCP_LANDMARK: usize = 17;
 const MEDIAPIPE_LANDMARK_SCALE: f32 = 1.0;
-const MEDIAPIPE_LANDMARK_SHIFT_Y: f32 = -0.1;
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH: f32 = 0.20;
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH: f32 = 0.10;
 const PINKY_MCP_EDGE_EPSILON_PX: f32 = 4.0;
@@ -48,6 +48,13 @@ pub struct HandLandmark {
     pub z: f32,
 }
 
+impl HandLandmark {
+    fn xy(self) -> Option<Vec2> {
+        let point = Vec2::new(self.x, self.y);
+        point.is_finite().then_some(point)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HandLandmarks {
     pub points: [HandLandmark; 21],
@@ -64,130 +71,91 @@ pub enum Handedness {
 
 impl HandLandmarks {
     pub fn bounding_roi(&self, frame_size: Size, scale: f32) -> Option<RoiResult> {
-        let margin = landmark_silhouette_margin(&self.points).unwrap_or(0.0);
-        landmark_bounds(&self.points).and_then(|bounds| {
-            let edge_margin = pinky_edge_margin(&self.points, bounds).unwrap_or_default();
-            bounds.to_rect_roi(frame_size, scale, margin, edge_margin)
-        })
+        landmark_bounding_roi(&self.points, frame_size, scale)
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct LandmarkBounds {
+fn landmark_bounding_roi(
+    points: &[HandLandmark; HAND_LANDMARKS],
+    frame_size: Size,
+    scale: f32,
+) -> Option<RoiResult> {
+    let (min, max) = landmark_bounds(points)?;
+    let [x0, y0] = min.to_array();
+    let [x1, y1] = max.to_array();
+    let scale = scale.max(1.0);
+    let margin = landmark_silhouette_margin(points).unwrap_or(0.0).max(0.0);
+    let (left_edge_margin, right_edge_margin) =
+        pinky_edge_margins(points, min.x, max.x).unwrap_or((0.0, 0.0));
+    let left_margin = margin + left_edge_margin.max(0.0);
+    let right_margin = margin + right_edge_margin.max(0.0);
+    let w = ((x1 - x0) + left_margin + right_margin) * scale;
+    let h = ((y1 - y0) + margin * 2.0) * scale;
+    let cx = (x0 - left_margin + x1 + right_margin) * 0.5;
+    let cy = (y0 + y1) * 0.5;
+
+    let rect_x0 = (cx - w * 0.5).floor().max(0.0).min(frame_size.width as f32) as u32;
+    let rect_y0 = (cy - h * 0.5)
+        .floor()
+        .max(0.0)
+        .min(frame_size.height as f32) as u32;
+    let rect_x1 = (cx + w * 0.5).ceil().max(0.0).min(frame_size.width as f32) as u32;
+    let rect_y1 = (cy + h * 0.5).ceil().max(0.0).min(frame_size.height as f32) as u32;
+
+    let rect = Rect {
+        x: rect_x0,
+        y: rect_y0,
+        size: Size {
+            width: rect_x1.saturating_sub(rect_x0),
+            height: rect_y1.saturating_sub(rect_y0),
+        },
+    };
+
+    tracing::debug!(
+        "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, margin={:.1}, pinky_edge=({:.1}, {:.1}), rect={:?}",
+        x0,
+        y0,
+        x1,
+        y1,
+        scale,
+        margin,
+        left_edge_margin,
+        right_edge_margin,
+        rect
+    );
+
+    (rect.size.width > 0 && rect.size.height > 0).then_some(RoiResult {
+        rect,
+        oriented_box: None,
+    })
+}
+
+fn pinky_edge_margins(
+    points: &[HandLandmark; HAND_LANDMARKS],
     x0: f32,
-    y0: f32,
     x1: f32,
-    y1: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct EdgeMargin {
-    left: f32,
-    right: f32,
-}
-
-impl LandmarkBounds {
-    fn to_rect_roi(
-        self,
-        frame_size: Size,
-        scale: f32,
-        margin: f32,
-        edge_margin: EdgeMargin,
-    ) -> Option<RoiResult> {
-        let scale = scale.max(1.0);
-        let margin = margin.max(0.0);
-        let left_margin = margin + edge_margin.left.max(0.0);
-        let right_margin = margin + edge_margin.right.max(0.0);
-        let w = ((self.x1 - self.x0) + left_margin + right_margin) * scale;
-        let h = ((self.y1 - self.y0) + margin * 2.0) * scale;
-        let cx = (self.x0 - left_margin + self.x1 + right_margin) * 0.5;
-        let cy = (self.y0 + self.y1) * 0.5;
-
-        let x0 = (cx - w * 0.5).floor().max(0.0).min(frame_size.width as f32) as u32;
-        let y0 = (cy - h * 0.5)
-            .floor()
-            .max(0.0)
-            .min(frame_size.height as f32) as u32;
-        let x1 = (cx + w * 0.5).ceil().max(0.0).min(frame_size.width as f32) as u32;
-        let y1 = (cy + h * 0.5).ceil().max(0.0).min(frame_size.height as f32) as u32;
-
-        let rect = Rect {
-            x: x0,
-            y: y0,
-            size: Size {
-                width: x1.saturating_sub(x0),
-                height: y1.saturating_sub(y0),
-            },
-        };
-
-        tracing::debug!(
-            "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, margin={:.1}, pinky_edge=({:.1}, {:.1}), rect={:?}",
-            self.x0,
-            self.y0,
-            self.x1,
-            self.y1,
-            scale,
-            margin,
-            edge_margin.left,
-            edge_margin.right,
-            rect
-        );
-
-        if rect.size.width == 0 || rect.size.height == 0 {
-            return None;
-        }
-
-        Some(RoiResult {
-            rect,
-            oriented_box: None,
-        })
-    }
-
-    fn to_axis_aligned_roi(self, frame_size: Size, scale: f32) -> Option<RoiResult> {
-        let scale = scale.max(1.0);
-        let cx = (self.x0 + self.x1) * 0.5;
-        let cy = (self.y0 + self.y1) * 0.5;
-        let side = (self.x1 - self.x0).max(self.y1 - self.y0).max(1.0) * scale;
-        let half = side * 0.5;
-        let oriented_box = OrientedBoundingBox {
-            corners: [
-                [cx - half, cy - half],
-                [cx + half, cy - half],
-                [cx + half, cy + half],
-                [cx - half, cy + half],
-            ],
-        };
-        oriented_box
-            .enclosing_rect(frame_size)
-            .map(|rect| RoiResult {
-                rect,
-                oriented_box: Some(oriented_box),
-            })
-    }
-}
-
-fn pinky_edge_margin(points: &[HandLandmark; 21], bounds: LandmarkBounds) -> Option<EdgeMargin> {
-    let pinky = points[PINKY_MCP_LANDMARK];
-    if !pinky.x.is_finite() || !pinky.y.is_finite() {
-        return None;
-    }
+) -> Option<(f32, f32)> {
+    let pinky = points[PINKY_MCP_LANDMARK].xy()?;
     let palm_width = distance(points[INDEX_MCP_LANDMARK], points[PINKY_MCP_LANDMARK])?;
     let extra = palm_width * PINKY_MCP_EDGE_EXTRA_MARGIN_OF_PALM_WIDTH;
     if extra <= 0.0 || !extra.is_finite() {
         return None;
     }
 
-    let mut margin = EdgeMargin::default();
-    if (bounds.x1 - pinky.x).abs() <= PINKY_MCP_EDGE_EPSILON_PX {
-        margin.right = extra;
-    }
-    if (pinky.x - bounds.x0).abs() <= PINKY_MCP_EDGE_EPSILON_PX {
-        margin.left = extra;
-    }
-    Some(margin)
+    let left = if (pinky.x - x0).abs() <= PINKY_MCP_EDGE_EPSILON_PX {
+        extra
+    } else {
+        0.0
+    };
+    let right = if (x1 - pinky.x).abs() <= PINKY_MCP_EDGE_EPSILON_PX {
+        extra
+    } else {
+        0.0
+    };
+    Some((left, right))
 }
 
-fn landmark_silhouette_margin(points: &[HandLandmark; 21]) -> Option<f32> {
+fn landmark_silhouette_margin(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<f32> {
     let palm_width = distance(points[INDEX_MCP_LANDMARK], points[PINKY_MCP_LANDMARK]);
     let palm_length = distance(points[WRIST_LANDMARK], points[MIDDLE_MCP_LANDMARK]);
     let margin = palm_width
@@ -199,30 +167,21 @@ fn landmark_silhouette_margin(points: &[HandLandmark; 21]) -> Option<f32> {
 }
 
 fn distance(a: HandLandmark, b: HandLandmark) -> Option<f32> {
-    if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
-        return None;
-    }
-    Some(hypot(a.x - b.x, a.y - b.y))
+    Some((a.xy()? - b.xy()?).length())
 }
 
-fn landmark_bounds(points: &[HandLandmark; 21]) -> Option<LandmarkBounds> {
-    let mut x0 = f32::INFINITY;
-    let mut y0 = f32::INFINITY;
-    let mut x1 = f32::NEG_INFINITY;
-    let mut y1 = f32::NEG_INFINITY;
+fn landmark_bounds(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<(Vec2, Vec2)> {
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    let mut found = false;
     for point in *points {
-        if !point.x.is_finite() || !point.y.is_finite() {
-            continue;
+        if let Some(point) = point.xy() {
+            min = min.min(point);
+            max = max.max(point);
+            found = true;
         }
-        x0 = x0.min(point.x);
-        y0 = y0.min(point.y);
-        x1 = x1.max(point.x);
-        y1 = y1.max(point.y);
     }
-    if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
-        return None;
-    }
-    Some(LandmarkBounds { x0, y0, x1, y1 })
+    found.then_some((min, max))
 }
 
 pub struct MediaPipeHandLandmarkProcessor {
@@ -291,7 +250,7 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
         let (_, landmarks) = outputs[self.landmarks_output]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe hand landmarks")?;
-        if landmarks.len() < 63 {
+        if landmarks.len() < HAND_LANDMARKS * LANDMARK_COORDS {
             return Ok(None);
         }
 
@@ -306,13 +265,14 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
 
         let raw_max = landmarks
             .iter()
-            .take(63)
+            .take(HAND_LANDMARKS * LANDMARK_COORDS)
             .fold(0.0_f32, |max, value| max.max(value.abs()));
-        let mut points = [HandLandmark::default(); 21];
-        for i in 0..21 {
-            let x = landmarks[i * 3];
-            let y = landmarks[i * 3 + 1];
-            let z = landmarks[i * 3 + 2];
+        let mut points = [HandLandmark::default(); HAND_LANDMARKS];
+        for i in 0..HAND_LANDMARKS {
+            let base = i * LANDMARK_COORDS;
+            let x = landmarks[base];
+            let y = landmarks[base + 1];
+            let z = landmarks[base + 2];
             let (nx, ny, nz) = if raw_max < 2.0 {
                 (x, y, z)
             } else {
@@ -334,9 +294,10 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 continue;
             }
 
+            let [frame_x, frame_y] = crop.frame_point(nx, ny).to_array();
             points[i] = HandLandmark {
-                x: crop.frame_x(nx, ny),
-                y: crop.frame_y(nx, ny),
+                x: frame_x,
+                y: frame_y,
                 z: nz,
             };
             tracing::trace!(
@@ -437,35 +398,31 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
 
 #[derive(Clone, Copy, Debug)]
 struct Crop {
-    origin: [f32; 2],
-    x_axis: [f32; 2],
-    y_axis: [f32; 2],
+    origin: Vec2,
+    x_axis: Vec2,
+    y_axis: Vec2,
 }
 
 impl Crop {
-    fn frame_x(self, x: f32, y: f32) -> f32 {
-        self.origin[0] + x * self.x_axis[0] + y * self.y_axis[0]
-    }
-
-    fn frame_y(self, x: f32, y: f32) -> f32 {
-        self.origin[1] + x * self.x_axis[1] + y * self.y_axis[1]
+    fn frame_point(self, x: f32, y: f32) -> Vec2 {
+        self.origin + x * self.x_axis + y * self.y_axis
     }
 }
 
 fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Crop {
     let Some(roi) = roi else {
         return Crop {
-            origin: [0.0, 0.0],
-            x_axis: [frame_size.width as f32, 0.0],
-            y_axis: [0.0, frame_size.height as f32],
+            origin: Vec2::ZERO,
+            x_axis: Vec2::new(frame_size.width as f32, 0.0),
+            y_axis: Vec2::new(0.0, frame_size.height as f32),
         };
     };
     if let Some(oriented_box) = roi.oriented_box {
-        let [c0, c1, _, c3] = oriented_box.corners;
+        let [c0, c1, _, c3] = oriented_box.corners.map(Vec2::from_array);
         return Crop {
             origin: c0,
-            x_axis: [c1[0] - c0[0], c1[1] - c0[1]],
-            y_axis: [c3[0] - c0[0], c3[1] - c0[1]],
+            x_axis: c1 - c0,
+            y_axis: c3 - c0,
         };
     }
 
@@ -479,9 +436,9 @@ fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Crop {
     let x1 = (cx + half).clamp(0.0, frame_w);
     let y1 = (cy + half).clamp(0.0, frame_h);
     Crop {
-        origin: [x0, y0],
-        x_axis: [x1 - x0, 0.0],
-        y_axis: [0.0, y1 - y0],
+        origin: Vec2::new(x0, y0),
+        x_axis: Vec2::new(x1 - x0, 0.0),
+        y_axis: Vec2::new(0.0, y1 - y0),
     }
 }
 
@@ -501,8 +458,9 @@ fn preprocess_bgra(
         let ny = (y as f32 + 0.5) / input_sizef;
         for x in 0..input_size {
             let nx = (x as f32 + 0.5) / input_sizef;
-            let src_xf = crop.frame_x(nx, ny) - 0.5;
-            let src_yf = crop.frame_y(nx, ny) - 0.5;
+            let [src_xf, src_yf] = crop.frame_point(nx, ny).to_array();
+            let src_xf = src_xf - 0.5;
+            let src_yf = src_yf - 0.5;
 
             let x0 = src_xf.floor() as isize;
             let y0 = src_yf.floor() as isize;
@@ -534,22 +492,6 @@ fn preprocess_bgra(
         }
     }
     Ok(())
-}
-
-fn dot(a: [f32; 2], b: [f32; 2]) -> f32 {
-    a[0] * b[0] + a[1] * b[1]
-}
-
-fn hypot(x: f32, y: f32) -> f32 {
-    (x * x + y * y).sqrt()
-}
-
-fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    [a[0] + b[0], a[1] + b[1]]
-}
-
-fn mul(v: [f32; 2], scale: f32) -> [f32; 2] {
-    [v[0] * scale, v[1] * scale]
 }
 
 #[cfg(test)]

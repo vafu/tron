@@ -3,9 +3,24 @@ use tron_api::{Frame, FrameMeta, OwnedFrame, PixelFormat};
 
 use crate::projection::FrameProjectionMap;
 
-pub(super) fn project_frame(frame: Frame<'_>, map: &FrameProjectionMap) -> Result<OwnedFrame> {
+pub(super) fn project_frame_into(
+    frame: Frame<'_>,
+    map: &FrameProjectionMap,
+    output: &mut OwnedFrame,
+) -> Result<()> {
     let output_size = map.output_size;
-    let mut data = vec![0_u8; output_size.width as usize * output_size.height as usize];
+    let len = (output_size.width as usize)
+        .checked_mul(output_size.height as usize)
+        .ok_or_else(|| anyhow::anyhow!("projected frame output size overflow"))?;
+    output.meta = FrameMeta {
+        size: output_size,
+        ..frame.meta
+    };
+    output.format = PixelFormat::Gray8;
+    output.stride = output_size.width as usize;
+    output.data.resize(len, 0);
+    output.data.fill(0);
+
     let pixels = frame.view()?;
     let channel_at = |x: usize, y: usize, channel: usize| -> Result<u8> {
         pixels.get([y, x, channel]).copied().ok_or_else(|| {
@@ -24,7 +39,7 @@ pub(super) fn project_frame(frame: Frame<'_>, map: &FrameProjectionMap) -> Resul
             let Some((src_x, src_y)) = map.get(x, y) else {
                 continue;
             };
-            data[dst_row_start + x as usize] = match frame.format {
+            output.data[dst_row_start + x as usize] = match frame.format {
                 PixelFormat::Gray8 => channel_at(src_x as usize, src_y as usize, 0)?,
                 PixelFormat::Bgra8 => {
                     ((channel_at(src_x as usize, src_y as usize, 0)? as u16
@@ -36,13 +51,5 @@ pub(super) fn project_frame(frame: Frame<'_>, map: &FrameProjectionMap) -> Resul
         }
     }
 
-    Ok(OwnedFrame {
-        meta: FrameMeta {
-            size: output_size,
-            ..frame.meta
-        },
-        format: PixelFormat::Gray8,
-        stride: output_size.width as usize,
-        data,
-    })
+    Ok(())
 }

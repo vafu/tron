@@ -56,10 +56,17 @@ impl OpenCvRoiDetector {
             width > 0 && height > 0,
             "OpenCV ROI detector got empty input"
         );
-        pack_gray8(input, &mut self.packed)?;
-
-        let src = Mat::new_rows_cols_with_data(height as i32, width as i32, &self.packed)
-            .context("wrap ROI detector input as OpenCV Mat")?;
+        let src = if can_wrap_gray8(input) {
+            // SAFETY: direct OpenCV wrapping only uses raw storage when the
+            // logical view is identical to tightly packed physical storage.
+            let raw = unsafe { input.buffer.raw() };
+            Mat::new_rows_cols_with_data(height as i32, width as i32, &raw[..width * height])
+                .context("wrap ROI detector input as OpenCV Mat")?
+        } else {
+            pack_gray8(input, &mut self.packed)?;
+            Mat::new_rows_cols_with_data(height as i32, width as i32, &self.packed)
+                .context("wrap packed ROI detector input as OpenCV Mat")?
+        };
         imgproc::threshold(
             &src,
             &mut self.thresholded,
@@ -180,6 +187,13 @@ fn pack_gray8(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn can_wrap_gray8(frame: Frame<'_>) -> bool {
+    frame.format == PixelFormat::Gray8
+        && frame.buffer.stride() == frame.meta.size.width as usize
+        && !frame.buffer.is_horizontally_mirrored()
+        && !frame.buffer.is_vertically_mirrored()
 }
 
 fn padded_rect(rect: Rect, padding: u32, bounds: Size) -> Rect {

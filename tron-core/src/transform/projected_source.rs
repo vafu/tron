@@ -3,7 +3,7 @@ use tron_api::{Frame, FrameSource, OpenedCameraInfo, OwnedFrame, ProjectionMapSo
 
 use crate::projection::FrameProjectionMap;
 
-use super::frame_projection::project_frame;
+use super::frame_projection::project_frame_into;
 
 pub struct ProjectedFrameSource<S, M> {
     source: S,
@@ -66,7 +66,13 @@ where
             self.current_map.output_size,
             self.info.size
         );
-        self.current = Some(project_frame(frame, &self.current_map)?);
+        let current = self.current.get_or_insert_with(|| OwnedFrame {
+            meta: frame.meta,
+            format: tron_api::PixelFormat::Gray8,
+            stride: self.current_map.output_size.width as usize,
+            data: Vec::new(),
+        });
+        project_frame_into(frame, &self.current_map, current)?;
         Ok(self.current.as_ref().map(|frame| frame.as_frame()))
     }
 }

@@ -38,16 +38,29 @@ impl OpenCvCheckerboardDetector {
         }
     }
 
-    fn gray_mat(&mut self, frame: Frame<'_>) -> Result<BoxedRef<'_, Mat>> {
+    fn gray_mat<'a>(&'a mut self, frame: Frame<'a>) -> Result<BoxedRef<'a, Mat>> {
         match frame.format {
             PixelFormat::Gray8 => {
-                pack_view(frame, 1, &mut self.packed)?;
-                Mat::new_rows_cols_with_data(
-                    frame.meta.size.height as i32,
-                    frame.meta.size.width as i32,
-                    &self.packed,
-                )
-                .context("wrap checkerboard Gray8 input as OpenCV Mat")
+                if can_wrap_gray8(frame) {
+                    // SAFETY: direct OpenCV wrapping only uses raw storage when
+                    // logical and physical Gray8 rows are identical.
+                    let raw = unsafe { frame.buffer.raw() };
+                    let len = frame.meta.size.width as usize * frame.meta.size.height as usize;
+                    Mat::new_rows_cols_with_data(
+                        frame.meta.size.height as i32,
+                        frame.meta.size.width as i32,
+                        &raw[..len],
+                    )
+                    .context("wrap checkerboard Gray8 input as OpenCV Mat")
+                } else {
+                    pack_view(frame, 1, &mut self.packed)?;
+                    Mat::new_rows_cols_with_data(
+                        frame.meta.size.height as i32,
+                        frame.meta.size.width as i32,
+                        &self.packed,
+                    )
+                    .context("wrap packed checkerboard Gray8 input as OpenCV Mat")
+                }
             }
             PixelFormat::Bgra8 => {
                 pack_gray_from_bgra(frame, &mut self.packed)?;
@@ -374,6 +387,13 @@ fn pack_gray_from_bgra(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn can_wrap_gray8(frame: Frame<'_>) -> bool {
+    frame.format == PixelFormat::Gray8
+        && frame.buffer.stride() == frame.meta.size.width as usize
+        && !frame.buffer.is_horizontally_mirrored()
+        && !frame.buffer.is_vertically_mirrored()
 }
 
 fn cv_object_points(samples: &[CheckerboardSample]) -> Vector<Vector<Point3f>> {

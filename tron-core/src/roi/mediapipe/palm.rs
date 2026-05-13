@@ -12,10 +12,8 @@ const SCORE_CLIP: f32 = 100.0;
 const PALM_KEYPOINTS: usize = 7;
 const WRIST_KEYPOINT: usize = 0;
 const MIDDLE_MCP_KEYPOINT: usize = 2;
-const WRIST_BACK_PADDING: f32 = 0.06;
-const WRIST_BACK_MAX_EXTENSION: f32 = 0.12;
-const SIDE_PADDING: f32 = 0.16;
-const MIN_HALF_WIDTH: f32 = 0.45;
+const MEDIAPIPE_PALM_SHIFT_Y: f32 = -0.5;
+const MEDIAPIPE_PALM_SCALE: f32 = 2.6;
 
 #[derive(Clone, Debug)]
 pub struct MediaPipeRoiConfig {
@@ -27,7 +25,7 @@ impl Default for MediaPipeRoiConfig {
     fn default() -> Self {
         Self {
             min_score: 0.75,
-            box_scale: 1.0,
+            box_scale: MEDIAPIPE_PALM_SCALE,
         }
     }
 }
@@ -127,6 +125,7 @@ impl Detection {
         frame_size: Size,
         fingertip_scale: f32,
     ) -> Option<OrientedBoundingBox> {
+        let center = self.center_to_frame(resize);
         let wrist = self.keypoint_to_frame(WRIST_KEYPOINT, resize);
         let middle_mcp = self.keypoint_to_frame(MIDDLE_MCP_KEYPOINT, resize);
         let axis_y = [middle_mcp[0] - wrist[0], middle_mcp[1] - wrist[1]];
@@ -139,34 +138,31 @@ impl Detection {
 
         let axis_y = [axis_y[0] / palm_len, axis_y[1] / palm_len];
         let axis_x = [-axis_y[1], axis_y[0]];
-        let mut min_x = 0.0f32;
-        let mut max_x = 0.0f32;
-        let mut min_y = 0.0f32;
-        let mut max_y = palm_len;
-        for point in self.keypoints {
-            let point = self.keypoint_to_frame_point(point, resize);
-            let delta = [point[0] - wrist[0], point[1] - wrist[1]];
-            let x = dot(delta, axis_x);
-            let y = dot(delta, axis_y);
-            if x.is_finite() && y.is_finite() {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-        }
-        let half_width =
-            min_x.abs().max(max_x.abs()).max(palm_len * MIN_HALF_WIDTH) + palm_len * SIDE_PADDING;
-        let back = (-min_y).max(0.0).min(palm_len * WRIST_BACK_MAX_EXTENSION)
-            + palm_len * WRIST_BACK_PADDING;
-        let forward = max_y.max(palm_len) * fingertip_scale.max(1.0);
+        let raw_width = (self.width.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
+        let raw_height = (self.height.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
+        // MediaPipe's RectTransformationCalculator shifts before square/scale.
+        // Its hand graph uses shift_y=-0.5; in our wrist->middle-MCP local axis
+        // that means moving the crop center toward the fingertips.
+        let center = add(center, mul(axis_y, -MEDIAPIPE_PALM_SHIFT_Y * raw_height));
+        let side = raw_width.max(raw_height).max(1.0) * fingertip_scale.max(1.0);
+        let half_side = side * 0.5;
         let corners = [
-            add(add(wrist, mul(axis_x, -half_width)), mul(axis_y, -back)),
-            add(add(wrist, mul(axis_x, half_width)), mul(axis_y, -back)),
-            add(add(wrist, mul(axis_x, half_width)), mul(axis_y, forward)),
-            add(add(wrist, mul(axis_x, -half_width)), mul(axis_y, forward)),
+            add(
+                add(center, mul(axis_x, -half_side)),
+                mul(axis_y, -half_side),
+            ),
+            add(add(center, mul(axis_x, half_side)), mul(axis_y, -half_side)),
+            add(add(center, mul(axis_x, half_side)), mul(axis_y, half_side)),
+            add(add(center, mul(axis_x, -half_side)), mul(axis_y, half_side)),
         ];
         Some(OrientedBoundingBox { corners })
+    }
+
+    fn center_to_frame(self, resize: ResizeMapping) -> [f32; 2] {
+        [
+            self.x_center * resize.scale * INPUT_SIZE as f32 - resize.pad_x,
+            self.y_center * resize.scale * INPUT_SIZE as f32 - resize.pad_y,
+        ]
     }
 
     fn keypoint_to_frame(self, index: usize, resize: ResizeMapping) -> [f32; 2] {
@@ -290,10 +286,6 @@ fn mul(v: [f32; 2], scale: f32) -> [f32; 2] {
     [v[0] * scale, v[1] * scale]
 }
 
-fn dot(a: [f32; 2], b: [f32; 2]) -> f32 {
-    a[0] * b[0] + a[1] * b[1]
-}
-
 fn generate_palm_anchors() -> Vec<Anchor> {
     let strides = [8usize, 16, 32, 32, 32];
     let mut anchors = Vec::with_capacity(2944);
@@ -348,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn oriented_palm_box_extends_toward_fingertips() {
+    fn oriented_palm_box_uses_mediapipe_shifted_square_transform() {
         let detection = Detection {
             score: 1.0,
             x_center: 0.5,
@@ -376,13 +368,16 @@ mod tests {
                     width: INPUT_SIZE as u32,
                     height: INPUT_SIZE as u32,
                 },
-                2.5,
+                MEDIAPIPE_PALM_SCALE,
             )
             .unwrap();
         let wrist_y = 0.5 * INPUT_SIZE as f32;
         let back = wrist_y - (box_.corners[0][1] + box_.corners[1][1]) * 0.5;
         let forward = (box_.corners[2][1] + box_.corners[3][1]) * 0.5 - wrist_y;
+        let top_width = (box_.corners[1][0] - box_.corners[0][0]).abs();
+        let side_height = (box_.corners[3][1] - box_.corners[0][1]).abs();
 
-        assert!(forward > back * 10.0);
+        assert!(forward > back * 2.0);
+        assert!((top_width - side_height).abs() < 1.0);
     }
 }

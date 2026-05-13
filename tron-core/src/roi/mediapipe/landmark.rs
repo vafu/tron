@@ -4,9 +4,13 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
-use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
+use tron_api::{Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, RoiResult, Size};
 
 const DEFAULT_INPUT_SIZE: usize = 224;
+const WRIST_LANDMARK: usize = 0;
+const MIDDLE_MCP_LANDMARK: usize = 9;
+const MEDIAPIPE_LANDMARK_SCALE: f32 = 2.0;
+const MEDIAPIPE_LANDMARK_SHIFT_Y: f32 = -0.1;
 
 #[derive(Clone, Debug)]
 pub struct MediaPipeHandLandmarkConfig {
@@ -18,7 +22,7 @@ impl Default for MediaPipeHandLandmarkConfig {
     fn default() -> Self {
         Self {
             min_presence: 0.5,
-            roi_scale: 1.2,
+            roi_scale: MEDIAPIPE_LANDMARK_SCALE,
         }
     }
 }
@@ -26,7 +30,7 @@ impl Default for MediaPipeHandLandmarkConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct MediaPipeHandLandmarkInput<'a> {
     pub frame: Frame<'a>,
-    pub roi: Option<Rect>,
+    pub roi: Option<RoiResult>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -52,7 +56,14 @@ pub enum Handedness {
 
 impl HandLandmarks {
     pub fn bounding_roi(&self, frame_size: Size, scale: f32) -> Option<RoiResult> {
-        landmark_bounds(&self.points).and_then(|bounds| bounds.to_rect(frame_size, scale))
+        landmark_bounds(&self.points).and_then(|bounds| {
+            bounds.to_mediapipe_roi(
+                self.points[WRIST_LANDMARK],
+                self.points[MIDDLE_MCP_LANDMARK],
+                frame_size,
+                scale,
+            )
+        })
     }
 }
 
@@ -65,29 +76,92 @@ struct LandmarkBounds {
 }
 
 impl LandmarkBounds {
-    fn to_rect(self, frame_size: Size, scale: f32) -> Option<RoiResult> {
+    fn to_mediapipe_roi(
+        self,
+        wrist: HandLandmark,
+        middle_mcp: HandLandmark,
+        frame_size: Size,
+        scale: f32,
+    ) -> Option<RoiResult> {
         if self.x1 <= self.x0 || self.y1 <= self.y0 {
             return None;
         }
 
+        let axis_y = [middle_mcp.x - wrist.x, middle_mcp.y - wrist.y];
+        let axis_len = hypot(axis_y[0], axis_y[1]);
+        if axis_len < 1.0 || !axis_len.is_finite() {
+            return self.to_axis_aligned_roi(frame_size, scale);
+        }
+        let axis_y = [axis_y[0] / axis_len, axis_y[1] / axis_len];
+        let axis_x = [-axis_y[1], axis_y[0]];
+        let origin = [wrist.x, wrist.y];
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for corner in [
+            [self.x0, self.y0],
+            [self.x1, self.y0],
+            [self.x1, self.y1],
+            [self.x0, self.y1],
+        ] {
+            let delta = [corner[0] - origin[0], corner[1] - origin[1]];
+            let x = dot(delta, axis_x);
+            let y = dot(delta, axis_y);
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+            return None;
+        }
+        let raw_width = (max_x - min_x).max(1.0);
+        let raw_height = (max_y - min_y).max(1.0);
+        let center_x = (min_x + max_x) * 0.5;
+        let center_y = (min_y + max_y) * 0.5 - MEDIAPIPE_LANDMARK_SHIFT_Y * raw_height;
+        let side = raw_width.max(raw_height) * scale.max(1.0);
+        let half_side = side * 0.5;
+        let center = add(add(origin, mul(axis_x, center_x)), mul(axis_y, center_y));
+        let oriented_box = OrientedBoundingBox {
+            corners: [
+                add(
+                    add(center, mul(axis_x, -half_side)),
+                    mul(axis_y, -half_side),
+                ),
+                add(add(center, mul(axis_x, half_side)), mul(axis_y, -half_side)),
+                add(add(center, mul(axis_x, half_side)), mul(axis_y, half_side)),
+                add(add(center, mul(axis_x, -half_side)), mul(axis_y, half_side)),
+            ],
+        };
+        oriented_box
+            .enclosing_rect(frame_size)
+            .map(|rect| RoiResult {
+                rect,
+                oriented_box: Some(oriented_box),
+            })
+    }
+
+    fn to_axis_aligned_roi(self, frame_size: Size, scale: f32) -> Option<RoiResult> {
         let scale = scale.max(1.0);
         let cx = (self.x0 + self.x1) * 0.5;
         let cy = (self.y0 + self.y1) * 0.5;
-        let width = (self.x1 - self.x0) * scale;
-        let height = (self.y1 - self.y0) * scale;
-        let half_w = width.max(1.0) * 0.5;
-        let half_h = height.max(1.0) * 0.5;
-        rect_from_f32(
-            cx - half_w,
-            cy - half_h,
-            cx + half_w,
-            cy + half_h,
-            frame_size,
-        )
-        .map(|rect| RoiResult {
-            rect,
-            oriented_box: None,
-        })
+        let side = (self.x1 - self.x0).max(self.y1 - self.y0).max(1.0) * scale;
+        let half = side * 0.5;
+        let oriented_box = OrientedBoundingBox {
+            corners: [
+                [cx - half, cy - half],
+                [cx + half, cy - half],
+                [cx + half, cy + half],
+                [cx - half, cy + half],
+            ],
+        };
+        oriented_box
+            .enclosing_rect(frame_size)
+            .map(|rect| RoiResult {
+                rect,
+                oriented_box: Some(oriented_box),
+            })
     }
 }
 
@@ -169,7 +243,7 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
             "MediaPipe hand landmark processor expects BGRA8 RGB frames, got {:?}",
             input.frame.format
         );
-        let crop = square_crop(input.roi, input.frame.meta.size);
+        let crop = crop_from_roi(input.roi, input.frame.meta.size);
         preprocess_bgra(input.frame, crop, self.input_size, &mut self.input)?;
         let tensor =
             TensorRef::from_array_view(([1, 3, self.input_size, self.input_size], &*self.input))?;
@@ -209,8 +283,8 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 )
             };
             points[i] = HandLandmark {
-                x: (crop.x + nx * crop.w) * input.frame.meta.size.width as f32,
-                y: (crop.y + ny * crop.h) * input.frame.meta.size.height as f32,
+                x: crop.frame_x(nx, ny),
+                y: crop.frame_y(nx, ny),
                 z: nz,
             };
         }
@@ -276,36 +350,51 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
 
 #[derive(Clone, Copy, Debug)]
 struct Crop {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+    origin: [f32; 2],
+    x_axis: [f32; 2],
+    y_axis: [f32; 2],
 }
 
-fn square_crop(roi: Option<Rect>, frame_size: Size) -> Crop {
+impl Crop {
+    fn frame_x(self, x: f32, y: f32) -> f32 {
+        self.origin[0] + x * self.x_axis[0] + y * self.y_axis[0]
+    }
+
+    fn frame_y(self, x: f32, y: f32) -> f32 {
+        self.origin[1] + x * self.x_axis[1] + y * self.y_axis[1]
+    }
+}
+
+fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Crop {
     let Some(roi) = roi else {
         return Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1.0,
-            h: 1.0,
+            origin: [0.0, 0.0],
+            x_axis: [frame_size.width as f32, 0.0],
+            y_axis: [0.0, frame_size.height as f32],
         };
     };
+    if let Some(oriented_box) = roi.oriented_box {
+        let [c0, c1, _, c3] = oriented_box.corners;
+        return Crop {
+            origin: c0,
+            x_axis: [c1[0] - c0[0], c1[1] - c0[1]],
+            y_axis: [c3[0] - c0[0], c3[1] - c0[1]],
+        };
+    }
 
     let frame_w = frame_size.width.max(1) as f32;
     let frame_h = frame_size.height.max(1) as f32;
-    let cx = (roi.x as f32 + roi.size.width as f32 * 0.5) / frame_w;
-    let cy = (roi.y as f32 + roi.size.height as f32 * 0.5) / frame_h;
-    let half_px = roi.size.width.max(roi.size.height) as f32 * 0.5;
-    let half_x = (half_px / frame_w).clamp(0.0, 0.5);
-    let half_y = (half_px / frame_h).clamp(0.0, 0.5);
-    let w = (2.0 * half_x).min(1.0);
-    let h = (2.0 * half_y).min(1.0);
+    let cx = roi.rect.x as f32 + roi.rect.size.width as f32 * 0.5;
+    let cy = roi.rect.y as f32 + roi.rect.size.height as f32 * 0.5;
+    let half = roi.rect.size.width.max(roi.rect.size.height) as f32 * 0.5;
+    let x0 = (cx - half).clamp(0.0, frame_w);
+    let y0 = (cy - half).clamp(0.0, frame_h);
+    let x1 = (cx + half).clamp(0.0, frame_w);
+    let y1 = (cy + half).clamp(0.0, frame_h);
     Crop {
-        x: (cx - half_x).clamp(0.0, 1.0 - w),
-        y: (cy - half_y).clamp(0.0, 1.0 - h),
-        w,
-        h,
+        origin: [x0, y0],
+        x_axis: [x1 - x0, 0.0],
+        y_axis: [0.0, y1 - y0],
     }
 }
 
@@ -320,17 +409,19 @@ fn preprocess_bgra(
     anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
     let pixels = frame.view()?;
     output.fill(0.0);
-    let source_wf = source_w as f32;
-    let source_hf = source_h as f32;
     let input_sizef = input_size as f32;
     for y in 0..input_size {
-        let src_y = ((crop.y * source_hf) + (y as f32 + 0.5) * crop.h * source_hf / input_sizef)
-            .floor()
-            .clamp(0.0, (source_h - 1) as f32) as usize;
+        let ny = (y as f32 + 0.5) / input_sizef;
         for x in 0..input_size {
-            let src_x = ((crop.x * source_wf) + (x as f32 + 0.5) * crop.w * source_wf / input_sizef)
+            let nx = (x as f32 + 0.5) / input_sizef;
+            let src_x = crop
+                .frame_x(nx, ny)
                 .floor()
                 .clamp(0.0, (source_w - 1) as f32) as usize;
+            let src_y = crop
+                .frame_y(nx, ny)
+                .floor()
+                .clamp(0.0, (source_h - 1) as f32) as usize;
             let dst = y * input_size + x;
             output[dst] = pixels[[src_y, src_x, 2]] as f32 / 255.0;
             output[input_size * input_size + dst] = pixels[[src_y, src_x, 1]] as f32 / 255.0;
@@ -340,21 +431,20 @@ fn preprocess_bgra(
     Ok(())
 }
 
-fn rect_from_f32(x0: f32, y0: f32, x1: f32, y1: f32, bounds: Size) -> Option<Rect> {
-    let x0 = x0.floor().max(0.0).min(bounds.width as f32) as u32;
-    let y0 = y0.floor().max(0.0).min(bounds.height as f32) as u32;
-    let x1 = x1.ceil().max(0.0).min(bounds.width as f32) as u32;
-    let y1 = y1.ceil().max(0.0).min(bounds.height as f32) as u32;
-    let width = x1.saturating_sub(x0);
-    let height = y1.saturating_sub(y0);
-    if width == 0 || height == 0 {
-        return None;
-    }
-    Some(Rect {
-        x: x0,
-        y: y0,
-        size: Size { width, height },
-    })
+fn dot(a: [f32; 2], b: [f32; 2]) -> f32 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+fn hypot(x: f32, y: f32) -> f32 {
+    (x * x + y * y).sqrt()
+}
+
+fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+fn mul(v: [f32; 2], scale: f32) -> [f32; 2] {
+    [v[0] * scale, v[1] * scale]
 }
 
 #[cfg(test)]

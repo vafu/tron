@@ -1,13 +1,18 @@
 use anyhow::Result;
 use tron_api::{Frame, PixelFormat, Renderer, RoiResult, Size};
+use tron_core::render::hand_landmarks_overlay::{
+    HandLandmarksOverlayRenderer, HandLandmarksOverlayView,
+};
 use tron_core::render::roi_overlay::{RoiOverlayRenderer, RoiOverlayView};
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
+use tron_core::roi::mediapipe::HandLandmarks;
 
 pub struct CollectorView<'a> {
     pub rgb: Option<Frame<'a>>,
     pub ir: Option<Frame<'a>>,
     pub rgb_palm_roi: Option<RoiResult>,
     pub rgb_roi: Option<RoiResult>,
+    pub rgb_landmarks: Option<&'a HandLandmarks>,
 }
 
 pub struct CollectorRenderer {
@@ -16,6 +21,7 @@ pub struct CollectorRenderer {
     ir: WgpuFrameRenderer,
     rgb_palm_roi_overlay: RoiOverlayRenderer,
     rgb_roi_overlay: RoiOverlayRenderer,
+    rgb_landmarks_overlay: HandLandmarksOverlayRenderer,
 }
 
 impl CollectorRenderer {
@@ -27,6 +33,7 @@ impl CollectorRenderer {
             ir: WgpuFrameRenderer::new(surface.device(), format),
             rgb_palm_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
             rgb_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
+            rgb_landmarks_overlay: HandLandmarksOverlayRenderer::new(surface.device(), format),
             surface,
         })
     }
@@ -53,6 +60,7 @@ impl<'a> Renderer<CollectorView<'a>> for CollectorRenderer {
                 a: 1.0,
             },
             |surface| {
+                let rgbrect = NdcRect::FULL;
                 let mut pass = surface.pass;
                 if let Some(rgb) = view.rgb {
                     self.rgb.render(WgpuFrameView {
@@ -60,7 +68,7 @@ impl<'a> Renderer<CollectorView<'a>> for CollectorRenderer {
                         queue: surface.queue,
                         pass: &mut pass,
                         frame: rgb,
-                        rect: NdcRect::LEFT,
+                        rect: rgbrect,
                         target_size: surface.size,
                     })?;
                     if let Some(rgb_palm_roi) = view.rgb_palm_roi {
@@ -72,7 +80,7 @@ impl<'a> Renderer<CollectorView<'a>> for CollectorRenderer {
                             oriented_roi: rgb_palm_roi.oriented_box,
                             color: [1.0, 0.62, 0.08, 1.0],
                             frame_size: rgb.meta.size,
-                            rect: NdcRect::LEFT,
+                            rect: rgbrect,
                             target_size: surface.size,
                         })?;
                     }
@@ -85,9 +93,21 @@ impl<'a> Renderer<CollectorView<'a>> for CollectorRenderer {
                             oriented_roi: None,
                             color: [0.2, 1.0, 0.2, 1.0],
                             frame_size: rgb.meta.size,
-                            rect: NdcRect::LEFT,
+                            rect: rgbrect,
                             target_size: surface.size,
                         })?;
+                    }
+                    if let Some(landmarks) = view.rgb_landmarks {
+                        self.rgb_landmarks_overlay
+                            .render(HandLandmarksOverlayView {
+                                device: surface.device,
+                                queue: surface.queue,
+                                pass: &mut pass,
+                                landmarks,
+                                frame_size: rgb.meta.size,
+                                rect: rgbrect,
+                                target_size: surface.size,
+                            })?;
                     }
                 }
                 if let Some(ir) = view.ir {

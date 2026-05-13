@@ -56,7 +56,7 @@ impl Default for PlaygroundPipelineConfig {
             exposure_roi_threshold: 250,
             rgb_mediapipe_model: None,
             rgb_mediapipe_min_score: 0.75,
-            rgb_mediapipe_box_scale: 1.0,
+            rgb_mediapipe_box_scale: 2.6,
         }
     }
 }

@@ -109,12 +109,6 @@ unsafe fn detach_frame_lifetime<'a>(frame: Frame<'_>) -> Frame<'a> {
     Frame {
         meta: frame.meta,
         format: frame.format,
-        buffer: tron_api::ViewBuffer {
-            size: frame.buffer.size,
-            stride: frame.buffer.stride,
-            data: unsafe {
-                std::slice::from_raw_parts(frame.buffer.data.as_ptr(), frame.buffer.data.len())
-            },
-        },
+        buffer: unsafe { frame.buffer.detach_lifetime() },
     }
 }

@@ -62,6 +62,7 @@ pub struct FrameDiffProcessor {
     config: FrameDiffConfig,
     previous: Option<OwnedFrame>,
     output: Option<OwnedFrame>,
+    current: Vec<u8>,
     scratch: Vec<u8>,
 }
 
@@ -71,6 +72,7 @@ impl FrameDiffProcessor {
             config,
             previous: None,
             output: None,
+            current: Vec::new(),
             scratch: Vec::new(),
         }
     }
@@ -85,15 +87,20 @@ impl FrameDiffProcessor {
             frame.buffer.stride == frame.meta.size.width as usize,
             "frame diff requires tightly packed Gray8 frames"
         );
+        let first_frame = self.previous.is_none();
         self.ensure_buffers(frame)?;
+        pack_gray8(frame, &mut self.current)?;
 
         let previous = self.previous.as_mut().expect("previous buffer initialized");
         let output = self.output.as_mut().expect("output buffer initialized");
+        if first_frame {
+            previous.data.copy_from_slice(&self.current);
+        }
 
         compute_diff(
             self.config.mode,
             self.config.reference_policy,
-            frame.buffer.data,
+            &self.current,
             &previous.data,
             &mut self.scratch,
         )
@@ -117,34 +124,34 @@ impl FrameDiffProcessor {
         }
 
         previous.meta = frame.meta;
-        previous.data.copy_from_slice(frame.buffer.data);
+        previous.data.copy_from_slice(&self.current);
 
         Ok(output.as_frame())
     }
 
     fn ensure_buffers(&mut self, frame: Frame<'_>) -> Result<()> {
-        let len = frame.buffer.data.len();
+        let len = frame.meta.size.width as usize * frame.meta.size.height as usize;
 
         if let Some(previous) = &self.previous {
             anyhow::ensure!(
                 previous.meta.size == frame.meta.size
                     && previous.format == frame.format
-                    && previous.stride == frame.buffer.stride
+                    && previous.stride == frame.meta.size.width as usize
                     && previous.data.len() == len,
                 "frame diff shape changed from {:?}/stride {}/len {} to {:?}/stride {}/len {}",
                 previous.meta.size,
                 previous.stride,
                 previous.data.len(),
                 frame.meta.size,
-                frame.buffer.stride,
+                frame.meta.size.width,
                 len
             );
         } else {
             self.previous = Some(OwnedFrame {
                 meta: frame.meta,
                 format: frame.format,
-                stride: frame.buffer.stride,
-                data: frame.buffer.data.to_vec(),
+                stride: frame.meta.size.width as usize,
+                data: vec![0; len],
             });
         }
 
@@ -152,9 +159,12 @@ impl FrameDiffProcessor {
             self.output = Some(OwnedFrame {
                 meta: frame.meta,
                 format: PixelFormat::Gray8,
-                stride: frame.buffer.stride,
+                stride: frame.meta.size.width as usize,
                 data: vec![0; len],
             });
+        }
+        if self.current.len() != len {
+            self.current.resize(len, 0);
         }
         if self.scratch.len() != len {
             self.scratch.resize(len, 0);
@@ -162,6 +172,15 @@ impl FrameDiffProcessor {
 
         Ok(())
     }
+}
+
+fn pack_gray8(frame: Frame<'_>, output: &mut [u8]) -> Result<()> {
+    let width = frame.meta.size.width as usize;
+    for (y, row) in frame.rows().enumerate() {
+        let start = y * width;
+        row.copy_to(&mut output[start..start + width])?;
+    }
+    Ok(())
 }
 
 fn compute_diff(

@@ -141,7 +141,7 @@ impl WgpuFrameRenderer {
         });
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("tron-frame-vertices"),
-            contents: bytemuck::cast_slice(&quad(-1.0, -1.0, 1.0, 1.0)),
+            contents: bytemuck::cast_slice(&quad(-1.0, -1.0, 1.0, 1.0, false, false)),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -160,7 +160,14 @@ impl<'frame, 'pass> Renderer<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer
     fn render(&mut self, view: WgpuFrameView<'frame, 'pass>) -> Result<()> {
         let frame = view.frame;
         self.ensure_texture(view.device, frame.meta.size);
-        self.update_vertices(view.queue, frame.meta.size, view.rect, view.target_size);
+        self.update_vertices(
+            view.queue,
+            frame.meta.size,
+            view.rect,
+            view.target_size,
+            frame.buffer.is_horizontally_mirrored(),
+            frame.buffer.is_vertically_mirrored(),
+        );
 
         let (data, stride) = match frame.format {
             PixelFormat::Bgra8 => {
@@ -281,12 +288,14 @@ impl WgpuFrameRenderer {
         frame_size: Size,
         rect: NdcRect,
         target_size: Size,
+        flip_x: bool,
+        flip_y: bool,
     ) {
         let [x0, y0, x1, y1] = letterbox(frame_size, rect, target_size);
         queue.write_buffer(
             &self.vertex_buffer,
             0,
-            bytemuck::cast_slice(&quad(x0, y0, x1, y1)),
+            bytemuck::cast_slice(&quad(x0, y0, x1, y1, flip_x, flip_y)),
         );
     }
 }
@@ -326,31 +335,33 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-fn quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Vertex; 6] {
+fn quad(x0: f32, y0: f32, x1: f32, y1: f32, flip_x: bool, flip_y: bool) -> [Vertex; 6] {
+    let [u0, u1] = if flip_x { [1.0, 0.0] } else { [0.0, 1.0] };
+    let [v0, v1] = if flip_y { [1.0, 0.0] } else { [0.0, 1.0] };
     [
         Vertex {
             position: [x0, y1],
-            uv: [0.0, 0.0],
+            uv: [u0, v0],
         },
         Vertex {
             position: [x0, y0],
-            uv: [0.0, 1.0],
+            uv: [u0, v1],
         },
         Vertex {
             position: [x1, y0],
-            uv: [1.0, 1.0],
+            uv: [u1, v1],
         },
         Vertex {
             position: [x0, y1],
-            uv: [0.0, 0.0],
+            uv: [u0, v0],
         },
         Vertex {
             position: [x1, y0],
-            uv: [1.0, 1.0],
+            uv: [u1, v1],
         },
         Vertex {
             position: [x1, y1],
-            uv: [1.0, 0.0],
+            uv: [u1, v0],
         },
     ]
 }

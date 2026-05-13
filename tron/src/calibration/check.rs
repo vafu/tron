@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use tron_api::ViewRow;
 use tron_api::{Frame, FrameMeta, FrameSource, PixelFormat, ProjectionMapSource, Renderer, Size};
 use tron_core::StereoFrameSource;
 use tron_core::projection::FrameProjectionMap;
@@ -333,31 +334,34 @@ impl CompositeFrame {
     }
 }
 
-fn bgra_at(row: &[u8], format: PixelFormat, x: usize) -> Result<[u8; 4]> {
+fn bgra_at(row: ViewRow<'_>, format: PixelFormat, x: usize) -> Result<[u8; 4]> {
     match format {
         PixelFormat::Bgra8 => {
             let offset = x * 4;
             Ok([
-                row[offset],
-                row[offset + 1],
-                row[offset + 2],
-                row[offset + 3],
+                row.byte(offset)?,
+                row.byte(offset + 1)?,
+                row.byte(offset + 2)?,
+                row.byte(offset + 3)?,
             ])
         }
         PixelFormat::Gray8 => {
-            let value = row[x];
+            let value = row.byte(x)?;
             Ok([value, value, value, 255])
         }
         PixelFormat::Yuyv422 => anyhow::bail!("calibration check does not support YUYV422"),
     }
 }
 
-fn gray_at(row: &[u8], format: PixelFormat, x: usize) -> Result<u8> {
+fn gray_at(row: ViewRow<'_>, format: PixelFormat, x: usize) -> Result<u8> {
     match format {
-        PixelFormat::Gray8 => Ok(row[x]),
+        PixelFormat::Gray8 => Ok(row.byte(x)?),
         PixelFormat::Bgra8 => {
             let offset = x * 4;
-            Ok(((row[offset] as u16 + row[offset + 1] as u16 + row[offset + 2] as u16) / 3) as u8)
+            Ok(((row.byte(offset)? as u16
+                + row.byte(offset + 1)? as u16
+                + row.byte(offset + 2)? as u16)
+                / 3) as u8)
         }
         PixelFormat::Yuyv422 => anyhow::bail!("calibration check does not support YUYV422"),
     }

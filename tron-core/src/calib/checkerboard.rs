@@ -344,7 +344,7 @@ fn pack_view(frame: Frame<'_>, bytes_per_pixel: usize, packed: &mut Vec<u8>) -> 
     packed.resize(len, 0);
     for (y, row) in frame.rows().enumerate() {
         let start = y * row_len;
-        packed[start..start + row_len].copy_from_slice(row);
+        row.copy_to(&mut packed[start..start + row_len])?;
     }
     Ok(())
 }
@@ -360,9 +360,9 @@ fn pack_gray_from_bgra(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
         let dst_row_start = y * width;
         for x in 0..width {
             let src = x * 4;
-            let b = row[src] as u16;
-            let g = row[src + 1] as u16;
-            let r = row[src + 2] as u16;
+            let b = row.byte(src)? as u16;
+            let g = row.byte(src + 1)? as u16;
+            let r = row.byte(src + 2)? as u16;
             packed[dst_row_start + x] = ((r + g + b) / 3) as u8;
         }
     }

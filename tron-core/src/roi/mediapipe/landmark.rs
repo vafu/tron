@@ -315,12 +315,7 @@ fn preprocess_bgra(
     let source_w = frame.meta.size.width as usize;
     let source_h = frame.meta.size.height as usize;
     anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
-    anyhow::ensure!(
-        frame.buffer.stride >= source_w * 4,
-        "BGRA frame stride {} is smaller than width {}",
-        frame.buffer.stride,
-        source_w * 4
-    );
+    let pixels = frame.bgra8_view()?;
     output.fill(0.0);
     let source_wf = source_w as f32;
     let source_hf = source_h as f32;
@@ -333,11 +328,10 @@ fn preprocess_bgra(
             let src_x = ((crop.x * source_wf) + (x as f32 + 0.5) * crop.w * source_wf / input_sizef)
                 .floor()
                 .clamp(0.0, (source_w - 1) as f32) as usize;
-            let src = src_y * frame.buffer.stride + src_x * 4;
             let dst = y * input_size + x;
-            output[dst] = frame.buffer.data[src + 2] as f32 / 255.0;
-            output[input_size * input_size + dst] = frame.buffer.data[src + 1] as f32 / 255.0;
-            output[2 * input_size * input_size + dst] = frame.buffer.data[src] as f32 / 255.0;
+            output[dst] = pixels[[src_y, src_x, 2]] as f32 / 255.0;
+            output[input_size * input_size + dst] = pixels[[src_y, src_x, 1]] as f32 / 255.0;
+            output[2 * input_size * input_size + dst] = pixels[[src_y, src_x, 0]] as f32 / 255.0;
         }
     }
     Ok(())

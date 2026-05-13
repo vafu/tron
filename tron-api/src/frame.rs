@@ -1,8 +1,9 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use ndarray::{ArrayView2, ArrayView3};
 
-use crate::view_buffer::{ViewBuffer, ViewBufferMut, ViewRows};
+use crate::view_buffer::{ViewBuffer, ViewBufferMut, ViewRow, ViewRows};
 use crate::{OpenedCameraInfo, Rect, Size};
 
 pub type FrameId = u64;
@@ -87,7 +88,7 @@ impl<'a> Frame<'a> {
         })
     }
 
-    pub fn row(&self, y: u32) -> Result<&'a [u8]> {
+    pub fn row(&self, y: u32) -> Result<ViewRow<'a>> {
         self.buffer.row(y as usize)
     }
 
@@ -117,6 +118,45 @@ impl<'a> Frame<'a> {
                 .buffer
                 .roi(x, rect.y as usize, buffer_size(self.format, rect.size)?)?,
         })
+    }
+
+    pub fn mirrored(self, horizontal: bool, vertical: bool) -> Result<Self> {
+        Ok(Self {
+            meta: self.meta,
+            format: self.format,
+            buffer: self.buffer.mirrored(
+                mirror_bytes_per_pixel(self.format)?,
+                horizontal,
+                vertical,
+            )?,
+        })
+    }
+
+    pub fn gray8_view(&self) -> Result<ArrayView2<'a, u8>> {
+        anyhow::ensure!(
+            self.format == PixelFormat::Gray8,
+            "expected Gray8 frame, got {:?}",
+            self.format
+        );
+        self.buffer.as_array2()
+    }
+
+    pub fn bgra8_view(&self) -> Result<ArrayView3<'a, u8>> {
+        anyhow::ensure!(
+            self.format == PixelFormat::Bgra8,
+            "expected BGRA8 frame, got {:?}",
+            self.format
+        );
+        self.buffer.as_array3(4)
+    }
+
+    pub fn yuyv422_view(&self) -> Result<ArrayView3<'a, u8>> {
+        anyhow::ensure!(
+            self.format == PixelFormat::Yuyv422,
+            "expected YUYV422 frame, got {:?}",
+            self.format
+        );
+        self.buffer.as_array3(2)
     }
 }
 
@@ -201,6 +241,16 @@ pub fn bytes_per_pixel(format: PixelFormat) -> Result<usize> {
     }
 }
 
+pub fn mirror_bytes_per_pixel(format: PixelFormat) -> Result<usize> {
+    match format {
+        PixelFormat::Gray8 => Ok(1),
+        PixelFormat::Bgra8 => Ok(4),
+        PixelFormat::Yuyv422 => {
+            anyhow::bail!("YUYV422 horizontal mirroring needs explicit chroma-pair handling")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,12 +299,13 @@ mod tests {
             }
         );
         assert_eq!(frame.buffer.stride, 4);
-        assert_eq!(frame.row(0).unwrap(), &[11, 12]);
-        assert_eq!(frame.row(1).unwrap(), &[21, 22]);
-        assert_eq!(
-            frame.rows().collect::<Vec<_>>(),
-            vec![&[11, 12][..], &[21, 22][..]]
-        );
+        assert_eq!(frame.row(0).unwrap().as_slice().unwrap(), &[11, 12]);
+        assert_eq!(frame.row(1).unwrap().as_slice().unwrap(), &[21, 22]);
+        let rows = frame
+            .rows()
+            .map(|row| row.as_slice().unwrap().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![11, 12], vec![21, 22]]);
     }
 
     #[test]

@@ -63,7 +63,7 @@ impl ClippedExposureRoiDetector {
         for y in search.y..y_end {
             let row = frame.row(y)?;
             for (xi, x) in (search.x..x_end).enumerate() {
-                if row[x as usize] >= self.config.threshold {
+                if row.byte(x as usize)? >= self.config.threshold {
                     clipped += 1;
                     self.heights[xi] = self.heights[xi].saturating_add(1);
                 } else {

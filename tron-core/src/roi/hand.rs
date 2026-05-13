@@ -108,7 +108,7 @@ fn motion_overlap(rect: Rect, motion: Option<Frame<'_>>) -> Result<u32> {
     for y in rect.y..y_end {
         let row = motion.row(y)?;
         for x in rect.x..x_end {
-            if row[x as usize] > 0 {
+            if row.byte(x as usize)? > 0 {
                 count += 1;
             }
         }

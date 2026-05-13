@@ -130,27 +130,18 @@ fn gray8_stats(frame: Frame<'_>, roi: Rect) -> Option<BrightnessStats> {
         })
         .clamp_to(size);
     let frame_pixels = size.width as usize * size.height as usize;
-    if frame.buffer.stride < size.width as usize
-        || frame.buffer.data.len() < frame.buffer.stride * size.height as usize
-    {
-        return None;
+    let mut frame_sum = 0_u64;
+    for row in frame.rows() {
+        for x in 0..size.width as usize {
+            frame_sum += row.byte(x).ok()? as u64;
+        }
     }
-
-    let frame_sum = frame
-        .buffer
-        .data
-        .iter()
-        .take(frame_pixels)
-        .map(|v| *v as u64)
-        .sum::<u64>();
     let mut roi_sum = 0_u64;
     for y in roi.y..roi.y + roi.size.height {
-        let row_start = y as usize * frame.buffer.stride + roi.x as usize;
-        let row_end = row_start + roi.size.width as usize;
-        roi_sum += frame.buffer.data[row_start..row_end]
-            .iter()
-            .map(|v| *v as u64)
-            .sum::<u64>();
+        let row = frame.row(y).ok()?;
+        for x in roi.x..roi.x + roi.size.width {
+            roi_sum += row.byte(x as usize).ok()? as u64;
+        }
     }
 
     Some(BrightnessStats {

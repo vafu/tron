@@ -173,7 +173,7 @@ fn pack_gray8(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
     packed.resize(len, 0);
     for (y, row) in frame.rows().enumerate() {
         let start = y * width;
-        packed[start..start + width].copy_from_slice(row);
+        row.copy_to(&mut packed[start..start + width])?;
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Frame, FrameMeta, OwnedFrame, PixelFormat};
+use tron_api::{Frame, FrameMeta, OwnedFrame, PixelFormat, ViewRow};
 
 use crate::projection::FrameProjectionMap;
 
@@ -28,12 +28,15 @@ pub(super) fn project_frame(frame: Frame<'_>, map: &FrameProjectionMap) -> Resul
     })
 }
 
-fn gray_at(row: &[u8], format: PixelFormat, x: usize) -> Result<u8> {
+fn gray_at(row: ViewRow<'_>, format: PixelFormat, x: usize) -> Result<u8> {
     match format {
-        PixelFormat::Gray8 => Ok(row[x]),
+        PixelFormat::Gray8 => Ok(row.byte(x)?),
         PixelFormat::Bgra8 => {
             let offset = x * 4;
-            Ok(((row[offset] as u16 + row[offset + 1] as u16 + row[offset + 2] as u16) / 3) as u8)
+            Ok(((row.byte(offset)? as u16
+                + row.byte(offset + 1)? as u16
+                + row.byte(offset + 2)? as u16)
+                / 3) as u8)
         }
         PixelFormat::Yuyv422 => anyhow::bail!("projection transform does not support YUYV422"),
     }

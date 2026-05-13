@@ -60,10 +60,17 @@ impl FrameSource for LatestFrameSource {
 }
 
 fn own_frame(frame: Frame<'_>) -> OwnedFrame {
+    let row_len = frame.buffer.size.width as usize;
+    let mut data = vec![0; row_len * frame.buffer.size.height as usize];
+    for (y, row) in frame.rows().enumerate() {
+        let start = y * row_len;
+        row.copy_to(&mut data[start..start + row_len])
+            .expect("frame rows must match frame buffer width");
+    }
     OwnedFrame {
         meta: frame.meta,
         format: frame.format,
-        stride: frame.buffer.stride,
-        data: frame.buffer.data.to_vec(),
+        stride: row_len,
+        data,
     }
 }

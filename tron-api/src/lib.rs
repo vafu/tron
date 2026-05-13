@@ -77,4 +77,6 @@ pub use process::{InPlaceFrameProcessor, Processor};
 pub use projection::{DepthProjectionMap, ProjectionMapSource};
 pub use render::{NoContext, Renderer};
 pub use roi::{RoiCandidate, RoiProcessor, RoiResult};
-pub use view_buffer::{ViewBuffer, ViewBufferMut, ViewRows};
+pub use view_buffer::{
+    LinearViewBuffer, MirroredViewBuffer, ViewBuffer, ViewBufferMut, ViewRow, ViewRows,
+};

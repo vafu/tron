@@ -43,12 +43,13 @@ struct Cli {
     rgb_mediapipe_box_scale: f32,
 
     /// MediaPipe-style scale applied to the landmark tracking rect.
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 1.2)]
     rgb_mediapipe_landmark_roi_scale: f32,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
     run(Cli::parse()).await
 }
 

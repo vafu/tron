@@ -103,6 +103,7 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     let y0 = rect.y as f32;
     let x1 = (rect.x + rect.size.width) as f32;
     let y1 = (rect.y + rect.size.height) as f32;
+    // Corners in a loop: TL, TR, BR, BL
     OrientedBoundingBox {
         corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
     }

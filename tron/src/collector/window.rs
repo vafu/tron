@@ -43,7 +43,6 @@ struct WindowApp<S> {
     mediapipe: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
     filter: MediaPipeLandmarkFilter,
-    last_landmark_roi: Option<RoiResult>,
     rendered_frame_id: Option<u64>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
@@ -67,7 +66,6 @@ where
             mediapipe: MediaPipeRoiProcessor::new(mediapipe_model, mediapipe_config)?,
             landmarks: MediaPipeHandLandmarkProcessor::new(landmark_model, landmark_config)?,
             filter: MediaPipeLandmarkFilter::default(),
-            last_landmark_roi: None,
             rendered_frame_id: None,
             window_id: None,
             window: None,
@@ -159,7 +157,7 @@ where
                     return;
                 }
 
-                // Per-frame detection: disable tracking loop for now.
+                // Per-frame detection: fresh palm detection on every frame for maximum stability.
                 let palm_roi: Option<RoiResult> = match self.mediapipe.process(rgb, NoContext) {
                     Ok(roi) => roi,
                     Err(err) => {
@@ -183,8 +181,17 @@ where
 
                 let landmarks = self.filter.process(raw_landmarks, NoContext).unwrap_or(None);
 
+                if let Some(ref l) = landmarks {
+                    let valid_count = l.points.iter().filter(|p| p.x.is_finite()).count();
+                    tracing::info!("Detected {} valid landmarks", valid_count);
+                }
+
                 let landmark_roi = landmarks.as_ref().and_then(|landmarks| {
-                    landmarks.bounding_roi(rgb.meta.size, self.landmarks.config().roi_scale)
+                    let roi = landmarks.bounding_roi(rgb.meta.size, self.landmarks.config().roi_scale);
+                    if let Some(ref r) = roi {
+                        tracing::info!("Landmark ROI: {:?}", r.rect);
+                    }
+                    roi
                 });
                 let rgb_roi = landmark_roi.or(palm_roi);
 

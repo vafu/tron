@@ -90,7 +90,7 @@ impl<'a> Renderer<CollectorView<'a>> for CollectorRenderer {
                             queue: surface.queue,
                             pass: &mut pass,
                             roi: rgb_roi.rect,
-                            oriented_roi: None,
+                            oriented_roi: rgb_roi.oriented_box,
                             color: [0.2, 1.0, 0.2, 1.0],
                             frame_size: rgb.meta.size,
                             rect: rgbrect,

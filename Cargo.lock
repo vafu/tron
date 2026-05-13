@@ -2695,6 +2695,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-serial",
+ "tracing",
  "tron-api",
  "turbojpeg",
  "v4l",

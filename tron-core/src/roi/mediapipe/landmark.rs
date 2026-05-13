@@ -4,12 +4,12 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
-use tron_api::{Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, RoiResult, Size};
+use tron_api::{Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size};
 
 const DEFAULT_INPUT_SIZE: usize = 224;
 const WRIST_LANDMARK: usize = 0;
 const MIDDLE_MCP_LANDMARK: usize = 9;
-const MEDIAPIPE_LANDMARK_SCALE: f32 = 2.0;
+const MEDIAPIPE_LANDMARK_SCALE: f32 = 1.0;
 const MEDIAPIPE_LANDMARK_SHIFT_Y: f32 = -0.1;
 
 #[derive(Clone, Debug)]
@@ -56,14 +56,7 @@ pub enum Handedness {
 
 impl HandLandmarks {
     pub fn bounding_roi(&self, frame_size: Size, scale: f32) -> Option<RoiResult> {
-        landmark_bounds(&self.points).and_then(|bounds| {
-            bounds.to_mediapipe_roi(
-                self.points[WRIST_LANDMARK],
-                self.points[MIDDLE_MCP_LANDMARK],
-                frame_size,
-                scale,
-            )
-        })
+        landmark_bounds(&self.points).and_then(|bounds| bounds.to_rect_roi(frame_size, scale))
     }
 }
 
@@ -76,76 +69,40 @@ struct LandmarkBounds {
 }
 
 impl LandmarkBounds {
-    fn to_mediapipe_roi(
-        self,
-        wrist: HandLandmark,
-        middle_mcp: HandLandmark,
-        frame_size: Size,
-        scale: f32,
-    ) -> Option<RoiResult> {
-        if self.x1 <= self.x0 || self.y1 <= self.y0 {
+    fn to_rect_roi(self, frame_size: Size, scale: f32) -> Option<RoiResult> {
+        let scale = scale.max(1.0);
+        let w = (self.x1 - self.x0) * scale;
+        let h = (self.y1 - self.y0) * scale;
+        let cx = (self.x0 + self.x1) * 0.5;
+        let cy = (self.y0 + self.y1) * 0.5;
+
+        let x0 = (cx - w * 0.5).floor().max(0.0).min(frame_size.width as f32) as u32;
+        let y0 = (cy - h * 0.5).floor().max(0.0).min(frame_size.height as f32) as u32;
+        let x1 = (cx + w * 0.5).ceil().max(0.0).min(frame_size.width as f32) as u32;
+        let y1 = (cy + h * 0.5).ceil().max(0.0).min(frame_size.height as f32) as u32;
+
+        let rect = Rect {
+            x: x0,
+            y: y0,
+            size: Size {
+                width: x1.saturating_sub(x0),
+                height: y1.saturating_sub(y0),
+            },
+        };
+
+        tracing::debug!(
+            "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, rect={:?}",
+            self.x0, self.y0, self.x1, self.y1, scale, rect
+        );
+
+        if rect.size.width == 0 || rect.size.height == 0 {
             return None;
         }
 
-        // MediaPipe Hand Landmark model expects fingertips at the top (y=0).
-        // The orientation axis should point from middle-MCP to wrist.
-        let axis_y = [wrist.x - middle_mcp.x, wrist.y - middle_mcp.y];
-        let axis_len = hypot(axis_y[0], axis_y[1]);
-        if axis_len < 1.0 || !axis_len.is_finite() {
-            return self.to_axis_aligned_roi(frame_size, scale);
-        }
-        let axis_y = [axis_y[0] / axis_len, axis_y[1] / axis_len];
-        // axis_x should be axis_y rotated 90 deg clockwise to maintain right-handedness.
-        // If axis_y is backward (down), axis_x should be right.
-        let axis_x = [axis_y[1], -axis_y[0]];
-        let origin = [middle_mcp.x, middle_mcp.y];
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        for corner in [
-            [self.x0, self.y0],
-            [self.x1, self.y0],
-            [self.x1, self.y1],
-            [self.x0, self.y1],
-        ] {
-            let delta = [corner[0] - origin[0], corner[1] - origin[1]];
-            let x = dot(delta, axis_x);
-            let y = dot(delta, axis_y);
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
-        }
-        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
-            return None;
-        }
-        let raw_width = (max_x - min_x).max(1.0);
-        let raw_height = (max_y - min_y).max(1.0);
-        let center_x = (min_x + max_x) * 0.5;
-        // Shift center along axis_y (middle-MCP to wrist).
-        // Negative shift moves towards fingertips.
-        let center_y = (min_y + max_y) * 0.5 + MEDIAPIPE_LANDMARK_SHIFT_Y * raw_height;
-        let side = raw_width.max(raw_height) * scale.max(1.0);
-        let half_side = side * 0.5;
-        let center = add(add(origin, mul(axis_x, center_x)), mul(axis_y, center_y));
-        let oriented_box = OrientedBoundingBox {
-            corners: [
-                add(
-                    add(center, mul(axis_x, -half_side)),
-                    mul(axis_y, -half_side),
-                ),
-                add(add(center, mul(axis_x, half_side)), mul(axis_y, -half_side)),
-                add(add(center, mul(axis_x, half_side)), mul(axis_y, half_side)),
-                add(add(center, mul(axis_x, -half_side)), mul(axis_y, half_side)),
-            ],
-        };
-        oriented_box
-            .enclosing_rect(frame_size)
-            .map(|rect| RoiResult {
-                rect,
-                oriented_box: Some(oriented_box),
-            })
+        Some(RoiResult {
+            rect,
+            oriented_box: None,
+        })
     }
 
     fn to_axis_aligned_roi(self, frame_size: Size, scale: f32) -> Option<RoiResult> {
@@ -288,11 +245,27 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                     z / self.input_size as f32,
                 )
             };
+
+            // Filter out points that are exactly at the origin (0, 0) in crop space.
+            // These are usually invalid/uninitialized points from the model.
+            if nx.abs() < f32::EPSILON && ny.abs() < f32::EPSILON {
+                points[i] = HandLandmark {
+                    x: f32::NAN,
+                    y: f32::NAN,
+                    z: f32::NAN,
+                };
+                continue;
+            }
+
             points[i] = HandLandmark {
                 x: crop.frame_x(nx, ny),
                 y: crop.frame_y(nx, ny),
                 z: nz,
             };
+            tracing::trace!(
+                "landmark {}: crop=({:.4}, {:.4}), frame=({:.1}, {:.1})",
+                i, nx, ny, points[i].x, points[i].y
+            );
         }
 
         let handedness = self
@@ -330,42 +303,55 @@ fn square_input_size(value_type: &ValueType) -> Option<usize> {
 }
 
 fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) {
-    let mut landmarks_output = 0;
-    let mut landmarks_size = 0;
-    let mut landmarks_priority = -1;
+    let mut landmarks_output = None;
     let mut presence_output = None;
     let mut handedness_output = None;
-    for (index, output) in session.outputs().iter().enumerate() {
+
+    let outputs = session.outputs();
+
+    // 1. Try to find by name (MediaPipe/TFLite-to-ONNX conventions)
+    for (i, output) in outputs.iter().enumerate() {
         let name = output.name().to_ascii_lowercase();
-        if name.contains("presence") || name.contains("score") {
-            presence_output = Some(index);
-        }
-        if name.contains("handed") {
-            handedness_output = Some(index);
-        }
         let elements = match output.dtype() {
             ValueType::Tensor { shape, .. } => shape.num_elements(),
             _ => 0,
         };
-        if elements == 63 {
-            let priority = if name.contains("world") {
-                0
-            } else if name.contains("image") || name.contains("landmark") {
-                2
-            } else {
-                1
-            };
-            if priority > landmarks_priority {
-                landmarks_priority = priority;
-                landmarks_output = index;
-                landmarks_size = elements;
-            }
-        } else if elements > landmarks_size && landmarks_priority < 0 {
-            landmarks_size = elements;
-            landmarks_output = index;
+
+        if landmarks_output.is_none()
+            && (name.contains("landmark") || name.contains("identity"))
+            && !name.contains("world")
+            && elements == 63
+        {
+            landmarks_output = Some(i);
+        }
+
+        if presence_output.is_none() && (name.contains("presence") || name.contains("score")) {
+            presence_output = Some(i);
+        }
+
+        if handedness_output.is_none() && name.contains("handed") {
+            handedness_output = Some(i);
         }
     }
-    (landmarks_output, presence_output, handedness_output)
+
+    // 2. Fallback to shape-based signatures if names were generic/missing
+    if landmarks_output.is_none() {
+        landmarks_output = outputs
+            .iter()
+            .position(|o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 63));
+    }
+    if presence_output.is_none() {
+        presence_output = outputs
+            .iter()
+            .position(|o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 1));
+    }
+
+    // 3. Absolute fallbacks (Index 0 is usually landmarks in most conversions)
+    (
+        landmarks_output.unwrap_or(0),
+        presence_output,
+        handedness_output,
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -523,27 +509,32 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_landmark_roi_is_absent() {
+    fn degenerate_landmark_roi_is_present() {
         let landmarks = HandLandmarks {
             points: [HandLandmark {
-                x: 10.0,
-                y: 20.0,
+                x: 10.2,
+                y: 20.8,
                 z: 0.0,
             }; 21],
             presence: 1.0,
             handedness: None,
             timestamp: Instant::now(),
         };
-        assert!(
-            landmarks
-                .bounding_roi(
-                    Size {
-                        width: 100,
-                        height: 100,
-                    },
-                    1.0,
-                )
-                .is_none()
-        );
+        let roi = landmarks
+            .bounding_roi(
+                Size {
+                    width: 100,
+                    height: 100,
+                },
+                1.0,
+            )
+            .expect("roi");
+        // For a single point at (10.2, 20.8):
+        // x0 = floor(10.2) = 10, y0 = floor(20.8) = 20
+        // x1 = ceil(10.2) = 11, y1 = ceil(20.8) = 21
+        assert_eq!(roi.rect.x, 10);
+        assert_eq!(roi.rect.y, 20);
+        assert_eq!(roi.rect.size.width, 1);
+        assert_eq!(roi.rect.size.height, 1);
     }
 }

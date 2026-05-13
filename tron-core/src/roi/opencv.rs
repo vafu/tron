@@ -104,6 +104,7 @@ impl Processor<Frame<'_>> for OpenCvRoiDetector {
             .max_by_key(|candidate| candidate.area);
         Ok(best.map(|candidate| RoiResult {
             rect: candidate.rect,
+            oriented_box: None,
         }))
     }
 }
@@ -171,9 +172,12 @@ fn pack_gray8(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
         .checked_mul(height)
         .ok_or_else(|| anyhow::anyhow!("ROI detector input size overflow"))?;
     packed.resize(len, 0);
-    for (y, row) in frame.rows().enumerate() {
+    let pixels = frame.view()?;
+    for y in 0..height {
         let start = y * width;
-        row.copy_to(&mut packed[start..start + width])?;
+        for x in 0..width {
+            packed[start + x] = pixels[[y, x, 0]];
+        }
     }
     Ok(())
 }

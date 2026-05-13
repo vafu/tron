@@ -80,8 +80,5 @@ fn turbojpeg_pixel_format(format: PixelFormat) -> Result<turbojpeg::PixelFormat>
     match format {
         PixelFormat::Gray8 => Ok(turbojpeg::PixelFormat::GRAY),
         PixelFormat::Bgra8 => Ok(turbojpeg::PixelFormat::BGRA),
-        PixelFormat::Yuyv422 => {
-            anyhow::bail!("unsupported TurboJPEG output format: {format:?}")
-        }
     }
 }

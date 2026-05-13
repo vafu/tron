@@ -168,30 +168,27 @@ impl<'frame, 'pass> Renderer<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer
             frame.buffer.is_horizontally_mirrored(),
             frame.buffer.is_vertically_mirrored(),
         );
+        // SAFETY: texture upload consumes physical backing storage. Mirroring is
+        // represented separately through flipped texture coordinates above.
+        let raw = unsafe { frame.buffer.raw() };
+        let stride = frame.buffer.stride();
 
         let (data, stride) = match frame.format {
             PixelFormat::Bgra8 => {
                 anyhow::ensure!(
-                    frame.buffer.stride == frame.meta.size.width as usize * 4,
+                    stride == frame.meta.size.width as usize * 4,
                     "WgpuFrameRenderer requires tightly packed BGRA8 frames"
                 );
-                (frame.buffer.data, frame.buffer.stride)
+                (raw, stride)
             }
             PixelFormat::Gray8 => {
                 anyhow::ensure!(
-                    frame.buffer.stride == frame.meta.size.width as usize,
+                    stride == frame.meta.size.width as usize,
                     "WgpuFrameRenderer requires tightly packed Gray8 frames"
                 );
                 let pixel_count = frame.meta.size.width as usize * frame.meta.size.height as usize;
                 self.bgra_scratch.resize(pixel_count * 4, 255);
-                for (i, gray) in frame
-                    .buffer
-                    .data
-                    .iter()
-                    .take(pixel_count)
-                    .copied()
-                    .enumerate()
-                {
+                for (i, gray) in raw.iter().take(pixel_count).copied().enumerate() {
                     let offset = i * 4;
                     self.bgra_scratch[offset] = gray;
                     self.bgra_scratch[offset + 1] = gray;
@@ -199,9 +196,6 @@ impl<'frame, 'pass> Renderer<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer
                     self.bgra_scratch[offset + 3] = 255;
                 }
                 (&self.bgra_scratch[..], frame.meta.size.width as usize * 4)
-            }
-            PixelFormat::Yuyv422 => {
-                anyhow::bail!("WgpuFrameRenderer does not support YUYV422 yet")
             }
         };
 

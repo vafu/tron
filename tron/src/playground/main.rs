@@ -77,7 +77,7 @@ struct Cli {
     #[arg(long, default_value_t = 0.75)]
     rgb_mediapipe_min_score: f32,
 
-    /// Scale applied around the raw MediaPipe palm detector box before rendering ROI.
+    /// Fingertip-direction scale applied to the oriented MediaPipe palm ROI.
     #[arg(long, default_value_t = 1.0)]
     rgb_mediapipe_box_scale: f32,
 }

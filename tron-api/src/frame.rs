@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use ndarray::{ArrayView2, ArrayView3};
+use ndarray::ArrayView3;
 
-use crate::view_buffer::{ViewBuffer, ViewBufferMut, ViewRow, ViewRows};
+use crate::view_buffer::{ViewBuffer, ViewBufferMut};
 use crate::{OpenedCameraInfo, Rect, Size};
 
 pub type FrameId = u64;
@@ -19,14 +19,19 @@ pub enum SensorKind {
 pub enum CaptureFormat {
     Mjpeg,
     Gray8,
-    Yuyv422,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
 pub enum PixelFormat {
-    Gray8,
-    Bgra8,
-    Yuyv422,
+    Gray8 = 1,
+    Bgra8 = 4,
+}
+
+impl PixelFormat {
+    pub const fn channels(self) -> usize {
+        self as usize
+    }
 }
 
 impl TryFrom<CaptureFormat> for PixelFormat {
@@ -35,7 +40,6 @@ impl TryFrom<CaptureFormat> for PixelFormat {
     fn try_from(format: CaptureFormat) -> Result<Self, Self::Error> {
         match format {
             CaptureFormat::Gray8 => Ok(Self::Gray8),
-            CaptureFormat::Yuyv422 => Ok(Self::Yuyv422),
             CaptureFormat::Mjpeg => {
                 anyhow::bail!("MJPEG is encoded and cannot be converted to a pixel format")
             }
@@ -84,16 +88,8 @@ impl<'a> Frame<'a> {
         Ok(Self {
             meta,
             format,
-            buffer: ViewBuffer::new(buffer_size(format, meta.size)?, stride, data)?,
+            buffer: ViewBuffer::new(format, meta.size, stride, data)?,
         })
-    }
-
-    pub fn row(&self, y: u32) -> Result<ViewRow<'a>> {
-        self.buffer.row(y as usize)
-    }
-
-    pub fn rows(&self) -> ViewRows<'a, '_> {
-        self.buffer.rows()
     }
 
     pub fn roi(self, rect: Rect) -> Result<Self> {
@@ -106,17 +102,13 @@ impl<'a> Frame<'a> {
             rect,
             self.meta.size
         );
-        let bytes_per_pixel = bytes_per_pixel(self.format)?;
-        let x = rect.x as usize * bytes_per_pixel;
         Ok(Self {
             meta: FrameMeta {
                 size: rect.size,
                 ..self.meta
             },
             format: self.format,
-            buffer: self
-                .buffer
-                .roi(x, rect.y as usize, buffer_size(self.format, rect.size)?)?,
+            buffer: self.buffer.roi(rect)?,
         })
     }
 
@@ -124,39 +116,12 @@ impl<'a> Frame<'a> {
         Ok(Self {
             meta: self.meta,
             format: self.format,
-            buffer: self.buffer.mirrored(
-                mirror_bytes_per_pixel(self.format)?,
-                horizontal,
-                vertical,
-            )?,
+            buffer: self.buffer.mirrored(horizontal, vertical)?,
         })
     }
 
-    pub fn gray8_view(&self) -> Result<ArrayView2<'a, u8>> {
-        anyhow::ensure!(
-            self.format == PixelFormat::Gray8,
-            "expected Gray8 frame, got {:?}",
-            self.format
-        );
-        self.buffer.as_array2()
-    }
-
-    pub fn bgra8_view(&self) -> Result<ArrayView3<'a, u8>> {
-        anyhow::ensure!(
-            self.format == PixelFormat::Bgra8,
-            "expected BGRA8 frame, got {:?}",
-            self.format
-        );
-        self.buffer.as_array3(4)
-    }
-
-    pub fn yuyv422_view(&self) -> Result<ArrayView3<'a, u8>> {
-        anyhow::ensure!(
-            self.format == PixelFormat::Yuyv422,
-            "expected YUYV422 frame, got {:?}",
-            self.format
-        );
-        self.buffer.as_array3(2)
+    pub fn view(&self) -> Result<ArrayView3<'a, u8>> {
+        self.buffer.view()
     }
 }
 
@@ -196,8 +161,8 @@ impl OwnedFrame {
             meta: self.meta,
             format: self.format,
             buffer: ViewBufferMut {
-                size: buffer_size(self.format, self.meta.size)
-                    .expect("owned frame format must have a valid buffer size"),
+                format: self.format,
+                size: self.meta.size,
                 stride: self.stride,
                 data: &mut self.data,
             },
@@ -219,36 +184,9 @@ pub fn buffer_size(format: PixelFormat, size: Size) -> Result<Size> {
 }
 
 pub fn row_bytes(format: PixelFormat, width: u32) -> Result<usize> {
-    let width = width as usize;
-    match format {
-        PixelFormat::Gray8 => Ok(width),
-        PixelFormat::Bgra8 => width
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("BGRA8 row byte width overflow")),
-        PixelFormat::Yuyv422 => width
-            .checked_mul(2)
-            .ok_or_else(|| anyhow::anyhow!("YUYV422 row byte width overflow")),
-    }
-}
-
-pub fn bytes_per_pixel(format: PixelFormat) -> Result<usize> {
-    match format {
-        PixelFormat::Gray8 => Ok(1),
-        PixelFormat::Bgra8 => Ok(4),
-        PixelFormat::Yuyv422 => {
-            anyhow::bail!("YUYV422 does not have an integer per-pixel byte width")
-        }
-    }
-}
-
-pub fn mirror_bytes_per_pixel(format: PixelFormat) -> Result<usize> {
-    match format {
-        PixelFormat::Gray8 => Ok(1),
-        PixelFormat::Bgra8 => Ok(4),
-        PixelFormat::Yuyv422 => {
-            anyhow::bail!("YUYV422 horizontal mirroring needs explicit chroma-pair handling")
-        }
-    }
+    (width as usize)
+        .checked_mul(format.channels())
+        .ok_or_else(|| anyhow::anyhow!("{format:?} row byte width overflow"))
 }
 
 #[cfg(test)]
@@ -292,24 +230,22 @@ mod tests {
             }
         );
         assert_eq!(
-            frame.buffer.size,
+            frame.buffer.size(),
             Size {
                 width: 2,
                 height: 2,
             }
         );
-        assert_eq!(frame.buffer.stride, 4);
-        assert_eq!(frame.row(0).unwrap().as_slice().unwrap(), &[11, 12]);
-        assert_eq!(frame.row(1).unwrap().as_slice().unwrap(), &[21, 22]);
-        let rows = frame
-            .rows()
-            .map(|row| row.as_slice().unwrap().to_vec())
-            .collect::<Vec<_>>();
-        assert_eq!(rows, vec![vec![11, 12], vec![21, 22]]);
+        assert_eq!(frame.buffer.stride(), 4);
+        let view = frame.view().unwrap();
+        assert_eq!(view[[0, 0, 0]], 11);
+        assert_eq!(view[[0, 1, 0]], 12);
+        assert_eq!(view[[1, 0, 0]], 21);
+        assert_eq!(view[[1, 1, 0]], 22);
     }
 
     #[test]
-    fn frame_roi_uses_byte_width_for_bgra_buffer_size() {
+    fn frame_roi_preserves_pixel_size_for_bgra_view() {
         let data = [0_u8; 4 * 4 * 3];
         let frame = Frame::new(meta(4, 3), PixelFormat::Bgra8, 16, &data)
             .unwrap()
@@ -331,13 +267,13 @@ mod tests {
             }
         );
         assert_eq!(
-            frame.buffer.size,
+            frame.buffer.size(),
             Size {
-                width: 8,
+                width: 2,
                 height: 2,
             }
         );
-        assert_eq!(frame.buffer.stride, 16);
+        assert_eq!(frame.buffer.stride(), 16);
     }
 
     #[test]

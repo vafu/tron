@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Rect, Renderer, Size};
+use tron_api::{OrientedBoundingBox, Rect, Renderer, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
 use crate::render::wgpu::{NdcRect, project_frame_point};
@@ -9,6 +9,7 @@ pub struct RoiOverlayView<'frame, 'pass> {
     pub queue: &'frame wgpu::Queue,
     pub pass: &'frame mut wgpu::RenderPass<'pass>,
     pub roi: Rect,
+    pub oriented_roi: Option<OrientedBoundingBox>,
     pub color: [f32; 4],
     pub frame_size: Size,
     pub rect: NdcRect,
@@ -35,7 +36,8 @@ impl RoiOverlayRenderer {
 impl<'frame, 'pass> Renderer<RoiOverlayView<'frame, 'pass>> for RoiOverlayRenderer {
     fn render(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
         self.vertices = roi_vertices(
-            view.roi,
+            view.oriented_roi
+                .unwrap_or_else(|| rect_to_oriented_box(view.roi)),
             view.color,
             view.frame_size,
             view.rect,
@@ -51,66 +53,57 @@ impl<'frame, 'pass> Renderer<RoiOverlayView<'frame, 'pass>> for RoiOverlayRender
 }
 
 fn roi_vertices(
-    roi: Rect,
+    roi: OrientedBoundingBox,
     color: [f32; 4],
     frame_size: Size,
     rect: NdcRect,
     target_size: Size,
 ) -> [LineVertex; 8] {
-    let left_top = project_frame_point([roi.x as f32, roi.y as f32], frame_size, rect, target_size);
-    let right_top = project_frame_point(
-        [(roi.x + roi.size.width) as f32, roi.y as f32],
-        frame_size,
-        rect,
-        target_size,
-    );
-    let right_bottom = project_frame_point(
-        [
-            (roi.x + roi.size.width) as f32,
-            (roi.y + roi.size.height) as f32,
-        ],
-        frame_size,
-        rect,
-        target_size,
-    );
-    let left_bottom = project_frame_point(
-        [roi.x as f32, (roi.y + roi.size.height) as f32],
-        frame_size,
-        rect,
-        target_size,
-    );
+    let [c0, c1, c2, c3] = roi
+        .corners
+        .map(|corner| project_frame_point(corner, frame_size, rect, target_size));
     [
         LineVertex {
-            position: left_top,
+            position: c0,
             color,
         },
         LineVertex {
-            position: right_top,
+            position: c1,
             color,
         },
         LineVertex {
-            position: right_top,
+            position: c1,
             color,
         },
         LineVertex {
-            position: right_bottom,
+            position: c2,
             color,
         },
         LineVertex {
-            position: right_bottom,
+            position: c2,
             color,
         },
         LineVertex {
-            position: left_bottom,
+            position: c3,
             color,
         },
         LineVertex {
-            position: left_bottom,
+            position: c3,
             color,
         },
         LineVertex {
-            position: left_top,
+            position: c0,
             color,
         },
     ]
+}
+
+fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
+    let x0 = rect.x as f32;
+    let y0 = rect.y as f32;
+    let x1 = (rect.x + rect.size.width) as f32;
+    let y1 = (rect.y + rect.size.height) as f32;
+    OrientedBoundingBox {
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+    }
 }

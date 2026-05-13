@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use tron_api::ViewRow;
 use tron_api::{Frame, FrameMeta, FrameSource, PixelFormat, ProjectionMapSource, Renderer, Size};
 use tron_core::StereoFrameSource;
 use tron_core::projection::FrameProjectionMap;
@@ -300,16 +299,37 @@ impl CompositeFrame {
         let size = rgb.meta.size;
         let pixel_count = size.width as usize * size.height as usize;
         self.data.resize(pixel_count * 4, 255);
+        let rgb_pixels = rgb.view()?;
+        let ir_pixels = ir.view()?;
 
         for y in 0..size.height {
-            let rgb_row = rgb.row(y)?;
-            let ir_row = ir.row(y)?;
             for x in 0..size.width {
-                let rgb = bgra_at(rgb_row, rgb.format, x as usize)?;
+                let px = x as usize;
+                let py = y as usize;
+                let rgb = match rgb.format {
+                    PixelFormat::Bgra8 => [
+                        rgb_pixels[[py, px, 0]],
+                        rgb_pixels[[py, px, 1]],
+                        rgb_pixels[[py, px, 2]],
+                        rgb_pixels[[py, px, 3]],
+                    ],
+                    PixelFormat::Gray8 => {
+                        let value = rgb_pixels[[py, px, 0]];
+                        [value, value, value, 255]
+                    }
+                };
                 let dst = (y as usize * size.width as usize + x as usize) * 4;
                 self.data[dst..dst + 4].copy_from_slice(&rgb);
 
-                let ir = gray_at(ir_row, ir.format, x as usize)?;
+                let ir = match ir.format {
+                    PixelFormat::Gray8 => ir_pixels[[py, px, 0]],
+                    PixelFormat::Bgra8 => {
+                        ((ir_pixels[[py, px, 0]] as u16
+                            + ir_pixels[[py, px, 1]] as u16
+                            + ir_pixels[[py, px, 2]] as u16)
+                            / 3) as u8
+                    }
+                };
                 blend_ir(&mut self.data[dst..dst + 4], rgb, ir, 0.38);
             }
         }
@@ -331,39 +351,6 @@ impl CompositeFrame {
 
     fn id(&self) -> Option<u64> {
         self.meta.map(|meta| meta.id)
-    }
-}
-
-fn bgra_at(row: ViewRow<'_>, format: PixelFormat, x: usize) -> Result<[u8; 4]> {
-    match format {
-        PixelFormat::Bgra8 => {
-            let offset = x * 4;
-            Ok([
-                row.byte(offset)?,
-                row.byte(offset + 1)?,
-                row.byte(offset + 2)?,
-                row.byte(offset + 3)?,
-            ])
-        }
-        PixelFormat::Gray8 => {
-            let value = row.byte(x)?;
-            Ok([value, value, value, 255])
-        }
-        PixelFormat::Yuyv422 => anyhow::bail!("calibration check does not support YUYV422"),
-    }
-}
-
-fn gray_at(row: ViewRow<'_>, format: PixelFormat, x: usize) -> Result<u8> {
-    match format {
-        PixelFormat::Gray8 => Ok(row.byte(x)?),
-        PixelFormat::Bgra8 => {
-            let offset = x * 4;
-            Ok(((row.byte(offset)? as u16
-                + row.byte(offset + 1)? as u16
-                + row.byte(offset + 2)? as u16)
-                / 3) as u8)
-        }
-        PixelFormat::Yuyv422 => anyhow::bail!("calibration check does not support YUYV422"),
     }
 }
 

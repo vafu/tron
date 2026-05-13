@@ -1,40 +1,38 @@
 use anyhow::Result;
 use tron_api::{Frame, FrameSource, OpenedCameraInfo};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MirrorMode {
-    Horizontal,
-    Vertical,
-    HorizontalAndVertical,
-}
-
-impl MirrorMode {
-    fn horizontal(self) -> bool {
-        matches!(self, Self::Horizontal | Self::HorizontalAndVertical)
-    }
-
-    fn vertical(self) -> bool {
-        matches!(self, Self::Vertical | Self::HorizontalAndVertical)
-    }
-}
-
 pub struct MirroredFrameSource<S> {
     source: S,
-    info: OpenedCameraInfo,
-    mode: MirrorMode,
+    horisontal: bool,
+    vertical: bool,
 }
 
 impl<S> MirroredFrameSource<S>
 where
     S: FrameSource,
 {
-    pub fn new(source: S) -> Self {
-        Self::with_mode(source, MirrorMode::Horizontal)
+    pub fn both(source: S) -> Self {
+        Self {
+            source,
+            horisontal: true,
+            vertical: true,
+        }
     }
 
-    pub fn with_mode(source: S, mode: MirrorMode) -> Self {
-        let info = source.info().clone();
-        Self { source, info, mode }
+    pub fn horizontal(source: S) -> Self {
+        Self {
+            source,
+            horisontal: true,
+            vertical: false,
+        }
+    }
+
+    pub fn vertical(source: S) -> Self {
+        Self {
+            source,
+            horisontal: false,
+            vertical: true,
+        }
     }
 }
 
@@ -44,16 +42,14 @@ where
     S: FrameSource + Send,
 {
     fn info(&self) -> &OpenedCameraInfo {
-        &self.info
+        &self.source.info()
     }
 
     async fn next_frame(&mut self) -> Result<Option<Frame<'_>>> {
         let Some(frame) = self.source.next_frame().await? else {
             return Ok(None);
         };
-        Ok(Some(
-            frame.mirrored(self.mode.horizontal(), self.mode.vertical())?,
-        ))
+        Ok(Some(frame.mirrored(self.horisontal, self.vertical)?))
     }
 }
 
@@ -94,11 +90,12 @@ mod tests {
             .mirrored(true, false)
             .unwrap();
 
-        assert_eq!(frame.buffer.data.as_ptr(), data.as_ptr());
-        assert_eq!(frame.row(0).unwrap().byte(0).unwrap(), 3);
-        assert_eq!(frame.row(0).unwrap().byte(2).unwrap(), 1);
-        assert_eq!(frame.gray8_view().unwrap()[[0, 0]], 3);
-        assert_eq!(frame.gray8_view().unwrap()[[1, 2]], 4);
+        // SAFETY: test asserts the mirror view reuses the original backing
+        // storage; logical reads below still go through view APIs.
+        assert_eq!(unsafe { frame.buffer.raw() }.as_ptr(), data.as_ptr());
+        assert_eq!(frame.view().unwrap()[[0, 0, 0]], 3);
+        assert_eq!(frame.view().unwrap()[[0, 2, 0]], 1);
+        assert_eq!(frame.view().unwrap()[[1, 2, 0]], 4);
     }
 
     #[test]
@@ -110,9 +107,11 @@ mod tests {
         let frame = frame(&data, 2, 2, PixelFormat::Bgra8)
             .mirrored(true, false)
             .unwrap();
-        let view = frame.bgra8_view().unwrap();
+        let view = frame.view().unwrap();
 
-        assert_eq!(frame.buffer.data.as_ptr(), data.as_ptr());
+        // SAFETY: test asserts the mirror view reuses the original backing
+        // storage; logical reads below still go through view APIs.
+        assert_eq!(unsafe { frame.buffer.raw() }.as_ptr(), data.as_ptr());
         assert_eq!(view[[0, 0, 0]], 5);
         assert_eq!(view[[0, 1, 0]], 1);
         assert_eq!(view[[1, 0, 2]], 15);

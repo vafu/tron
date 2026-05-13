@@ -36,6 +36,9 @@ impl<'a> Renderer<TextFrameView<'a>> for TextStatsRenderer {
             let elapsed = self.last_log.elapsed().as_secs_f32();
             let n = self.frames.max(1) as f32;
             let frame = view.frame;
+            // SAFETY: diagnostics only report physical backing storage. They do
+            // not interpret storage as logical pixel order.
+            let raw = unsafe { frame.buffer.raw() };
             eprintln!(
                 "pipeline: fps={:.1} acquire={:.3}ms {}={}x{} {:?} stride={} len={} age={:.2}ms id={} seq={:?} cam_ts={:?} ts_src={:?}",
                 self.frames as f32 / elapsed,
@@ -44,8 +47,8 @@ impl<'a> Renderer<TextFrameView<'a>> for TextStatsRenderer {
                 frame.meta.size.width,
                 frame.meta.size.height,
                 frame.format,
-                frame.buffer.stride,
-                frame.buffer.data.len(),
+                frame.buffer.stride(),
+                raw.len(),
                 frame.meta.timestamp.received_at.elapsed().as_secs_f32() * 1000.0,
                 frame.meta.id,
                 frame.meta.sequence,

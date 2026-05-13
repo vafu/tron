@@ -92,7 +92,7 @@ impl CameraOpener for V4lCameraOpener {
             CaptureFormat::Mjpeg => Some(TurboMjpegDecoder::new(
                 self.decoded_mjpeg_format.unwrap_or(PixelFormat::Bgra8),
             )?),
-            CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => None,
+            CaptureFormat::Gray8 => None,
         };
 
         Ok(V4lFrameSource {
@@ -180,7 +180,7 @@ impl FrameSource for V4lFrameSource {
                     })
                     .map(Some)
             }
-            CaptureFormat::Gray8 | CaptureFormat::Yuyv422 => {
+            CaptureFormat::Gray8 => {
                 let format = PixelFormat::try_from(self.info.format)?;
                 Ok(Some(Frame::new(
                     meta,
@@ -314,7 +314,6 @@ fn sensor_name_score(name: &str, sensor: SensorKind) -> u8 {
 fn stride(format: PixelFormat, width: u32) -> usize {
     match format {
         PixelFormat::Gray8 => width as usize,
-        PixelFormat::Yuyv422 => width as usize * 2,
         PixelFormat::Bgra8 => width as usize * 4,
     }
 }
@@ -323,7 +322,6 @@ fn fourcc(format: CaptureFormat) -> FourCC {
     match format {
         CaptureFormat::Mjpeg => FourCC::new(b"MJPG"),
         CaptureFormat::Gray8 => FourCC::new(b"GREY"),
-        CaptureFormat::Yuyv422 => FourCC::new(b"YUYV"),
     }
 }
 
@@ -331,7 +329,6 @@ fn capture_format(fourcc: FourCC) -> Result<CaptureFormat> {
     match &fourcc.repr {
         b"MJPG" => Ok(CaptureFormat::Mjpeg),
         b"GREY" => Ok(CaptureFormat::Gray8),
-        b"YUYV" => Ok(CaptureFormat::Yuyv422),
         _ => anyhow::bail!("unsupported negotiated V4L format {fourcc}"),
     }
 }

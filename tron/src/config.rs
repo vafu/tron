@@ -64,15 +64,12 @@ pub enum CaptureFormatArg {
     Mjpg,
     #[value(alias = "gray", alias = "grey")]
     Gray8,
-    #[value(alias = "yuyv")]
-    Yuyv422,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum PixelFormatArg {
     Gray8,
     Bgra8,
-    Yuyv422,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,7 +111,6 @@ impl From<CaptureFormatArg> for CaptureFormat {
         match value {
             CaptureFormatArg::Mjpg => Self::Mjpeg,
             CaptureFormatArg::Gray8 => Self::Gray8,
-            CaptureFormatArg::Yuyv422 => Self::Yuyv422,
         }
     }
 }
@@ -124,7 +120,6 @@ impl From<PixelFormatArg> for PixelFormat {
         match value {
             PixelFormatArg::Gray8 => Self::Gray8,
             PixelFormatArg::Bgra8 => Self::Bgra8,
-            PixelFormatArg::Yuyv422 => Self::Yuyv422,
         }
     }
 }

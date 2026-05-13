@@ -60,12 +60,15 @@ impl FrameSource for LatestFrameSource {
 }
 
 fn own_frame(frame: Frame<'_>) -> OwnedFrame {
-    let row_len = frame.buffer.size.width as usize;
-    let mut data = vec![0; row_len * frame.buffer.size.height as usize];
-    for (y, row) in frame.rows().enumerate() {
-        let start = y * row_len;
-        row.copy_to(&mut data[start..start + row_len])
-            .expect("frame rows must match frame buffer width");
+    let row_len = frame.meta.size.width as usize * frame.format.channels();
+    let mut data = vec![0; row_len * frame.meta.size.height as usize];
+    let view = frame.view().expect("frame view must match frame metadata");
+    for y in 0..frame.meta.size.height as usize {
+        for x in 0..frame.meta.size.width as usize {
+            for channel in 0..frame.format.channels() {
+                data[y * row_len + x * frame.format.channels() + channel] = view[[y, x, channel]];
+            }
+        }
     }
     OwnedFrame {
         meta: frame.meta,

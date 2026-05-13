@@ -60,10 +60,10 @@ impl ClippedExposureRoiDetector {
         self.stack.clear();
         let y_end = search.y.saturating_add(search.size.height);
         let x_end = search.x.saturating_add(search.size.width);
+        let pixels = frame.view()?;
         for y in search.y..y_end {
-            let row = frame.row(y)?;
             for (xi, x) in (search.x..x_end).enumerate() {
-                if row.byte(x as usize)? >= self.config.threshold {
+                if pixels[[y as usize, x as usize, 0]] >= self.config.threshold {
                     clipped += 1;
                     self.heights[xi] = self.heights[xi].saturating_add(1);
                 } else {
@@ -101,6 +101,7 @@ impl ClippedExposureRoiDetector {
                 self.config.padding,
                 bounds,
             ),
+            oriented_box: None,
         }))
     }
 }
@@ -223,6 +224,7 @@ mod tests {
                             height: 4,
                         },
                     },
+                    oriented_box: None,
                 }),
             )
             .unwrap()

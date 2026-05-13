@@ -64,7 +64,10 @@ impl Processor<HandRoiInput<'_>> for HandRoiTracker {
     fn process(&mut self, input: HandRoiInput<'_>, _context: NoContext) -> Result<Self::Output> {
         if input.candidates.is_empty() {
             self.mark_lost();
-            return Ok(self.previous.map(|rect| RoiResult { rect }));
+            return Ok(self.previous.map(|rect| RoiResult {
+                rect,
+                oriented_box: None,
+            }));
         }
 
         let mut best = None;
@@ -80,7 +83,10 @@ impl Processor<HandRoiInput<'_>> for HandRoiTracker {
 
         let Some((candidate, score)) = best else {
             self.mark_lost();
-            return Ok(self.previous.map(|rect| RoiResult { rect }));
+            return Ok(self.previous.map(|rect| RoiResult {
+                rect,
+                oriented_box: None,
+            }));
         };
         if self.previous.is_none() && score < self.config.min_motion_pixels as f32 {
             return Ok(None);
@@ -90,6 +96,7 @@ impl Processor<HandRoiInput<'_>> for HandRoiTracker {
         self.lost_frames = 0;
         Ok(Some(RoiResult {
             rect: candidate.rect,
+            oriented_box: None,
         }))
     }
 }
@@ -105,10 +112,10 @@ fn motion_overlap(rect: Rect, motion: Option<Frame<'_>>) -> Result<u32> {
     let mut count = 0;
     let y_end = rect.y.saturating_add(rect.size.height);
     let x_end = rect.x.saturating_add(rect.size.width);
+    let pixels = motion.view()?;
     for y in rect.y..y_end {
-        let row = motion.row(y)?;
         for x in rect.x..x_end {
-            if row.byte(x as usize)? > 0 {
+            if pixels[[y as usize, x as usize, 0]] > 0 {
                 count += 1;
             }
         }

@@ -116,7 +116,7 @@ impl BrightnessStats {
     fn measure(frame: Frame<'_>, roi: Rect) -> Option<Self> {
         match frame.format {
             PixelFormat::Gray8 => gray8_stats(frame, roi),
-            PixelFormat::Bgra8 | PixelFormat::Yuyv422 => None,
+            PixelFormat::Bgra8 => None,
         }
     }
 }
@@ -131,16 +131,16 @@ fn gray8_stats(frame: Frame<'_>, roi: Rect) -> Option<BrightnessStats> {
         .clamp_to(size);
     let frame_pixels = size.width as usize * size.height as usize;
     let mut frame_sum = 0_u64;
-    for row in frame.rows() {
+    let pixels = frame.view().ok()?;
+    for y in 0..size.height as usize {
         for x in 0..size.width as usize {
-            frame_sum += row.byte(x).ok()? as u64;
+            frame_sum += pixels[[y, x, 0]] as u64;
         }
     }
     let mut roi_sum = 0_u64;
     for y in roi.y..roi.y + roi.size.height {
-        let row = frame.row(y).ok()?;
         for x in roi.x..roi.x + roi.size.width {
-            roi_sum += row.byte(x as usize).ok()? as u64;
+            roi_sum += pixels[[y as usize, x as usize, 0]] as u64;
         }
     }
 

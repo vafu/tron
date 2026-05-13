@@ -84,7 +84,10 @@ impl LandmarkBounds {
             cy + half_h,
             frame_size,
         )
-        .map(|rect| RoiResult { rect })
+        .map(|rect| RoiResult {
+            rect,
+            oriented_box: None,
+        })
     }
 }
 
@@ -315,7 +318,7 @@ fn preprocess_bgra(
     let source_w = frame.meta.size.width as usize;
     let source_h = frame.meta.size.height as usize;
     anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
-    let pixels = frame.bgra8_view()?;
+    let pixels = frame.view()?;
     output.fill(0.0);
     let source_wf = source_w as f32;
     let source_hf = source_h as f32;

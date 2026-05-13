@@ -84,7 +84,7 @@ impl FrameDiffProcessor {
             frame.format
         );
         anyhow::ensure!(
-            frame.buffer.stride == frame.meta.size.width as usize,
+            frame.buffer.stride() == frame.meta.size.width as usize,
             "frame diff requires tightly packed Gray8 frames"
         );
         let first_frame = self.previous.is_none();
@@ -176,9 +176,12 @@ impl FrameDiffProcessor {
 
 fn pack_gray8(frame: Frame<'_>, output: &mut [u8]) -> Result<()> {
     let width = frame.meta.size.width as usize;
-    for (y, row) in frame.rows().enumerate() {
+    let pixels = frame.view()?;
+    for y in 0..frame.meta.size.height as usize {
         let start = y * width;
-        row.copy_to(&mut output[start..start + width])?;
+        for x in 0..width {
+            output[start + x] = pixels[[y, x, 0]];
+        }
     }
     Ok(())
 }

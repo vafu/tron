@@ -58,9 +58,6 @@ impl OpenCvCheckerboardDetector {
                 )
                 .context("wrap checkerboard BGRA8-derived Gray8 input as OpenCV Mat")
             }
-            PixelFormat::Yuyv422 => {
-                anyhow::bail!("checkerboard detector does not support YUYV422 yet")
-            }
         }
     }
 }
@@ -336,15 +333,25 @@ fn cv_size(size: Size) -> Result<CvSize> {
     Ok(CvSize::new(size.width as i32, size.height as i32))
 }
 
-fn pack_view(frame: Frame<'_>, bytes_per_pixel: usize, packed: &mut Vec<u8>) -> Result<()> {
-    let row_len = frame.meta.size.width as usize * bytes_per_pixel;
+fn pack_view(frame: Frame<'_>, channels: usize, packed: &mut Vec<u8>) -> Result<()> {
+    let row_len = frame.meta.size.width as usize * channels;
     let len = row_len
         .checked_mul(frame.meta.size.height as usize)
         .ok_or_else(|| anyhow::anyhow!("checkerboard input size overflow"))?;
     packed.resize(len, 0);
-    for (y, row) in frame.rows().enumerate() {
-        let start = y * row_len;
-        row.copy_to(&mut packed[start..start + row_len])?;
+    let view = frame.view()?;
+    anyhow::ensure!(
+        view.shape()[2] == channels,
+        "checkerboard expected {} channels, got {}",
+        channels,
+        view.shape()[2]
+    );
+    for y in 0..frame.meta.size.height as usize {
+        for x in 0..frame.meta.size.width as usize {
+            for channel in 0..channels {
+                packed[y * row_len + x * channels + channel] = view[[y, x, channel]];
+            }
+        }
     }
     Ok(())
 }
@@ -356,13 +363,13 @@ fn pack_gray_from_bgra(frame: Frame<'_>, packed: &mut Vec<u8>) -> Result<()> {
         .checked_mul(height)
         .ok_or_else(|| anyhow::anyhow!("checkerboard input size overflow"))?;
     packed.resize(len, 0);
-    for (y, row) in frame.rows().enumerate() {
+    let view = frame.view()?;
+    for y in 0..height {
         let dst_row_start = y * width;
         for x in 0..width {
-            let src = x * 4;
-            let b = row.byte(src)? as u16;
-            let g = row.byte(src + 1)? as u16;
-            let r = row.byte(src + 2)? as u16;
+            let b = view[[y, x, 0]] as u16;
+            let g = view[[y, x, 1]] as u16;
+            let r = view[[y, x, 2]] as u16;
             packed[dst_row_start + x] = ((r + g + b) / 3) as u8;
         }
     }

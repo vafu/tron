@@ -35,7 +35,7 @@ struct Cli {
     rgb_mediapipe_min_score: f32,
 
     /// Minimum MediaPipe landmark presence confidence.
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = 0.9)]
     rgb_mediapipe_landmark_min_presence: f32,
 
     /// MediaPipe-style scale applied to the palm detector rect before landmarks.

@@ -8,9 +8,13 @@ use tron_api::{Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Re
 
 const DEFAULT_INPUT_SIZE: usize = 224;
 const WRIST_LANDMARK: usize = 0;
+const INDEX_MCP_LANDMARK: usize = 5;
 const MIDDLE_MCP_LANDMARK: usize = 9;
+const PINKY_MCP_LANDMARK: usize = 17;
 const MEDIAPIPE_LANDMARK_SCALE: f32 = 1.0;
 const MEDIAPIPE_LANDMARK_SHIFT_Y: f32 = -0.1;
+const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH: f32 = 0.20;
+const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH: f32 = 0.10;
 
 #[derive(Clone, Debug)]
 pub struct MediaPipeHandLandmarkConfig {
@@ -56,7 +60,8 @@ pub enum Handedness {
 
 impl HandLandmarks {
     pub fn bounding_roi(&self, frame_size: Size, scale: f32) -> Option<RoiResult> {
-        landmark_bounds(&self.points).and_then(|bounds| bounds.to_rect_roi(frame_size, scale))
+        let margin = landmark_silhouette_margin(&self.points).unwrap_or(0.0);
+        landmark_bounds(&self.points).and_then(|bounds| bounds.to_rect_roi(frame_size, scale, margin))
     }
 }
 
@@ -69,10 +74,11 @@ struct LandmarkBounds {
 }
 
 impl LandmarkBounds {
-    fn to_rect_roi(self, frame_size: Size, scale: f32) -> Option<RoiResult> {
+    fn to_rect_roi(self, frame_size: Size, scale: f32, margin: f32) -> Option<RoiResult> {
         let scale = scale.max(1.0);
-        let w = (self.x1 - self.x0) * scale;
-        let h = (self.y1 - self.y0) * scale;
+        let margin = margin.max(0.0);
+        let w = ((self.x1 - self.x0) + margin * 2.0) * scale;
+        let h = ((self.y1 - self.y0) + margin * 2.0) * scale;
         let cx = (self.x0 + self.x1) * 0.5;
         let cy = (self.y0 + self.y1) * 0.5;
 
@@ -91,8 +97,8 @@ impl LandmarkBounds {
         };
 
         tracing::debug!(
-            "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, rect={:?}",
-            self.x0, self.y0, self.x1, self.y1, scale, rect
+            "ROI: bounds=({:.1}, {:.1}, {:.1}, {:.1}), scale={:.1}, margin={:.1}, rect={:?}",
+            self.x0, self.y0, self.x1, self.y1, scale, margin, rect
         );
 
         if rect.size.width == 0 || rect.size.height == 0 {
@@ -126,6 +132,27 @@ impl LandmarkBounds {
                 oriented_box: Some(oriented_box),
             })
     }
+}
+
+fn landmark_silhouette_margin(points: &[HandLandmark; 21]) -> Option<f32> {
+    let palm_width = distance(points[INDEX_MCP_LANDMARK], points[PINKY_MCP_LANDMARK]);
+    let palm_length = distance(points[WRIST_LANDMARK], points[MIDDLE_MCP_LANDMARK]);
+    let margin = palm_width
+        .map(|width| width * LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH)
+        .into_iter()
+        .chain(
+            palm_length
+                .map(|length| length * LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH),
+        )
+        .fold(0.0_f32, f32::max);
+    (margin > 0.0 && margin.is_finite()).then_some(margin)
+}
+
+fn distance(a: HandLandmark, b: HandLandmark) -> Option<f32> {
+    if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
+        return None;
+    }
+    Some(hypot(a.x - b.x, a.y - b.y))
 }
 
 fn landmark_bounds(points: &[HandLandmark; 21]) -> Option<LandmarkBounds> {

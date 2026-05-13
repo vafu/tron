@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use glam::Vec2;
+use glam::{Affine2, Vec2};
 use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
 use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
@@ -294,7 +294,7 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 continue;
             }
 
-            let [frame_x, frame_y] = crop.frame_point(nx, ny).to_array();
+            let [frame_x, frame_y] = crop.transform_point2(Vec2::new(nx, ny)).to_array();
             points[i] = HandLandmark {
                 x: frame_x,
                 y: frame_y,
@@ -396,34 +396,17 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
     )
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Crop {
-    origin: Vec2,
-    x_axis: Vec2,
-    y_axis: Vec2,
-}
-
-impl Crop {
-    fn frame_point(self, x: f32, y: f32) -> Vec2 {
-        self.origin + x * self.x_axis + y * self.y_axis
-    }
-}
-
-fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Crop {
+fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Affine2 {
     let Some(roi) = roi else {
-        return Crop {
-            origin: Vec2::ZERO,
-            x_axis: Vec2::new(frame_size.width as f32, 0.0),
-            y_axis: Vec2::new(0.0, frame_size.height as f32),
-        };
+        return Affine2::from_cols(
+            Vec2::new(frame_size.width as f32, 0.0),
+            Vec2::new(0.0, frame_size.height as f32),
+            Vec2::ZERO,
+        );
     };
     if let Some(oriented_box) = roi.oriented_box {
         let [c0, c1, _, c3] = oriented_box.corners.map(Vec2::from_array);
-        return Crop {
-            origin: c0,
-            x_axis: c1 - c0,
-            y_axis: c3 - c0,
-        };
+        return Affine2::from_cols(c1 - c0, c3 - c0, c0);
     }
 
     let frame_w = frame_size.width.max(1) as f32;
@@ -435,16 +418,16 @@ fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Crop {
     let y0 = (cy - half).clamp(0.0, frame_h);
     let x1 = (cx + half).clamp(0.0, frame_w);
     let y1 = (cy + half).clamp(0.0, frame_h);
-    Crop {
-        origin: Vec2::new(x0, y0),
-        x_axis: Vec2::new(x1 - x0, 0.0),
-        y_axis: Vec2::new(0.0, y1 - y0),
-    }
+    Affine2::from_cols(
+        Vec2::new(x1 - x0, 0.0),
+        Vec2::new(0.0, y1 - y0),
+        Vec2::new(x0, y0),
+    )
 }
 
 fn preprocess_bgra(
     frame: Frame<'_>,
-    crop: Crop,
+    crop: Affine2,
     input_size: usize,
     output: &mut [f32],
 ) -> Result<()> {
@@ -458,7 +441,7 @@ fn preprocess_bgra(
         let ny = (y as f32 + 0.5) / input_sizef;
         for x in 0..input_size {
             let nx = (x as f32 + 0.5) / input_sizef;
-            let [src_xf, src_yf] = crop.frame_point(nx, ny).to_array();
+            let [src_xf, src_yf] = crop.transform_point2(Vec2::new(nx, ny)).to_array();
             let src_xf = src_xf - 0.5;
             let src_yf = src_yf - 0.5;
 

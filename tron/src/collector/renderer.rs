@@ -60,7 +60,11 @@ impl<'a> Renderer<CollectorView<'a>> for CollectorRenderer {
                 a: 1.0,
             },
             |surface| {
-                let rgbrect = NdcRect::FULL;
+                let rgbrect = if view.ir.is_some() {
+                    NdcRect::LEFT
+                } else {
+                    NdcRect::FULL
+                };
                 let mut pass = surface.pass;
                 if let Some(rgb) = view.rgb {
                     self.rgb.render(WgpuFrameView {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tron_api::{FrameSource, NoContext, Processor, Renderer, RoiResult, Size};
+use tron_core::StereoFrameSource;
 use tron_core::process::landmark_filter::MediaPipeLandmarkFilter;
 use tron_core::roi::mediapipe::{
     MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput, MediaPipeHandLandmarkProcessor,
@@ -15,18 +16,22 @@ use winit::window::{WindowAttributes, WindowId};
 
 use crate::renderer::{CollectorRenderer, CollectorView};
 
-pub fn run<S>(
-    frames: S,
+pub fn run<R, I>(
+    rgb: R,
+    ir: I,
+    max_sync_delta_us: u64,
     mediapipe_model: PathBuf,
     mediapipe_config: MediaPipeRoiConfig,
     landmark_model: PathBuf,
     landmark_config: MediaPipeHandLandmarkConfig,
 ) -> Result<()>
 where
-    S: FrameSource + Send,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
+    let frames = StereoFrameSource::new(rgb, ir, max_sync_delta_us);
     let mut app = WindowApp::new(
         frames,
         mediapipe_model,
@@ -38,24 +43,25 @@ where
     app.result
 }
 
-struct WindowApp<S> {
-    frames: S,
+struct WindowApp<R, I> {
+    frames: StereoFrameSource<R, I>,
     mediapipe: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
     filter: MediaPipeLandmarkFilter,
-    rendered_frame_id: Option<u64>,
+    rendered_pair_id: Option<(u64, u64)>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
     renderer: Option<CollectorRenderer>,
     result: Result<()>,
 }
 
-impl<S> WindowApp<S>
+impl<R, I> WindowApp<R, I>
 where
-    S: FrameSource + Send,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
     fn new(
-        frames: S,
+        frames: StereoFrameSource<R, I>,
         mediapipe_model: PathBuf,
         mediapipe_config: MediaPipeRoiConfig,
         landmark_model: PathBuf,
@@ -66,7 +72,7 @@ where
             mediapipe: MediaPipeRoiProcessor::new(mediapipe_model, mediapipe_config)?,
             landmarks: MediaPipeHandLandmarkProcessor::new(landmark_model, landmark_config)?,
             filter: MediaPipeLandmarkFilter::default(),
-            rendered_frame_id: None,
+            rendered_pair_id: None,
             window_id: None,
             window: None,
             renderer: None,
@@ -80,9 +86,10 @@ where
     }
 }
 
-impl<S> ApplicationHandler for WindowApp<S>
+impl<R, I> ApplicationHandler for WindowApp<R, I>
 where
-    S: FrameSource + Send,
+    R: FrameSource + Send,
+    I: FrameSource + Send,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
@@ -135,25 +142,27 @@ where
                         width: size.width,
                         height: size.height,
                     });
-                    self.rendered_frame_id = None;
+                    self.rendered_pair_id = None;
                 }
             }
             WindowEvent::RedrawRequested => {
-                let rgb = match pollster::block_on(self.frames.next_frame()) {
-                    Ok(frame) => frame,
+                let pair = match pollster::block_on(self.frames.next_pair()) {
+                    Ok(pair) => pair,
                     Err(err) => {
                         self.set_error(event_loop, err);
                         return;
                     }
                 };
-                let Some(rgb) = rgb else {
+                let Some(pair) = pair else {
                     if let Some(window) = self.window.as_ref() {
                         window.request_redraw();
                     }
                     return;
                 };
-                let frame_id = rgb.meta.id;
-                if self.rendered_frame_id == Some(frame_id) {
+                let rgb = pair.left;
+                let ir = pair.right;
+                let pair_id = (rgb.meta.id, ir.meta.id);
+                if self.rendered_pair_id == Some(pair_id) {
                     return;
                 }
 
@@ -204,7 +213,7 @@ where
                 };
                 if let Err(err) = renderer.render(CollectorView {
                     rgb: Some(rgb),
-                    ir: None,
+                    ir: Some(ir),
                     rgb_palm_roi: palm_roi,
                     rgb_roi,
                     rgb_landmarks: landmarks.as_ref(),
@@ -212,7 +221,7 @@ where
                     self.set_error(event_loop, err);
                     return;
                 }
-                self.rendered_frame_id = Some(frame_id);
+                self.rendered_pair_id = Some(pair_id);
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }

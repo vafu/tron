@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use tron::capture::open_v4l_stream;
+use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
-use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind};
+use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size};
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::transform::MirroredFrameSource;
 
@@ -21,6 +21,18 @@ struct Cli {
     /// Pixel format produced when decoding MJPEG.
     #[arg(long, value_enum, default_value = "bgra8")]
     decode_format: PixelFormatArg,
+
+    /// Backend-native IR camera identifier. On V4L this is a path such as /dev/video51.
+    #[arg(long)]
+    ir_camera_id: Option<String>,
+
+    /// Backend-native IR metadata node. Defaults to the next /dev/videoN after the IR node.
+    #[arg(long)]
+    ir_metadata_id: Option<String>,
+
+    /// Maximum allowed RGB/IR timestamp delta for a synchronized pair, in microseconds.
+    #[arg(long, default_value_t = 20_000)]
+    max_sync_delta_us: u64,
 
     /// ONNX model path for RGB MediaPipe ROI detection.
     #[arg(long, default_value = "models/hand_detector/model.onnx")]
@@ -58,20 +70,38 @@ async fn run(cli: Cli) -> Result<()> {
         eprintln!("collector: resolving --camera {camera:?}");
     }
 
-    let (rgb_info, rgb_stream) =
-        open_v4l_stream(rgb_request(&cli), PixelFormat::from(cli.decode_format))?;
+    let streams = open_windows_hello_v4l_streams(WindowsHelloV4lConfig {
+        rgb_request: rgb_request(&cli),
+        ir_request: ir_request(&cli),
+        ir_metadata_id: cli.ir_metadata_id.clone(),
+        decoded_rgb_format: PixelFormat::from(cli.decode_format),
+        decoded_ir_format: PixelFormat::Bgra8,
+    })?;
     anyhow::ensure!(
-        rgb_info.format == CaptureFormat::Mjpeg,
+        streams.rgb_info.format == CaptureFormat::Mjpeg,
         "collector RGB feed currently requires MJPEG"
     );
     eprintln!(
         "collector: opened rgb {} {:?} {}x{}",
-        rgb_info.id, rgb_info.format, rgb_info.size.width, rgb_info.size.height
+        streams.rgb_info.id,
+        streams.rgb_info.format,
+        streams.rgb_info.size.width,
+        streams.rgb_info.size.height
+    );
+    eprintln!(
+        "collector: opened ir {} {:?} {}x{}",
+        streams.ir_info.id,
+        streams.ir_info.format,
+        streams.ir_info.size.width,
+        streams.ir_info.size.height
     );
 
-    let rgb = MirroredFrameSource::horizontal(rgb_stream);
+    let rgb = MirroredFrameSource::horizontal(streams.rgb_stream);
+    let ir = MirroredFrameSource::horizontal(streams.ir_stream);
     window::run(
         rgb,
+        ir,
+        cli.max_sync_delta_us,
         cli.rgb_mediapipe_model,
         MediaPipeRoiConfig {
             min_score: cli.rgb_mediapipe_min_score,
@@ -91,5 +121,20 @@ fn rgb_request(cli: &Cli) -> CameraOpenRequest {
     if request.format.is_none() {
         request.format = Some(CaptureFormat::Mjpeg);
     }
+    if request.size.is_none() {
+        request.size = Some(Size {
+            width: 640,
+            height: 480,
+        });
+    }
+    request
+}
+
+fn ir_request(cli: &Cli) -> CameraOpenRequest {
+    let mut request = cli.camera.open_request();
+    request.selector.sensor = SensorKind::Ir;
+    request.selector.id = cli.ir_camera_id.clone();
+    request.format = None;
+    request.size = None;
     request
 }

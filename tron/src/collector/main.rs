@@ -9,7 +9,9 @@ use tron_api::{
     CameraOpenRequest, CaptureFormat, CheckerboardStereoCalibration, DepthSource, PixelFormat,
     SensorKind, Size,
 };
-use tron_core::capture::v4l_control::V4lCameraRoiControl;
+use tron_core::capture::{
+    LitIrFrameStream, V4lUvcmMetadataSource, v4l_control::V4lCameraRoiControl,
+};
 use tron_core::projection::CheckerboardDepthProjection;
 use tron_core::projection::{HandProjectionConfig, HandProjectionProcessor};
 use tron_core::roi::camera::CameraRoiFollowConfig;
@@ -95,10 +97,6 @@ struct Cli {
     /// Serial read timeout for --tof-serial, in milliseconds.
     #[arg(long, default_value_t = 1)]
     tof_timeout_ms: u64,
-
-    /// Directory where collector aggregates are written as BMP frames plus metadata JSON.
-    #[arg(long)]
-    persist_dir: Option<PathBuf>,
 
     /// Drive the IR camera exposure ROI from the center of the RGB palm detection.
     #[arg(long)]
@@ -204,8 +202,11 @@ async fn run(cli: Cli) -> Result<()> {
             None
         };
 
+    let ir_device_id = streams.ir_device_id.clone();
+    let ir_metadata_id = streams.ir_metadata_id.clone();
     let rgb = MirroredFrameSource::horizontal(streams.rgb_stream);
-    let ir = MirroredFrameSource::horizontal(streams.ir_stream);
+    let ir_metadata = V4lUvcmMetadataSource::open(&ir_metadata_id)?;
+    let ir = MirroredFrameSource::horizontal(LitIrFrameStream::new(streams.ir_stream, ir_metadata));
     let camera_roi_update_interval = camera_roi_update_interval(&cli);
     let pipeline = pipeline::Pipeline::new(
         rgb,
@@ -230,17 +231,13 @@ async fn run(cli: Cli) -> Result<()> {
         },
     )?;
     let mut sinks = sink::ComboSink::new();
-    if let Some(persistence) = cli
-        .persist_dir
-        .as_ref()
-        .map(persistence::Persistence::new)
-        .transpose()?
-    {
-        sinks.push(persistence);
-    }
+    sinks.push(sink::ToggleSink::new(
+        persistence::Persistence::new_tmp()?,
+        false,
+    ));
     if cli.camera_roi_from_palm {
         sinks.push(camera_roi::CameraRoiSink::new(
-            Box::new(V4lCameraRoiControl::open(&streams.ir_device_id)?),
+            Box::new(V4lCameraRoiControl::open(&ir_device_id)?),
             camera_roi_update_interval,
         ));
     }

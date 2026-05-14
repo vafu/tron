@@ -3,8 +3,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tron_api::{Sink, Size};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
 use crate::pipeline::Tick;
@@ -101,6 +102,17 @@ where
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && event.physical_key == PhysicalKey::Code(KeyCode::Space) =>
+            {
+                match self.sinks.toggle_enabled() {
+                    Some(true) => eprintln!("collector: persistence engaged"),
+                    Some(false) => eprintln!("collector: persistence disengaged"),
+                    None => eprintln!("collector: no toggleable sink configured"),
+                }
+            }
             WindowEvent::Resized(size) => {
                 if self.sinks_ready {
                     self.sinks.resize(Size {

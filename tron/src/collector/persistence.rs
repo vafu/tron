@@ -1,77 +1,62 @@
-use std::fs::{File, create_dir_all};
-use std::io::{BufWriter, Write};
+use std::fs::{File, create_dir};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
-use tron_api::{
-    DepthSample, Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, SensorKind, Sink, Size,
-};
-use tron_core::projection::{HandProjectionOutput, LandmarkDepthEstimate};
-use tron_core::roi::mediapipe::{HandLandmark, HandLandmarks, Handedness};
+use tron_api::{Frame, PixelFormat, Sink};
 
 use crate::aggregate::Aggregate;
 
 pub struct Persistence {
     root: PathBuf,
-    metadata: MetadataProcessor,
 }
 
 impl Persistence {
-    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
-        let root = root.into();
-        create_dir_all(&root)
-            .with_context(|| format!("create collector persistence dir {}", root.display()))?;
-        Ok(Self {
-            root,
-            metadata: MetadataProcessor,
-        })
+    pub fn new_tmp() -> Result<Self> {
+        let root = create_tmp_dir()?;
+        eprintln!("collector: IR persistence directory {}", root.display());
+        Ok(Self { root })
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl<'a> Sink<&'a Aggregate<'a>> for Persistence {
     async fn consume(&mut self, aggregate: &'a Aggregate<'a>) -> Result<()> {
-        let frame_dir = self.root.join(format!(
-            "pair-{:010}-{:010}",
-            aggregate.rgb.meta.id, aggregate.ir.meta.id
-        ));
-        create_dir_all(&frame_dir)
-            .with_context(|| format!("create collector frame dir {}", frame_dir.display()))?;
-
-        write_bmp(&aggregate.rgb, &frame_dir.join("rgb.bmp")).context("write RGB bitmap")?;
-        write_bmp(&aggregate.ir, &frame_dir.join("ir.bmp")).context("write IR bitmap")?;
-
-        let metadata = self.metadata.process(aggregate, NoContext)?;
-        let file = File::create(frame_dir.join("metadata.json")).context("create metadata JSON")?;
-        serde_json::to_writer_pretty(BufWriter::new(file), &metadata)
-            .context("write metadata JSON")?;
-        Ok(())
+        let path = self
+            .root
+            .join(format!("ir-{:010}.bmp", aggregate.ir.meta.id));
+        write_bmp(&aggregate.ir, &path).context("write IR bitmap")
     }
 }
 
-struct MetadataProcessor;
-
-impl Processor<&Aggregate<'_>, NoContext> for MetadataProcessor {
-    type Output = Value;
-
-    fn process(&mut self, aggregate: &Aggregate<'_>, _context: NoContext) -> Result<Self::Output> {
-        Ok(json!({
-            "pair": {
-                "rgb_id": aggregate.rgb.meta.id,
-                "ir_id": aggregate.ir.meta.id,
-                "sync_delta_us": aggregate.sync_delta_us,
-            },
-            "rgb": frame_json(&aggregate.rgb, "rgb.bmp"),
-            "ir": frame_json(&aggregate.ir, "ir.bmp"),
-            "palm_roi": roi_json(aggregate.palm_roi),
-            "rgb_roi": roi_json(aggregate.rgb_roi),
-            "camera_roi": aggregate.camera_roi.map(rect_json),
-            "landmarks": aggregate.landmarks.as_ref().map(landmarks_json),
-            "depth_sample": aggregate.depth_sample.map(depth_sample_json),
-            "projection": aggregate.projection.as_ref().map(projection_json),
-        }))
+fn create_tmp_dir() -> Result<PathBuf> {
+    for attempt in 0..32_u32 {
+        let root = std::env::temp_dir().join(format!("tron-{}", random_id(attempt)));
+        match create_dir(&root) {
+            Ok(()) => return Ok(root),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err).context("create collector temp persistence dir"),
+        }
     }
+    anyhow::bail!("create unique collector temp persistence dir")
+}
+
+fn random_id(attempt: u32) -> String {
+    let mut bytes = [0_u8; 8];
+    if let Ok(mut file) = File::open("/dev/urandom")
+        && file.read_exact(&mut bytes).is_ok()
+    {
+        let value = u64::from_le_bytes(bytes);
+        return format!("{value:016x}");
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{:x}-{:x}-{:x}", process::id(), nanos, attempt)
 }
 
 fn write_bmp(frame: &Frame<'_>, path: &Path) -> Result<()> {
@@ -182,115 +167,4 @@ fn checked_image_size(row_bytes: usize, height: u32) -> Result<usize> {
     row_bytes
         .checked_mul(height as usize)
         .context("bitmap image byte count overflow")
-}
-
-fn frame_json(frame: &Frame<'_>, file: &str) -> Value {
-    json!({
-        "file": file,
-        "id": frame.meta.id,
-        "sensor": sensor_kind_json(frame.meta.sensor),
-        "size": size_json(frame.meta.size),
-        "format": pixel_format_json(frame.format),
-        "sequence": frame.meta.sequence,
-        "camera_monotonic_us": frame.meta.timestamp.camera_monotonic_us,
-    })
-}
-
-fn projection_json(projection: &HandProjectionOutput) -> Value {
-    json!({
-        "roi": roi_json(projection.roi),
-        "landmarks": projection.landmarks.as_ref().map(landmarks_json),
-        "depth": depth_estimate_json(&projection.depth),
-    })
-}
-
-fn depth_estimate_json(depth: &LandmarkDepthEstimate) -> Value {
-    json!({
-        "anchor_depth_mm": depth.anchor_depth_mm,
-        "anchor_landmark": depth.anchor_landmark,
-        "closest_relative_z": depth.closest_relative_z,
-        "landmark_depths_mm": depth.landmark_depths_mm,
-        "used_depth_sample": depth.used_depth_sample,
-    })
-}
-
-fn landmarks_json(landmarks: &HandLandmarks) -> Value {
-    json!({
-        "presence": landmarks.presence,
-        "handedness": landmarks.handedness.map(handedness_json),
-        "points": landmarks.points.iter().map(landmark_json).collect::<Vec<_>>(),
-    })
-}
-
-fn landmark_json(point: &HandLandmark) -> Value {
-    json!({
-        "x": finite_f32_json(point.x),
-        "y": finite_f32_json(point.y),
-        "z": finite_f32_json(point.z),
-    })
-}
-
-fn depth_sample_json(sample: DepthSample) -> Value {
-    json!({
-        "sequence": sample.sequence,
-        "sensor_timestamp_us": sample.sensor_timestamp_us,
-        "printed_at_ms": sample.printed_at_ms,
-        "resolution": sample.resolution,
-        "center_mm": sample.center_mm,
-        "min_mm": sample.min_mm,
-        "max_mm": sample.max_mm,
-        "valid_zones": sample.valid_zones,
-        "zones": sample.zones[..sample.zone_count].to_vec(),
-    })
-}
-
-fn roi_json(roi: Option<RoiResult>) -> Option<Value> {
-    roi.map(|roi| {
-        json!({
-            "rect": rect_json(roi.rect),
-            "oriented_box": roi.oriented_box.map(|oriented_box| {
-                json!({ "corners": oriented_box.corners })
-            }),
-        })
-    })
-}
-
-fn rect_json(rect: Rect) -> Value {
-    json!({
-        "x": rect.x,
-        "y": rect.y,
-        "size": size_json(rect.size),
-    })
-}
-
-fn size_json(size: Size) -> Value {
-    json!({
-        "width": size.width,
-        "height": size.height,
-    })
-}
-
-fn sensor_kind_json(sensor: SensorKind) -> &'static str {
-    match sensor {
-        SensorKind::Rgb => "rgb",
-        SensorKind::Ir => "ir",
-    }
-}
-
-fn pixel_format_json(format: PixelFormat) -> &'static str {
-    match format {
-        PixelFormat::Gray8 => "gray8",
-        PixelFormat::Bgra8 => "bgra8",
-    }
-}
-
-fn handedness_json(handedness: Handedness) -> &'static str {
-    match handedness {
-        Handedness::Left => "left",
-        Handedness::Right => "right",
-    }
-}
-
-fn finite_f32_json(value: f32) -> Option<f32> {
-    value.is_finite().then_some(value)
 }

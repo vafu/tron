@@ -9,14 +9,17 @@ use tron_api::{
     CameraOpenRequest, CaptureFormat, CheckerboardStereoCalibration, DepthSource, PixelFormat,
     SensorKind, Size,
 };
-use tron_core::projection::{
-    CheckerboardDepthProjection, HandProjectionConfig, HandProjectionProcessor,
-};
+use tron_core::projection::CheckerboardDepthProjection;
+use tron_core::projection::{HandProjectionConfig, HandProjectionProcessor};
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
 use tron_core::transform::MirroredFrameSource;
 
+mod aggregate;
+mod persistence;
+mod pipeline;
 mod renderer;
+mod sink;
 mod window;
 
 #[derive(Debug, Parser)]
@@ -89,6 +92,10 @@ struct Cli {
     /// Serial read timeout for --tof-serial, in milliseconds.
     #[arg(long, default_value_t = 1)]
     tof_timeout_ms: u64,
+
+    /// Directory where collector aggregates are written as BMP frames plus metadata JSON.
+    #[arg(long)]
+    persist_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -180,23 +187,34 @@ async fn run(cli: Cli) -> Result<()> {
 
     let rgb = MirroredFrameSource::horizontal(streams.rgb_stream);
     let ir = MirroredFrameSource::horizontal(streams.ir_stream);
-    window::run(
+    let pipeline = pipeline::Pipeline::new(
         rgb,
         ir,
-        cli.max_sync_delta_us,
-        cli.rgb_mediapipe_model,
-        MediaPipeRoiConfig {
-            min_score: cli.rgb_mediapipe_min_score,
-            box_scale: cli.rgb_mediapipe_box_scale,
+        pipeline::PipelineConfig {
+            max_sync_delta_us: cli.max_sync_delta_us,
+            palm_model: cli.rgb_mediapipe_model,
+            palm: MediaPipeRoiConfig {
+                min_score: cli.rgb_mediapipe_min_score,
+                box_scale: cli.rgb_mediapipe_box_scale,
+            },
+            landmark_model: cli.rgb_mediapipe_landmark_model,
+            landmarks: MediaPipeHandLandmarkConfig {
+                min_presence: cli.rgb_mediapipe_landmark_min_presence,
+                roi_scale: cli.rgb_mediapipe_landmark_roi_scale,
+            },
+            hand_projection,
+            depth_source: roi_depth_source,
         },
-        cli.rgb_mediapipe_landmark_model,
-        MediaPipeHandLandmarkConfig {
-            min_presence: cli.rgb_mediapipe_landmark_min_presence,
-            roi_scale: cli.rgb_mediapipe_landmark_roi_scale,
-        },
-        hand_projection,
-        roi_depth_source,
-    )
+    )?;
+    let mut sinks = sink::ComboSink::new();
+    if let Some(persistence) = cli
+        .persist_dir
+        .map(persistence::Persistence::new)
+        .transpose()?
+    {
+        sinks.push(persistence);
+    }
+    window::run(pipeline, sinks)
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

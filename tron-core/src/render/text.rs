@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::time::{Duration, Instant};
-use tron_api::{Frame, Renderer};
+use tron_api::{Frame, Sink};
 
 #[derive(Clone, Copy, Debug)]
 pub struct TextFrameView<'a> {
@@ -27,8 +27,9 @@ impl TextStatsRenderer {
     }
 }
 
-impl<'a> Renderer<TextFrameView<'a>> for TextStatsRenderer {
-    fn render(&mut self, view: TextFrameView<'a>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'a> Sink<TextFrameView<'a>> for TextStatsRenderer {
+    async fn consume(&mut self, view: TextFrameView<'a>) -> Result<()> {
         self.frames += 1;
         self.acquire_us += view.acquire_us;
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{CheckerboardDetection, Frame, Renderer, Size};
+use tron_api::{CheckerboardDetection, Frame, Sink, Size};
 use tron_core::render::checkerboard_overlay::{
     CheckerboardOverlayRenderer, CheckerboardOverlayView,
 };
@@ -42,8 +42,9 @@ impl CalibrationRenderer {
     }
 }
 
-impl<'a> Renderer<CalibrationView<'a>> for CalibrationRenderer {
-    fn render(&mut self, view: CalibrationView<'a>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'a> Sink<CalibrationView<'a>> for CalibrationRenderer {
+    async fn consume(&mut self, view: CalibrationView<'a>) -> Result<()> {
         self.surface.render(
             "tron-calibration-render-pass",
             wgpu::Color {
@@ -55,17 +56,17 @@ impl<'a> Renderer<CalibrationView<'a>> for CalibrationRenderer {
             |surface| {
                 let mut pass = surface.pass;
                 if let Some(rgb) = view.rgb {
-                    self.rgb.render(WgpuFrameView {
+                    pollster::block_on(self.rgb.consume(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
                         frame: rgb,
                         rect: NdcRect::LEFT,
                         target_size: surface.size,
-                    })?;
+                    }))?;
                 }
                 if let Some(detection) = view.rgb_checkerboard {
-                    self.rgb_checkerboard.render(CheckerboardOverlayView {
+                    pollster::block_on(self.rgb_checkerboard.consume(CheckerboardOverlayView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -73,20 +74,20 @@ impl<'a> Renderer<CalibrationView<'a>> for CalibrationRenderer {
                         color: [1.0, 0.05, 0.05, 1.0],
                         rect: NdcRect::LEFT,
                         target_size: surface.size,
-                    })?;
+                    }))?;
                 }
                 if let Some(ir) = view.ir {
-                    self.ir.render(WgpuFrameView {
+                    pollster::block_on(self.ir.consume(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
                         frame: ir,
                         rect: NdcRect::RIGHT,
                         target_size: surface.size,
-                    })?;
+                    }))?;
                 }
                 if let Some(detection) = view.ir_checkerboard {
-                    self.ir_checkerboard.render(CheckerboardOverlayView {
+                    pollster::block_on(self.ir_checkerboard.consume(CheckerboardOverlayView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -94,7 +95,7 @@ impl<'a> Renderer<CalibrationView<'a>> for CalibrationRenderer {
                         color: [1.0, 0.35, 0.1, 1.0],
                         rect: NdcRect::RIGHT,
                         target_size: surface.size,
-                    })?;
+                    }))?;
                 }
                 Ok(())
             },

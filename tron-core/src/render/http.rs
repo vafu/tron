@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use tron_api::Renderer;
+use tron_api::Sink;
 
 #[derive(Clone)]
 pub struct HttpMetadataRenderer {
@@ -83,11 +83,12 @@ fn spawn_bound(listener: TcpListener) -> Result<HttpMetadataRenderer> {
     Ok(HttpMetadataRenderer { addr, state })
 }
 
-impl<V> Renderer<V> for HttpMetadataRenderer
+#[async_trait::async_trait(?Send)]
+impl<V> Sink<V> for HttpMetadataRenderer
 where
-    V: serde::Serialize,
+    V: serde::Serialize + 'static,
 {
-    fn render(&mut self, view: V) -> Result<()> {
+    async fn consume(&mut self, view: V) -> Result<()> {
         let body = serde_json::to_string(&view).context("serialize metadata HTTP view")?;
         *self.state.lock().expect("metadata state lock poisoned") = body;
         Ok(())

@@ -5,7 +5,7 @@ use crate::uvc_step::UvcStepper;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Instant;
-use tron_api::{Frame, FrameSource, Rect, Renderer, Size};
+use tron_api::{Frame, FrameSource, Rect, Sink, Size};
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -287,10 +287,10 @@ impl ApplicationHandler for WindowApp {
                             .update(&mut self.controller, frame.meta.size, now)?;
                         self.sweep
                             .maybe_log(frame, self.controller.rect(), Instant::now());
-                        renderer.render(RoiView {
+                        pollster::block_on(renderer.consume(RoiView {
                             frame,
                             roi: self.controller.rect(),
-                        })
+                        }))
                     }
                     None => Ok(()),
                 }) {
@@ -445,8 +445,9 @@ impl RoiWindowRenderer {
     }
 }
 
-impl<'a> Renderer<RoiView<'a>> for RoiWindowRenderer {
-    fn render(&mut self, view: RoiView<'a>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'a> Sink<RoiView<'a>> for RoiWindowRenderer {
+    async fn consume(&mut self, view: RoiView<'a>) -> Result<()> {
         let surface_frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -486,22 +487,26 @@ impl<'a> Renderer<RoiView<'a>> for RoiWindowRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.frame.render(WgpuFrameView {
-                device: &self.device,
-                queue: &self.queue,
-                pass: &mut pass,
-                frame: view.frame,
-                rect: NdcRect::FULL,
-                target_size: self.size,
-            })?;
-            self.overlay.render(RoiOverlayView {
-                queue: &self.queue,
-                pass: &mut pass,
-                roi: view.roi,
-                frame_size: view.frame.meta.size,
-                rect: NdcRect::FULL,
-                target_size: self.size,
-            })?;
+            self.frame
+                .consume(WgpuFrameView {
+                    device: &self.device,
+                    queue: &self.queue,
+                    pass: &mut pass,
+                    frame: view.frame,
+                    rect: NdcRect::FULL,
+                    target_size: self.size,
+                })
+                .await?;
+            self.overlay
+                .consume(RoiOverlayView {
+                    queue: &self.queue,
+                    pass: &mut pass,
+                    roi: view.roi,
+                    frame_size: view.frame.meta.size,
+                    rect: NdcRect::FULL,
+                    target_size: self.size,
+                })
+                .await?;
         }
         self.queue.submit([encoder.finish()]);
         surface_frame.present();

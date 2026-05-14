@@ -1,6 +1,6 @@
 use crate::metadata::PlaygroundMetadata;
 use anyhow::Result;
-use tron_api::{Frame, PixelFormat, Rect, Renderer, RoiResult, Size};
+use tron_api::{Frame, PixelFormat, Rect, RoiResult, Sink, Size};
 use tron_core::render::roi_overlay::{RoiOverlayRenderer, RoiOverlayView};
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
 
@@ -51,8 +51,9 @@ impl PlaygroundRenderer {
     }
 }
 
-impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
-    fn render(&mut self, view: PlaygroundView<'a>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'a> Sink<PlaygroundView<'a>> for PlaygroundRenderer {
+    async fn consume(&mut self, view: PlaygroundView<'a>) -> Result<()> {
         let _ = view.metadata;
         if let Some(rgb) = view.rgb
             && rgb.format != PixelFormat::Bgra8
@@ -70,7 +71,7 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
             |surface| {
                 let mut pass = surface.pass;
                 if let Some(depth_cue) = view.depth_cue {
-                    self.depth_cue.render(WgpuFrameView {
+                    pollster::block_on(self.depth_cue.consume(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
@@ -82,7 +83,7 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
                             y1: 1.0,
                         },
                         target_size: surface.size,
-                    })?;
+                    }))?;
                 }
                 if let Some(ir_diff) = view.ir_diff {
                     let rect = NdcRect {
@@ -91,16 +92,16 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
                         x1: 1.0,
                         y1: 1.0,
                     };
-                    self.ir_diff.render(WgpuFrameView {
+                    pollster::block_on(self.ir_diff.consume(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
                         frame: ir_diff,
                         rect,
                         target_size: surface.size,
-                    })?;
+                    }))?;
                     if let Some(roi) = view.roi {
-                        self.roi_overlay.render(RoiOverlayView {
+                        pollster::block_on(self.roi_overlay.consume(RoiOverlayView {
                             device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
@@ -110,10 +111,10 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
                             frame_size: ir_diff.meta.size,
                             rect,
                             target_size: surface.size,
-                        })?;
+                        }))?;
                     }
                     if let Some(camera_roi) = view.camera_roi {
-                        self.camera_roi_overlay.render(RoiOverlayView {
+                        pollster::block_on(self.camera_roi_overlay.consume(RoiOverlayView {
                             device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
@@ -123,7 +124,7 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
                             frame_size: ir_diff.meta.size,
                             rect,
                             target_size: surface.size,
-                        })?;
+                        }))?;
                     }
                 }
                 if let Some(rgb) = view.rgb {
@@ -133,16 +134,16 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
                         x1: 1.0,
                         y1: 0.0,
                     };
-                    self.rgb.render(WgpuFrameView {
+                    pollster::block_on(self.rgb.consume(WgpuFrameView {
                         device: surface.device,
                         queue: surface.queue,
                         pass: &mut pass,
                         frame: rgb,
                         rect,
                         target_size: surface.size,
-                    })?;
+                    }))?;
                     if let Some(rgb_roi) = view.rgb_roi {
-                        self.rgb_roi_overlay.render(RoiOverlayView {
+                        pollster::block_on(self.rgb_roi_overlay.consume(RoiOverlayView {
                             device: surface.device,
                             queue: surface.queue,
                             pass: &mut pass,
@@ -152,7 +153,7 @@ impl<'a> Renderer<PlaygroundView<'a>> for PlaygroundRenderer {
                             frame_size: rgb.meta.size,
                             rect,
                             target_size: surface.size,
-                        })?;
+                        }))?;
                     }
                 }
                 Ok(())

@@ -4,7 +4,7 @@ use crate::renderer::{PlaygroundRenderer, PlaygroundView};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tron::latest::LatestFrameSource;
-use tron_api::{Renderer, Size};
+use tron_api::{Sink, Size};
 use tron_core::render::http::HttpMetadataRenderer;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -150,7 +150,7 @@ impl ApplicationHandler for WindowApp {
                     }
                     camera_roi_rect = camera_roi.current_rect();
                 }
-                match renderer.render(PlaygroundView {
+                match pollster::block_on(renderer.consume(PlaygroundView {
                     rgb: output.rgb.as_ref().map(|frame| frame.as_frame()),
                     depth_cue: output.depth_cue,
                     ir_diff: output.ir_diff,
@@ -158,7 +158,7 @@ impl ApplicationHandler for WindowApp {
                     rgb_roi: output.rgb_roi,
                     camera_roi: camera_roi_rect,
                     metadata: output.metadata,
-                }) {
+                })) {
                     Ok(()) => {}
                     Err(err) => {
                         self.set_error(event_loop, err);
@@ -166,7 +166,7 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
                 if let Some(metadata) = self.metadata.as_mut()
-                    && let Err(err) = metadata.render(output.metadata)
+                    && let Err(err) = pollster::block_on(metadata.consume(output.metadata))
                 {
                     self.set_error(event_loop, err);
                     return;

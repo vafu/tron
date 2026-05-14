@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Frame, PixelFormat, Renderer, Size};
+use tron_api::{Frame, PixelFormat, Sink, Size};
 use wgpu::util::DeviceExt;
 
 mod surface;
@@ -156,8 +156,9 @@ impl WgpuFrameRenderer {
     }
 }
 
-impl<'frame, 'pass> Renderer<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer {
-    fn render(&mut self, view: WgpuFrameView<'frame, 'pass>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'frame, 'pass> Sink<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer {
+    async fn consume(&mut self, view: WgpuFrameView<'frame, 'pass>) -> Result<()> {
         let frame = view.frame;
         self.ensure_texture(view.device, frame.meta.size);
         self.update_vertices(

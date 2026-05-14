@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Renderer, Size};
+use tron_api::{Sink, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
 use crate::render::wgpu::{NdcRect, project_frame_point};
@@ -52,10 +52,9 @@ impl HandLandmarksOverlayRenderer {
     }
 }
 
-impl<'frame, 'pass> Renderer<HandLandmarksOverlayView<'frame, 'pass>>
-    for HandLandmarksOverlayRenderer
-{
-    fn render(&mut self, view: HandLandmarksOverlayView<'frame, 'pass>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'frame, 'pass> Sink<HandLandmarksOverlayView<'frame, 'pass>> for HandLandmarksOverlayRenderer {
+    async fn consume(&mut self, view: HandLandmarksOverlayView<'frame, 'pass>) -> Result<()> {
         build_vertices(
             view.landmarks,
             view.frame_size,
@@ -63,12 +62,14 @@ impl<'frame, 'pass> Renderer<HandLandmarksOverlayView<'frame, 'pass>>
             view.target_size,
             &mut self.vertices,
         );
-        self.lines.render(LineOverlayView {
-            device: view.device,
-            queue: view.queue,
-            pass: view.pass,
-            vertices: &self.vertices,
-        })
+        self.lines
+            .consume(LineOverlayView {
+                device: view.device,
+                queue: view.queue,
+                pass: view.pass,
+                vertices: &self.vertices,
+            })
+            .await
     }
 }
 

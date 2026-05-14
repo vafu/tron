@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::Renderer;
+use tron_api::Sink;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -86,8 +86,9 @@ impl LineOverlayRenderer {
     }
 }
 
-impl<'frame, 'pass> Renderer<LineOverlayView<'frame, 'pass>> for LineOverlayRenderer {
-    fn render(&mut self, view: LineOverlayView<'frame, 'pass>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'frame, 'pass> Sink<LineOverlayView<'frame, 'pass>> for LineOverlayRenderer {
+    async fn consume(&mut self, view: LineOverlayView<'frame, 'pass>) -> Result<()> {
         if view.vertices.is_empty() {
             return Ok(());
         }

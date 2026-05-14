@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{Rect, Renderer, Size};
+use tron_api::{Rect, Sink, Size};
 use tron_core::render::wgpu::NdcRect;
 use wgpu::util::DeviceExt;
 
@@ -86,8 +86,9 @@ impl RoiOverlayRenderer {
     }
 }
 
-impl<'pass> Renderer<RoiOverlayView<'pass>> for RoiOverlayRenderer {
-    fn render(&mut self, view: RoiOverlayView<'pass>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'pass> Sink<RoiOverlayView<'pass>> for RoiOverlayRenderer {
+    async fn consume(&mut self, view: RoiOverlayView<'pass>) -> Result<()> {
         let vertices = roi_vertices(view.roi, view.frame_size, view.rect, view.target_size);
         view.queue
             .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));

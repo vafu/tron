@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{CheckerboardDetection, Renderer, Size};
+use tron_api::{CheckerboardDetection, Sink, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
 use crate::render::wgpu::{NdcRect, project_frame_point};
@@ -28,10 +28,9 @@ impl CheckerboardOverlayRenderer {
     }
 }
 
-impl<'frame, 'pass> Renderer<CheckerboardOverlayView<'frame, 'pass>>
-    for CheckerboardOverlayRenderer
-{
-    fn render(&mut self, view: CheckerboardOverlayView<'frame, 'pass>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'frame, 'pass> Sink<CheckerboardOverlayView<'frame, 'pass>> for CheckerboardOverlayRenderer {
+    async fn consume(&mut self, view: CheckerboardOverlayView<'frame, 'pass>) -> Result<()> {
         build_vertices(
             view.detection,
             view.color,
@@ -42,12 +41,14 @@ impl<'frame, 'pass> Renderer<CheckerboardOverlayView<'frame, 'pass>>
         if self.vertices.is_empty() {
             return Ok(());
         }
-        self.lines.render(LineOverlayView {
-            device: view.device,
-            queue: view.queue,
-            pass: view.pass,
-            vertices: &self.vertices,
-        })
+        self.lines
+            .consume(LineOverlayView {
+                device: view.device,
+                queue: view.queue,
+                pass: view.pass,
+                vertices: &self.vertices,
+            })
+            .await
     }
 }
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{OrientedBoundingBox, Rect, Renderer, Size};
+use tron_api::{OrientedBoundingBox, Rect, Sink, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
 use crate::render::wgpu::{NdcRect, project_frame_point};
@@ -33,8 +33,9 @@ impl RoiOverlayRenderer {
     }
 }
 
-impl<'frame, 'pass> Renderer<RoiOverlayView<'frame, 'pass>> for RoiOverlayRenderer {
-    fn render(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'frame, 'pass> Sink<RoiOverlayView<'frame, 'pass>> for RoiOverlayRenderer {
+    async fn consume(&mut self, view: RoiOverlayView<'frame, 'pass>) -> Result<()> {
         self.vertices = roi_vertices(
             view.oriented_roi
                 .unwrap_or_else(|| rect_to_oriented_box(view.roi)),
@@ -43,12 +44,14 @@ impl<'frame, 'pass> Renderer<RoiOverlayView<'frame, 'pass>> for RoiOverlayRender
             view.rect,
             view.target_size,
         );
-        self.lines.render(LineOverlayView {
-            device: view.device,
-            queue: view.queue,
-            pass: view.pass,
-            vertices: &self.vertices,
-        })
+        self.lines
+            .consume(LineOverlayView {
+                device: view.device,
+                queue: view.queue,
+                pass: view.pass,
+                vertices: &self.vertices,
+            })
+            .await
     }
 }
 

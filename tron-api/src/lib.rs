@@ -65,6 +65,6 @@ pub use frame::{
 };
 pub use process::{InPlaceFrameProcessor, Processor};
 pub use projection::{DepthPointProjection, DepthProjectionMap, ProjectionMapSource};
-pub use render::{NoContext, Renderer};
+pub use render::{NoContext, Sink};
 pub use roi::{OrientedBoundingBox, RoiCandidate, RoiProcessor, RoiResult};
 pub use view_buffer::{ViewBuffer, ViewBufferMut};

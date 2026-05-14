@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use tron_api::{Frame, FrameMeta, FrameSource, PixelFormat, ProjectionMapSource, Renderer, Size};
+use tron_api::{Frame, FrameMeta, FrameSource, PixelFormat, ProjectionMapSource, Sink, Size};
 use tron_core::StereoFrameSource;
 use tron_core::projection::FrameProjectionMap;
 use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
@@ -215,7 +215,7 @@ impl ApplicationHandler for CheckApp {
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
-                if let Err(err) = renderer.render(frame.frame()) {
+                if let Err(err) = pollster::block_on(renderer.consume(frame.frame())) {
                     self.set_error(event_loop, err);
                     return;
                 }
@@ -256,8 +256,9 @@ impl CheckRenderer {
     }
 }
 
-impl Renderer<Frame<'_>> for CheckRenderer {
-    fn render(&mut self, frame: Frame<'_>) -> Result<()> {
+#[async_trait::async_trait(?Send)]
+impl<'a> Sink<Frame<'a>> for CheckRenderer {
+    async fn consume(&mut self, frame: Frame<'a>) -> Result<()> {
         self.surface.render(
             "tron-calibration-check-render-pass",
             wgpu::Color {
@@ -268,14 +269,14 @@ impl Renderer<Frame<'_>> for CheckRenderer {
             },
             |surface| {
                 let mut pass = surface.pass;
-                self.frame.render(WgpuFrameView {
+                pollster::block_on(self.frame.consume(WgpuFrameView {
                     device: surface.device,
                     queue: surface.queue,
                     pass: &mut pass,
                     frame,
                     rect: NdcRect::FULL,
                     target_size: surface.size,
-                })
+                }))
             },
         )
     }

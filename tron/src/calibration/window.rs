@@ -5,7 +5,7 @@ use std::{fs::File, path::PathBuf};
 use anyhow::{Context, Result};
 use tron_api::{
     CheckerboardDetection, CheckerboardSample, CheckerboardSpec, Frame, FrameSource, Processor,
-    Renderer, Size,
+    Sink, Size,
 };
 use tron_core::StereoFrameSource;
 use tron_core::calib::checkerboard::{
@@ -243,12 +243,12 @@ where
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
-                if let Err(err) = renderer.render(CalibrationView {
+                if let Err(err) = pollster::block_on(renderer.consume(CalibrationView {
                     rgb: Some(rgb),
                     ir: Some(ir),
                     rgb_checkerboard,
                     ir_checkerboard,
-                }) {
+                })) {
                     self.set_error(event_loop, err);
                     return;
                 }

@@ -47,18 +47,8 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct Point2d {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct Point3d {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
+pub type Point2d = glam::DVec2;
+pub type Point3d = glam::DVec3;
 
 pub use calib::{
     CalibrationFrameSide, CameraCalibration, CheckerboardDetection, CheckerboardProcessor,

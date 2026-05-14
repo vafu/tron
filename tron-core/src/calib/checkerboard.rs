@@ -108,10 +108,7 @@ impl Processor<Frame<'_>> for OpenCvCheckerboardDetector {
             frame_size: input.meta.size,
             corners: corners
                 .into_iter()
-                .map(|corner| Point2d {
-                    x: corner.x as f64,
-                    y: corner.y as f64,
-                })
+                .map(|corner| Point2d::new(corner.x as f64, corner.y as f64))
                 .collect(),
             score: None,
         }))
@@ -186,11 +183,11 @@ pub fn checkerboard_object_points(spec: CheckerboardSpec) -> Vec<Point3d> {
         Vec::with_capacity((spec.inner_corners.width * spec.inner_corners.height) as usize);
     for y in 0..spec.inner_corners.height {
         for x in 0..spec.inner_corners.width {
-            points.push(Point3d {
-                x: x as f64 * spec.square_size_mm,
-                y: y as f64 * spec.square_size_mm,
-                z: 0.0,
-            });
+            points.push(Point3d::new(
+                x as f64 * spec.square_size_mm,
+                y as f64 * spec.square_size_mm,
+                0.0,
+            ));
         }
     }
     points

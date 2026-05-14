@@ -23,7 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ndarray = "0.17.2"
 opencv = { version = "0.98.2", default-features = false }
-glam = "0.30"
+glam = { version = "0.30", features = ["serde"] }
 wgpu = "22"
 winit = "0.30"
 

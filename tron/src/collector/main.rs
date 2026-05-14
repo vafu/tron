@@ -1,11 +1,19 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
-use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size};
+use tron_api::{
+    CameraOpenRequest, CaptureFormat, CheckerboardStereoCalibration, DepthSource, PixelFormat,
+    SensorKind, Size,
+};
+use tron_core::projection::{
+    CheckerboardDepthProjection, HandProjectionConfig, HandProjectionProcessor,
+};
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
+use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
 use tron_core::transform::MirroredFrameSource;
 
 mod renderer;
@@ -57,6 +65,30 @@ struct Cli {
     /// MediaPipe-style scale applied to the landmark tracking rect.
     #[arg(long, default_value_t = 1.2)]
     rgb_mediapipe_landmark_roi_scale: f32,
+
+    /// Stereo calibration JSON used to project the RGB ROI onto the IR frame.
+    #[arg(long)]
+    stereo_calibration: Option<PathBuf>,
+
+    /// Assumed RGB-camera hand depth, in millimeters, for RGB-to-IR ROI projection.
+    #[arg(long, default_value_t = 700.0)]
+    roi_projection_depth_mm: f64,
+
+    /// Millimeters per MediaPipe relative-z unit for per-landmark projection.
+    #[arg(long, default_value_t = 1000.0)]
+    landmark_z_scale_mm: f64,
+
+    /// VL53L5CX serial port to use as live ROI projection depth.
+    #[arg(long)]
+    tof_serial: Option<PathBuf>,
+
+    /// Baud rate for --tof-serial.
+    #[arg(long, default_value_t = 115200)]
+    tof_baud: u32,
+
+    /// Serial read timeout for --tof-serial, in milliseconds.
+    #[arg(long, default_value_t = 1)]
+    tof_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -69,6 +101,18 @@ async fn run(cli: Cli) -> Result<()> {
     if let Some(camera) = &cli.camera.camera {
         eprintln!("collector: resolving --camera {camera:?}");
     }
+    anyhow::ensure!(
+        cli.roi_projection_depth_mm >= 0.0,
+        "--roi-projection-depth-mm must be non-negative"
+    );
+    anyhow::ensure!(
+        cli.landmark_z_scale_mm >= 0.0,
+        "--landmark-z-scale-mm must be non-negative"
+    );
+    anyhow::ensure!(
+        cli.tof_serial.is_none() || cli.stereo_calibration.is_some(),
+        "--tof-serial requires --stereo-calibration"
+    );
 
     let streams = open_windows_hello_v4l_streams(WindowsHelloV4lConfig {
         rgb_request: rgb_request(&cli),
@@ -96,6 +140,44 @@ async fn run(cli: Cli) -> Result<()> {
         streams.ir_info.size.height
     );
 
+    let hand_projection = if let Some(path) = cli.stereo_calibration.as_ref() {
+        let file = std::fs::File::open(path)
+            .map(std::io::BufReader::new)
+            .map_err(anyhow::Error::from)?;
+        let calibration: CheckerboardStereoCalibration = serde_json::from_reader(file)?;
+        eprintln!(
+            "collector: projecting RGB ROI onto IR using {} at {:.1} mm",
+            path.display(),
+            cli.roi_projection_depth_mm
+        );
+        Some(HandProjectionProcessor::new(
+            CheckerboardDepthProjection::new(calibration),
+            HandProjectionConfig {
+                fallback_depth_mm: cli.roi_projection_depth_mm,
+                landmark_z_scale_mm: cli.landmark_z_scale_mm,
+                source_mirrored_x: true,
+                target_mirrored_x: true,
+            },
+        )?)
+    } else {
+        None
+    };
+    let roi_depth_source: Option<Box<dyn DepthSource + Send>> =
+        if let Some(port) = cli.tof_serial.as_ref() {
+            eprintln!(
+                "collector: using TOF depth from {} at {} baud",
+                port.display(),
+                cli.tof_baud
+            );
+            Some(Box::new(Vl53l5cxSerialDepthSource::open(
+                port,
+                cli.tof_baud,
+                Duration::from_millis(cli.tof_timeout_ms),
+            )?))
+        } else {
+            None
+        };
+
     let rgb = MirroredFrameSource::horizontal(streams.rgb_stream);
     let ir = MirroredFrameSource::horizontal(streams.ir_stream);
     window::run(
@@ -112,6 +194,8 @@ async fn run(cli: Cli) -> Result<()> {
             min_presence: cli.rgb_mediapipe_landmark_min_presence,
             roi_scale: cli.rgb_mediapipe_landmark_roi_scale,
         },
+        hand_projection,
+        roi_depth_source,
     )
 }
 

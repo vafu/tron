@@ -2,9 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tron_api::{FrameSource, NoContext, Processor, Renderer, RoiResult, Size};
+use tron_api::{DepthSource, FrameSource, NoContext, Processor, Renderer, RoiResult, Size};
 use tron_core::StereoFrameSource;
-use tron_core::process::landmark_filter::MediaPipeLandmarkFilter;
+use tron_core::projection::{
+    CheckerboardDepthProjection, HandProjectionInput, HandProjectionProcessor,
+};
 use tron_core::roi::mediapipe::{
     MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput, MediaPipeHandLandmarkProcessor,
     MediaPipeRoiConfig, MediaPipeRoiProcessor,
@@ -24,6 +26,8 @@ pub fn run<R, I>(
     mediapipe_config: MediaPipeRoiConfig,
     landmark_model: PathBuf,
     landmark_config: MediaPipeHandLandmarkConfig,
+    hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
+    roi_depth_source: Option<Box<dyn DepthSource + Send>>,
 ) -> Result<()>
 where
     R: FrameSource + Send,
@@ -38,6 +42,8 @@ where
         mediapipe_config,
         landmark_model,
         landmark_config,
+        hand_projection,
+        roi_depth_source,
     )?;
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
@@ -47,7 +53,8 @@ struct WindowApp<R, I> {
     frames: StereoFrameSource<R, I>,
     mediapipe: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
-    filter: MediaPipeLandmarkFilter,
+    hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
+    roi_depth_source: Option<Box<dyn DepthSource + Send>>,
     rendered_pair_id: Option<(u64, u64)>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
@@ -66,12 +73,15 @@ where
         mediapipe_config: MediaPipeRoiConfig,
         landmark_model: PathBuf,
         landmark_config: MediaPipeHandLandmarkConfig,
+        hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
+        roi_depth_source: Option<Box<dyn DepthSource + Send>>,
     ) -> Result<Self> {
         Ok(Self {
             frames,
             mediapipe: MediaPipeRoiProcessor::new(mediapipe_model, mediapipe_config)?,
             landmarks: MediaPipeHandLandmarkProcessor::new(landmark_model, landmark_config)?,
-            filter: MediaPipeLandmarkFilter::default(),
+            hand_projection,
+            roi_depth_source,
             rendered_pair_id: None,
             window_id: None,
             window: None,
@@ -174,7 +184,7 @@ where
                         return;
                     }
                 };
-                let raw_landmarks = match self.landmarks.process(
+                let landmarks = match self.landmarks.process(
                     MediaPipeHandLandmarkInput {
                         frame: rgb,
                         roi: palm_roi,
@@ -187,11 +197,6 @@ where
                         return;
                     }
                 };
-
-                let landmarks = self
-                    .filter
-                    .process(raw_landmarks, NoContext)
-                    .unwrap_or(None);
 
                 if let Some(ref l) = landmarks {
                     let valid_count = l.points.iter().filter(|p| p.x.is_finite()).count();
@@ -207,6 +212,40 @@ where
                     roi
                 });
                 let rgb_roi = landmark_roi.or(palm_roi);
+                let projected = if let Some(hand_projection) = self.hand_projection.as_mut() {
+                    let depth_sample = match self.roi_depth_source.as_mut() {
+                        Some(depth_source) => {
+                            match pollster::block_on(
+                                depth_source.depth_at(rgb.meta.timestamp.received_at),
+                            ) {
+                                Ok(sample) => sample,
+                                Err(err) => {
+                                    self.set_error(event_loop, err);
+                                    return;
+                                }
+                            }
+                        }
+                        None => None,
+                    };
+                    match hand_projection.process(
+                        HandProjectionInput {
+                            roi: rgb_roi,
+                            landmarks: landmarks.as_ref(),
+                            depth_sample,
+                            source_size: rgb.meta.size,
+                            target_size: ir.meta.size,
+                        },
+                        NoContext,
+                    ) {
+                        Ok(projected) => Some(projected),
+                        Err(err) => {
+                            self.set_error(event_loop, err);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
@@ -216,7 +255,11 @@ where
                     ir: Some(ir),
                     rgb_palm_roi: palm_roi,
                     rgb_roi,
+                    ir_roi: projected.as_ref().and_then(|projected| projected.roi),
                     rgb_landmarks: landmarks.as_ref(),
+                    ir_landmarks: projected
+                        .as_ref()
+                        .and_then(|projected| projected.landmarks.as_ref()),
                 }) {
                     self.set_error(event_loop, err);
                     return;

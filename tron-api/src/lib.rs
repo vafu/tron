@@ -64,7 +64,7 @@ pub use frame::{
     PixelFormat, SensorKind, TimestampSource,
 };
 pub use process::{InPlaceFrameProcessor, Processor};
-pub use projection::{DepthProjectionMap, ProjectionMapSource};
+pub use projection::{DepthPointProjection, DepthProjectionMap, ProjectionMapSource};
 pub use render::{NoContext, Renderer};
 pub use roi::{OrientedBoundingBox, RoiCandidate, RoiProcessor, RoiResult};
 pub use view_buffer::{ViewBuffer, ViewBufferMut};

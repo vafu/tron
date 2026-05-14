@@ -2,10 +2,16 @@ use std::time::Instant;
 
 use anyhow::Result;
 
+use crate::Point2d;
+
 pub trait DepthProjectionMap {
     type Map;
 
     fn map(&self, depth_mm: f64) -> Result<Self::Map>;
+}
+
+pub trait DepthPointProjection {
+    fn project_points(&self, depth_mm: f64, points: &[Point2d]) -> Result<Vec<Option<Point2d>>>;
 }
 
 #[async_trait::async_trait]

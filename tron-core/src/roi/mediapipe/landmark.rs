@@ -211,7 +211,7 @@ impl MediaPipeHandLandmarkProcessor {
             .context("MediaPipe hand landmark model has no inputs")?;
         let input_name = input.name().to_owned();
         let input_size = square_input_size(input.dtype()).unwrap_or(DEFAULT_INPUT_SIZE);
-        let (landmarks_output, presence_output, handedness_output) = classify_outputs(&session);
+        let (landmarks_output, presence_output, handedness_output) = classify_outputs(&session)?;
         Ok(Self {
             session,
             config,
@@ -344,7 +344,7 @@ fn square_input_size(value_type: &ValueType) -> Option<usize> {
     }
 }
 
-fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) {
+fn classify_outputs(session: &Session) -> Result<(usize, Option<usize>, Option<usize>)> {
     let mut landmarks_output = None;
     let mut presence_output = None;
     let mut handedness_output = None;
@@ -367,11 +367,14 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
             landmarks_output = Some(i);
         }
 
-        if presence_output.is_none() && (name.contains("presence") || name.contains("score")) {
+        if presence_output.is_none()
+            && (name.contains("presence") || name.contains("score"))
+            && elements == 1
+        {
             presence_output = Some(i);
         }
 
-        if handedness_output.is_none() && name.contains("handed") {
+        if handedness_output.is_none() && name.contains("handed") && elements == 1 {
             handedness_output = Some(i);
         }
     }
@@ -388,12 +391,25 @@ fn classify_outputs(session: &Session) -> (usize, Option<usize>, Option<usize>) 
         );
     }
 
-    // 3. Absolute fallbacks (Index 0 is usually landmarks in most conversions)
-    (
-        landmarks_output.unwrap_or(0),
-        presence_output,
-        handedness_output,
-    )
+    let Some(landmarks_output) = landmarks_output else {
+        let outputs = outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                let shape = match output.dtype() {
+                    ValueType::Tensor { shape, .. } => format!("{shape:?}"),
+                    _ => "not a tensor".to_string(),
+                };
+                format!("{i}:{}:{shape}", output.name())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "MediaPipe hand landmark model has no 21x3 landmark output tensor; outputs: {outputs}"
+        );
+    };
+
+    Ok((landmarks_output, presence_output, handedness_output))
 }
 
 fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Affine2 {

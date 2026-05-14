@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tron_api::{CameraRoiControl, Rect, RoiResult, Size};
+use tron_api::{CameraRoiControl, NoContext, Processor, Rect, RoiResult, Size};
+use tron_core::roi::camera::{
+    CameraRoiFollowConfig, CameraRoiFollowInput, CameraRoiFollowProcessor,
+};
 
 #[derive(Clone, Debug)]
 pub struct CameraRoiConfig {
@@ -12,6 +15,7 @@ pub struct CameraRoiConfig {
 pub struct CameraRoiDriver {
     config: CameraRoiConfig,
     control: Box<dyn CameraRoiControl>,
+    follow: CameraRoiFollowProcessor,
     actual_rect: Option<Rect>,
     last_requested_rect: Option<Rect>,
     last_update: Option<Instant>,
@@ -20,6 +24,9 @@ pub struct CameraRoiDriver {
 impl CameraRoiDriver {
     pub fn new(config: CameraRoiConfig, control: Box<dyn CameraRoiControl>) -> Self {
         Self {
+            follow: CameraRoiFollowProcessor::new(CameraRoiFollowConfig {
+                min_edge: config.min_edge,
+            }),
             config,
             control,
             actual_rect: None,
@@ -48,7 +55,18 @@ impl CameraRoiDriver {
                 y: 0,
                 size: frame_size,
             });
-        let rect = expand_to_min_edge(roi.rect, self.config.min_edge, allowed_bounds);
+        let Some(rect) = self.follow.process(
+            CameraRoiFollowInput {
+                roi: Some(roi),
+                allowed_bounds: Some(allowed_bounds),
+                source_size: frame_size,
+                target_size: frame_size,
+            },
+            NoContext,
+        )?
+        else {
+            return Ok(());
+        };
         if self.last_requested_rect == Some(rect) {
             return Ok(());
         }
@@ -67,37 +85,6 @@ impl CameraRoiDriver {
     }
 }
 
-fn expand_to_min_edge(rect: Rect, min_edge: u32, bounds: Rect) -> Rect {
-    let width = rect.size.width.max(min_edge).min(bounds.size.width).max(1);
-    let height = rect
-        .size
-        .height
-        .max(min_edge)
-        .min(bounds.size.height)
-        .max(1);
-    let bx1 = bounds.x.saturating_add(bounds.size.width);
-    let by1 = bounds.y.saturating_add(bounds.size.height);
-    let cx = rect
-        .x
-        .saturating_add(rect.size.width / 2)
-        .clamp(bounds.x, bx1);
-    let cy = rect
-        .y
-        .saturating_add(rect.size.height / 2)
-        .clamp(bounds.y, by1);
-    let x = cx
-        .saturating_sub(width / 2)
-        .clamp(bounds.x, bx1.saturating_sub(width));
-    let y = cy
-        .saturating_sub(height / 2)
-        .clamp(bounds.y, by1.saturating_sub(height));
-    Rect {
-        x,
-        y,
-        size: Size { width, height },
-    }
-}
-
 fn clamp_rect(rect: Rect, frame_size: Size) -> Rect {
     let x = rect.x.min(frame_size.width);
     let y = rect.y.min(frame_size.height);
@@ -107,45 +94,5 @@ fn clamp_rect(rect: Rect, frame_size: Size) -> Rect {
         x,
         y,
         size: Size { width, height },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expands_roi_inside_allowed_bounds() {
-        let rect = expand_to_min_edge(
-            Rect {
-                x: 95,
-                y: 95,
-                size: Size {
-                    width: 5,
-                    height: 5,
-                },
-            },
-            40,
-            Rect {
-                x: 80,
-                y: 80,
-                size: Size {
-                    width: 50,
-                    height: 50,
-                },
-            },
-        );
-
-        assert_eq!(
-            rect,
-            Rect {
-                x: 80,
-                y: 80,
-                size: Size {
-                    width: 40,
-                    height: 40
-                }
-            }
-        );
     }
 }

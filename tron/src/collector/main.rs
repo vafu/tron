@@ -9,13 +9,16 @@ use tron_api::{
     CameraOpenRequest, CaptureFormat, CheckerboardStereoCalibration, DepthSource, PixelFormat,
     SensorKind, Size,
 };
+use tron_core::capture::v4l_control::V4lCameraRoiControl;
 use tron_core::projection::CheckerboardDepthProjection;
 use tron_core::projection::{HandProjectionConfig, HandProjectionProcessor};
+use tron_core::roi::camera::CameraRoiFollowConfig;
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
 use tron_core::transform::MirroredFrameSource;
 
 mod aggregate;
+mod camera_roi;
 mod persistence;
 mod pipeline;
 mod renderer;
@@ -96,6 +99,22 @@ struct Cli {
     /// Directory where collector aggregates are written as BMP frames plus metadata JSON.
     #[arg(long)]
     persist_dir: Option<PathBuf>,
+
+    /// Drive the IR camera exposure ROI from the center of the RGB palm detection.
+    #[arg(long)]
+    camera_roi_from_palm: bool,
+
+    /// Minimum edge size for the palm-following camera exposure ROI rectangle.
+    #[arg(long, default_value_t = 40)]
+    camera_roi_min_edge: u32,
+
+    /// Minimum interval between palm-following camera exposure ROI updates. Set 0 to disable throttling.
+    #[arg(long, default_value_t = 100)]
+    camera_roi_update_ms: u64,
+
+    /// Disable palm-following camera exposure ROI update throttling.
+    #[arg(long)]
+    no_camera_roi_throttle: bool,
 }
 
 #[tokio::main]
@@ -187,6 +206,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     let rgb = MirroredFrameSource::horizontal(streams.rgb_stream);
     let ir = MirroredFrameSource::horizontal(streams.ir_stream);
+    let camera_roi_update_interval = camera_roi_update_interval(&cli);
     let pipeline = pipeline::Pipeline::new(
         rgb,
         ir,
@@ -202,6 +222,9 @@ async fn run(cli: Cli) -> Result<()> {
                 min_presence: cli.rgb_mediapipe_landmark_min_presence,
                 roi_scale: cli.rgb_mediapipe_landmark_roi_scale,
             },
+            camera_roi: cli.camera_roi_from_palm.then_some(CameraRoiFollowConfig {
+                min_edge: cli.camera_roi_min_edge,
+            }),
             hand_projection,
             depth_source: roi_depth_source,
         },
@@ -209,12 +232,27 @@ async fn run(cli: Cli) -> Result<()> {
     let mut sinks = sink::ComboSink::new();
     if let Some(persistence) = cli
         .persist_dir
+        .as_ref()
         .map(persistence::Persistence::new)
         .transpose()?
     {
         sinks.push(persistence);
     }
+    if cli.camera_roi_from_palm {
+        sinks.push(camera_roi::CameraRoiSink::new(
+            Box::new(V4lCameraRoiControl::open(&streams.ir_device_id)?),
+            camera_roi_update_interval,
+        ));
+    }
     window::run(pipeline, sinks)
+}
+
+fn camera_roi_update_interval(cli: &Cli) -> Option<Duration> {
+    if cli.no_camera_roi_throttle || cli.camera_roi_update_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(cli.camera_roi_update_ms))
+    }
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

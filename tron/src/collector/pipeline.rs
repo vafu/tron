@@ -6,6 +6,9 @@ use tron_core::StereoFrameSource;
 use tron_core::projection::{
     CheckerboardDepthProjection, HandProjectionInput, HandProjectionProcessor,
 };
+use tron_core::roi::camera::{
+    CameraRoiFollowConfig, CameraRoiFollowInput, CameraRoiFollowProcessor,
+};
 use tron_core::roi::landmark::{LandmarkRoiInput, LandmarkRoiProcessor};
 use tron_core::roi::mediapipe::{
     MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput, MediaPipeHandLandmarkProcessor,
@@ -20,6 +23,7 @@ pub struct PipelineConfig {
     pub palm: MediaPipeRoiConfig,
     pub landmark_model: PathBuf,
     pub landmarks: MediaPipeHandLandmarkConfig,
+    pub camera_roi: Option<CameraRoiFollowConfig>,
     pub hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
     pub depth_source: Option<Box<dyn DepthSource + Send>>,
 }
@@ -33,6 +37,7 @@ pub struct Pipeline<R, I> {
     palm: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
     landmark_roi: LandmarkRoiProcessor,
+    camera_roi: Option<CameraRoiFollowProcessor>,
     hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
     depth_source: Option<Box<dyn DepthSource + Send>>,
 }
@@ -52,6 +57,7 @@ where
                 config.landmarks,
             )?,
             landmark_roi,
+            camera_roi: config.camera_roi.map(CameraRoiFollowProcessor::new),
             hand_projection: config.hand_projection,
             depth_source: config.depth_source,
         })
@@ -94,6 +100,18 @@ where
         }
 
         let rgb_roi = landmark_roi.or(palm_roi);
+        let camera_roi = match self.camera_roi.as_mut() {
+            Some(camera_roi) => camera_roi.process(
+                CameraRoiFollowInput {
+                    roi: palm_roi,
+                    allowed_bounds: None,
+                    source_size: rgb.meta.size,
+                    target_size: ir.meta.size,
+                },
+                NoContext,
+            )?,
+            None => None,
+        };
         let depth_sample = match self.depth_source.as_mut() {
             Some(depth_source) => {
                 depth_source
@@ -123,6 +141,7 @@ where
             palm_roi,
             landmarks,
             rgb_roi,
+            camera_roi,
             depth_sample,
             projection,
         }))

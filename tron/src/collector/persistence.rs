@@ -66,6 +66,7 @@ impl Processor<&Aggregate<'_>, NoContext> for MetadataProcessor {
             "ir": frame_json(&aggregate.ir, "ir.bmp"),
             "palm_roi": roi_json(aggregate.palm_roi),
             "rgb_roi": roi_json(aggregate.rgb_roi),
+            "camera_roi": aggregate.camera_roi.map(rect_json),
             "landmarks": aggregate.landmarks.as_ref().map(landmarks_json),
             "depth_sample": aggregate.depth_sample.map(depth_sample_json),
             "projection": aggregate.projection.as_ref().map(projection_json),

@@ -54,6 +54,20 @@ impl<T> WindowApp<T> {
         self.result = Err(err);
         event_loop.exit();
     }
+
+    fn drain_pointer_output(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return true;
+        };
+        while let Ok(event) = self.pointer_output.try_recv() {
+            if let Err(err) = pollster::block_on(renderer.consume(event)) {
+                self.set_error(event_loop, err);
+                return false;
+            }
+        }
+        true
+    }
+
 }
 
 impl<T> ApplicationHandler for WindowApp<T>
@@ -115,6 +129,10 @@ where
                 }
             }
             WindowEvent::RedrawRequested => {
+                if !self.drain_pointer_output(event_loop) {
+                    return;
+                }
+
                 let frame = match self.ticker.tick() {
                     Ok(frame) => frame,
                     Err(err) => {
@@ -123,6 +141,12 @@ where
                     }
                 };
                 let Some(frame) = frame else {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        if let Err(err) = pollster::block_on(renderer.render_cached()) {
+                            self.set_error(event_loop, err);
+                            return;
+                        }
+                    }
                     if let Some(window) = self.window.as_ref() {
                         window.request_redraw();
                     }

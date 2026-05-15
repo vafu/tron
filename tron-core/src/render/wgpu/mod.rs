@@ -55,6 +55,7 @@ pub struct WgpuFrameRenderer {
     vertex_buffer: wgpu::Buffer,
     texture: Option<FrameTexture>,
     bgra_scratch: Vec<u8>,
+    cached_view: Option<CachedFrameView>,
 }
 
 pub struct WgpuFrameView<'frame, 'pass> {
@@ -66,11 +67,25 @@ pub struct WgpuFrameView<'frame, 'pass> {
     pub target_size: Size,
 }
 
+pub struct WgpuCachedFrameView<'frame, 'pass> {
+    pub queue: &'frame wgpu::Queue,
+    pub pass: &'frame mut wgpu::RenderPass<'pass>,
+    pub rect: NdcRect,
+    pub target_size: Size,
+}
+
 struct FrameTexture {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CachedFrameView {
+    frame_size: Size,
+    flip_x: bool,
+    flip_y: bool,
 }
 
 impl WgpuFrameRenderer {
@@ -152,6 +167,7 @@ impl WgpuFrameRenderer {
             vertex_buffer,
             texture: None,
             bgra_scratch: Vec::new(),
+            cached_view: None,
         }
     }
 }
@@ -169,6 +185,11 @@ impl<'frame, 'pass> Sink<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer {
             frame.buffer.is_horizontally_mirrored(),
             frame.buffer.is_vertically_mirrored(),
         );
+        self.cached_view = Some(CachedFrameView {
+            frame_size: frame.meta.size,
+            flip_x: frame.buffer.is_horizontally_mirrored(),
+            flip_y: frame.buffer.is_vertically_mirrored(),
+        });
         // SAFETY: texture upload consumes physical backing storage. Mirroring is
         // represented separately through flipped texture coordinates above.
         let raw = unsafe { frame.buffer.raw() };
@@ -221,10 +242,29 @@ impl<'frame, 'pass> Sink<WgpuFrameView<'frame, 'pass>> for WgpuFrameRenderer {
             },
         );
 
-        view.pass.set_pipeline(&self.pipeline);
-        view.pass.set_bind_group(0, &texture.bind_group, &[]);
-        view.pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        view.pass.draw(0..6, 0..1);
+        self.draw(view.pass);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl<'frame, 'pass> Sink<WgpuCachedFrameView<'frame, 'pass>> for WgpuFrameRenderer {
+    async fn consume(&mut self, view: WgpuCachedFrameView<'frame, 'pass>) -> Result<()> {
+        let Some(cached) = self.cached_view else {
+            return Ok(());
+        };
+        if self.texture.is_none() {
+            return Ok(());
+        }
+        self.update_vertices(
+            view.queue,
+            cached.frame_size,
+            view.rect,
+            view.target_size,
+            cached.flip_x,
+            cached.flip_y,
+        );
+        self.draw(view.pass);
         Ok(())
     }
 }
@@ -292,6 +332,16 @@ impl WgpuFrameRenderer {
             0,
             bytemuck::cast_slice(&quad(x0, y0, x1, y1, flip_x, flip_y)),
         );
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(texture) = self.texture.as_ref() else {
+            return;
+        };
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &texture.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(0..6, 0..1);
     }
 }
 

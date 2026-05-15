@@ -4,7 +4,9 @@ use tron_core::render::hand_landmarks_overlay::{
     HandLandmarksOverlayRenderer, HandLandmarksOverlayView,
 };
 use tron_core::render::roi_overlay::{RoiOverlayRenderer, RoiOverlayView};
-use tron_core::render::wgpu::{NdcRect, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext};
+use tron_core::render::wgpu::{
+    NdcRect, WgpuCachedFrameView, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext,
+};
 
 use crate::pipeline::ControllerFrame;
 use crate::pointer_sink::PointerOverlaySink;
@@ -34,6 +36,30 @@ impl Renderer {
 
     pub fn resize(&mut self, size: Size) {
         self.surface.resize(size);
+    }
+
+    pub async fn render_cached(&mut self) -> Result<()> {
+        self.surface.render(
+            "tron-controller-cached-render-pass",
+            wgpu::Color {
+                r: 0.02,
+                g: 0.02,
+                b: 0.025,
+                a: 1.0,
+            },
+            |surface| {
+                let mut pass = surface.pass;
+                pollster::block_on(self.rgb.consume(WgpuCachedFrameView {
+                    queue: surface.queue,
+                    pass: &mut pass,
+                    rect: NdcRect::FULL,
+                    target_size: surface.size,
+                }))?;
+                self.pointer
+                    .render(surface.device, surface.queue, &mut pass, surface.size)?;
+                Ok(())
+            },
+        )
     }
 }
 

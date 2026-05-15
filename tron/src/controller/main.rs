@@ -9,7 +9,7 @@ use tron_api::{
 };
 use tron_core::pointer::{AbsolutePointerProducer, JoystickPointerProducer};
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
-use tron_core::transform::MirroredFrameSource;
+use tron_core::transform::{FpsThrottledFrameSource, MirroredFrameSource};
 
 mod pipeline;
 mod pointer_sink;
@@ -54,6 +54,10 @@ struct Cli {
     /// Pointer producer used by the controller demo.
     #[arg(long, value_enum, default_value = "absolute")]
     pointer_mode: PointerMode,
+
+    /// Limit controller frame processing to this FPS.
+    #[arg(long)]
+    max_fps: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -84,7 +88,7 @@ fn run(cli: Cli) -> Result<()> {
     );
 
     let pipeline = pipeline::Pipeline::new(
-        MirroredFrameSource::horizontal(stream),
+        FpsThrottledFrameSource::new(MirroredFrameSource::horizontal(stream), cli.max_fps)?,
         pipeline::PipelineConfig {
             palm_model: cli.rgb_mediapipe_model,
             palm: MediaPipeRoiConfig {

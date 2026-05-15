@@ -7,7 +7,16 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "models/hand_detector/model.onnx".to_string());
     let session = Session::builder()?.commit_from_file(model_path)?;
 
-    println!("Outputs:");
+    println!("Inputs:");
+    for (i, input) in session.inputs().iter().enumerate() {
+        let shape = match input.dtype() {
+            ValueType::Tensor { shape, .. } => format!("{:?}", shape),
+            _ => "not a tensor".to_string(),
+        };
+        println!("  Index {}: name={}, shape={}", i, input.name(), shape);
+    }
+
+    println!("\nOutputs:");
     for (i, output) in session.outputs().iter().enumerate() {
         let shape = match output.dtype() {
             ValueType::Tensor { shape, .. } => format!("{:?}", shape),

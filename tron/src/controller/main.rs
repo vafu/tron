@@ -12,6 +12,7 @@ use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig}
 use tron_core::transform::MirroredFrameSource;
 
 mod pipeline;
+mod pointer_sink;
 mod renderer;
 mod window;
 

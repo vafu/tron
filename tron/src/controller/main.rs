@@ -4,7 +4,10 @@ use anyhow::Result;
 use clap::Parser;
 use tron::capture::open_v4l_stream;
 use tron::config::{CameraArgs, PixelFormatArg};
-use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size};
+use tron_api::{
+    CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size, spawn_event_channels,
+};
+use tron_core::pointer::AbsolutePointerProducer;
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::transform::MirroredFrameSource;
 
@@ -48,7 +51,8 @@ struct Cli {
     rgb_mediapipe_landmark_roi_scale: f32,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     run(Cli::parse())
 }
@@ -83,7 +87,8 @@ fn run(cli: Cli) -> Result<()> {
             },
         },
     )?;
-    window::run(pipeline)
+    let pointer = spawn_event_channels(AbsolutePointerProducer::default(), 8, 32);
+    window::run(pipeline, pointer)
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tron_api::{Sink, Size};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tron_api::{EventProducerChannels, PointerEvent, PointerInput, Sink, Size};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -10,19 +12,22 @@ use winit::window::{WindowAttributes, WindowId};
 use crate::pipeline::Tick;
 use crate::renderer::Renderer;
 
-pub fn run<T>(ticker: T) -> Result<()>
+pub fn run<T>(ticker: T, pointer: EventProducerChannels<PointerInput, PointerEvent>) -> Result<()>
 where
     T: Tick,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(ticker);
+    let mut app = WindowApp::new(ticker, pointer);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
 
 struct WindowApp<T> {
     ticker: T,
+    pointer_input: mpsc::Sender<PointerInput>,
+    pointer_output: mpsc::Receiver<PointerEvent>,
+    _pointer_task: JoinHandle<Result<()>>,
     rendered_frame_id: Option<u64>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
@@ -31,9 +36,12 @@ struct WindowApp<T> {
 }
 
 impl<T> WindowApp<T> {
-    fn new(ticker: T) -> Self {
+    fn new(ticker: T, pointer: EventProducerChannels<PointerInput, PointerEvent>) -> Self {
         Self {
             ticker,
+            pointer_input: pointer.input,
+            pointer_output: pointer.output,
+            _pointer_task: pointer.task,
             rendered_frame_id: None,
             window_id: None,
             window: None,
@@ -129,6 +137,17 @@ where
                 let Some(renderer) = self.renderer.as_mut() else {
                     return;
                 };
+                if let Err(err) = self.pointer_input.try_send(PointerInput {
+                    gesture: frame.gesture.clone(),
+                }) {
+                    tracing::debug!("controller pointer input dropped: {err}");
+                }
+                while let Ok(event) = self.pointer_output.try_recv() {
+                    if let Err(err) = pollster::block_on(renderer.consume(event)) {
+                        self.set_error(event_loop, err);
+                        return;
+                    }
+                }
                 if let Err(err) = pollster::block_on(renderer.consume(&frame)) {
                     self.set_error(event_loop, err);
                     return;

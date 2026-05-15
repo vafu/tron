@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use tron_api::{Frame, FrameSource, NoContext, Processor, RoiResult};
+use tron_api::{Frame, FrameSource, GestureFrame, NoContext, Processor, RoiResult};
+use tron_core::gesture::{GesturePreprocessor, GesturePreprocessorInput};
 use tron_core::roi::landmark::{LandmarkRoiInput, LandmarkRoiProcessor};
 use tron_core::roi::mediapipe::{
     HandLandmarks, MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput,
@@ -20,6 +21,7 @@ pub struct ControllerFrame<'a> {
     pub palm_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,
     pub rgb_roi: Option<RoiResult>,
+    pub gesture: GestureFrame,
 }
 
 impl ControllerFrame<'_> {
@@ -37,6 +39,7 @@ pub struct Pipeline<S> {
     palm: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
     landmark_roi: LandmarkRoiProcessor,
+    gesture: GesturePreprocessor,
 }
 
 impl<S> Pipeline<S>
@@ -53,6 +56,7 @@ where
                 config.landmarks,
             )?,
             landmark_roi,
+            gesture: GesturePreprocessor,
         })
     }
 
@@ -77,12 +81,22 @@ where
             NoContext,
         )?;
         let rgb_roi = landmark_roi.or(palm_roi);
+        let gesture = self.gesture.process(
+            GesturePreprocessorInput {
+                landmarks: landmarks.as_ref(),
+                palm_roi,
+                frame_size: rgb.meta.size,
+                timestamp: rgb.meta.timestamp.received_at,
+            },
+            NoContext,
+        )?;
 
         Ok(Some(ControllerFrame {
             rgb,
             palm_roi,
             landmarks,
             rgb_roi,
+            gesture,
         }))
     }
 }

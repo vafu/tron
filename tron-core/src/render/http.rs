@@ -6,12 +6,12 @@ use std::thread;
 use tron_api::Sink;
 
 #[derive(Clone)]
-pub struct HttpMetadataRenderer {
+pub struct HttpJsonSink {
     addr: SocketAddr,
     state: Arc<Mutex<String>>,
 }
 
-impl HttpMetadataRenderer {
+impl HttpJsonSink {
     pub fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
         let listener = TcpListener::bind(addr).context("bind metadata HTTP listener")?;
         spawn_bound(listener)
@@ -57,7 +57,7 @@ impl HttpMetadataRenderer {
     }
 }
 
-fn spawn_bound(listener: TcpListener) -> Result<HttpMetadataRenderer> {
+fn spawn_bound(listener: TcpListener) -> Result<HttpJsonSink> {
     let addr = listener
         .local_addr()
         .context("read metadata HTTP address")?;
@@ -80,16 +80,13 @@ fn spawn_bound(listener: TcpListener) -> Result<HttpMetadataRenderer> {
         })
         .context("spawn metadata HTTP thread")?;
 
-    Ok(HttpMetadataRenderer { addr, state })
+    Ok(HttpJsonSink { addr, state })
 }
 
 #[async_trait::async_trait(?Send)]
-impl<V> Sink<V> for HttpMetadataRenderer
-where
-    V: serde::Serialize + 'static,
-{
-    async fn consume(&mut self, view: V) -> Result<()> {
-        let body = serde_json::to_string(&view).context("serialize metadata HTTP view")?;
+impl Sink<serde_json::Value> for HttpJsonSink {
+    async fn consume(&mut self, view: serde_json::Value) -> Result<()> {
+        let body = serde_json::to_string(&view).context("serialize HTTP JSON view")?;
         *self.state.lock().expect("metadata state lock poisoned") = body;
         Ok(())
     }

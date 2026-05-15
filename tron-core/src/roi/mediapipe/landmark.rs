@@ -41,7 +41,7 @@ pub struct MediaPipeHandLandmarkInput<'a> {
     pub roi: Option<RoiResult>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct HandLandmark {
     pub x: f32,
     pub y: f32,
@@ -55,15 +55,17 @@ impl HandLandmark {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct HandLandmarks {
     pub points: [HandLandmark; 21],
     pub presence: f32,
     pub handedness: Option<Handedness>,
+    #[serde(skip)]
     pub timestamp: Instant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Handedness {
     Left,
     Right,

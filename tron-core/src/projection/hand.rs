@@ -32,14 +32,14 @@ pub struct HandProjectionInput<'a> {
     pub target_size: Size,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct HandProjectionOutput {
     pub roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,
     pub depth: LandmarkDepthEstimate,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct LandmarkDepthEstimate {
     pub anchor_depth_mm: f64,
     pub anchor_landmark: Option<usize>,

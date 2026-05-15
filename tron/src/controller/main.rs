@@ -8,6 +8,7 @@ use tron_api::{
     CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size, spawn_event_channels,
 };
 use tron_core::pointer::{AbsolutePointerProducer, JoystickPointerProducer};
+use tron_core::render::http::HttpJsonSink;
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::transform::{FpsThrottledFrameSource, MirroredFrameSource};
 
@@ -106,7 +107,14 @@ fn run(cli: Cli) -> Result<()> {
         PointerMode::Absolute => spawn_event_channels(AbsolutePointerProducer::default(), 8, 32),
         PointerMode::Joystick => spawn_event_channels(JoystickPointerProducer::default(), 8, 32),
     };
-    window::run(pipeline, pointer)
+    let mut sinks = window::ComboSink::new();
+    let metadata = HttpJsonSink::bind_available(("127.0.0.1", 8765), 100)?;
+    eprintln!(
+        "controller: metadata http://{}/metadata",
+        metadata.local_addr()
+    );
+    sinks.push_box(Box::new(metadata));
+    window::run(pipeline, pointer, sinks)
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

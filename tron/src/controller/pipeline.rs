@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use serde::Serialize;
 use tron_api::{Frame, FrameSource, GestureFrame, NoContext, Processor, RoiResult};
 use tron_core::gesture::{GesturePreprocessor, GesturePreprocessorInput};
 use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
@@ -17,7 +18,9 @@ pub struct PipelineConfig {
     pub landmarks: MediaPipeHandLandmarkConfig,
 }
 
+#[derive(Serialize)]
 pub struct ControllerFrame<'a> {
+    #[serde(skip)]
     pub rgb: Frame<'a>,
     pub palm_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,

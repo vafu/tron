@@ -1,18 +1,18 @@
 use crate::{NoContext, Processor, Rect, Size};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RoiCandidate {
     pub rect: Rect,
     pub area: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct RoiResult {
     pub rect: Rect,
     pub oriented_box: Option<OrientedBoundingBox>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct OrientedBoundingBox {
     pub corners: [[f32; 2]; 4],
 }

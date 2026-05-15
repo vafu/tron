@@ -14,6 +14,7 @@ use tron_core::capture::{
 };
 use tron_core::projection::CheckerboardDepthProjection;
 use tron_core::projection::{HandProjectionConfig, HandProjectionProcessor};
+use tron_core::render::http::HttpJsonSink;
 use tron_core::roi::camera::CameraRoiFollowConfig;
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
@@ -230,18 +231,21 @@ async fn run(cli: Cli) -> Result<()> {
             depth_source: roi_depth_source,
         },
     )?;
+    let persistence = sink::ToggleSink::new(persistence::Persistence::new_tmp()?, false);
     let mut sinks = sink::ComboSink::new();
-    sinks.push(sink::ToggleSink::new(
-        persistence::Persistence::new_tmp()?,
-        false,
-    ));
     if cli.camera_roi_from_palm {
-        sinks.push(camera_roi::CameraRoiSink::new(
+        sinks.push_box(Box::new(camera_roi::CameraRoiSink::new(
             Box::new(V4lCameraRoiControl::open(&ir_device_id)?),
             camera_roi_update_interval,
-        ));
+        )));
     }
-    window::run(pipeline, sinks)
+    let metadata = HttpJsonSink::bind_available(("127.0.0.1", 8765), 100)?;
+    eprintln!(
+        "collector: metadata http://{}/metadata",
+        metadata.local_addr()
+    );
+    sinks.push_box(Box::new(metadata));
+    window::run(pipeline, sinks, persistence)
 }
 
 fn camera_roi_update_interval(cli: &Cli) -> Option<Duration> {

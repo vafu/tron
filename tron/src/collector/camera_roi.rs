@@ -4,7 +4,6 @@ use anyhow::Result;
 use tron_api::{CameraRoiControl, Rect, Sink};
 
 use crate::aggregate::Aggregate;
-use crate::sink::AggregateSink;
 
 pub struct CameraRoiSink {
     control: Box<dyn CameraRoiControl>,
@@ -47,12 +46,5 @@ impl<'a> Sink<&'a Aggregate<'a>> for CameraRoiSink {
         self.last_requested_rect = Some(rect);
         self.last_update = Some(Instant::now());
         Ok(())
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl AggregateSink for CameraRoiSink {
-    async fn consume(&mut self, aggregate: &Aggregate<'_>) -> Result<()> {
-        <Self as Sink<&Aggregate<'_>>>::consume(self, aggregate).await
     }
 }

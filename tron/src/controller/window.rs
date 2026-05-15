@@ -9,16 +9,22 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
 
-use crate::pipeline::Tick;
+use crate::pipeline::{ControllerFrame, Tick};
 use crate::renderer::Renderer;
 
-pub fn run<T>(ticker: T, pointer: EventProducerChannels<PointerInput, PointerOutput>) -> Result<()>
+pub type ComboSink = tron_core::sink::ComboSink<dyn for<'a> Sink<&'a ControllerFrame<'a>>>;
+
+pub fn run<T>(
+    ticker: T,
+    pointer: EventProducerChannels<PointerInput, PointerOutput>,
+    sinks: ComboSink,
+) -> Result<()>
 where
     T: Tick,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(ticker, pointer);
+    let mut app = WindowApp::new(ticker, pointer, sinks);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -28,6 +34,7 @@ struct WindowApp<T> {
     pointer_input: mpsc::Sender<PointerInput>,
     pointer_output: mpsc::Receiver<PointerOutput>,
     _pointer_task: JoinHandle<Result<()>>,
+    sinks: ComboSink,
     rendered_frame_id: Option<u64>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
@@ -36,12 +43,17 @@ struct WindowApp<T> {
 }
 
 impl<T> WindowApp<T> {
-    fn new(ticker: T, pointer: EventProducerChannels<PointerInput, PointerOutput>) -> Self {
+    fn new(
+        ticker: T,
+        pointer: EventProducerChannels<PointerInput, PointerOutput>,
+        sinks: ComboSink,
+    ) -> Self {
         Self {
             ticker,
             pointer_input: pointer.input,
             pointer_output: pointer.output,
             _pointer_task: pointer.task,
+            sinks,
             rendered_frame_id: None,
             window_id: None,
             window: None,
@@ -67,7 +79,6 @@ impl<T> WindowApp<T> {
         }
         true
     }
-
 }
 
 impl<T> ApplicationHandler for WindowApp<T>
@@ -121,10 +132,11 @@ where
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(Size {
+                    let size = Size {
                         width: size.width,
                         height: size.height,
-                    });
+                    };
+                    renderer.resize(size);
                     self.rendered_frame_id = None;
                 }
             }
@@ -173,6 +185,10 @@ where
                     }
                 }
                 if let Err(err) = pollster::block_on(renderer.consume(&frame)) {
+                    self.set_error(event_loop, err);
+                    return;
+                }
+                if let Err(err) = pollster::block_on(self.sinks.consume(&frame)) {
                     self.set_error(event_loop, err);
                     return;
                 }

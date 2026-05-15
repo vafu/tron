@@ -21,6 +21,8 @@ use winit::window::{WindowAttributes, WindowId};
 use crate::latency::{CalibrationLatencyLog, CalibrationLatencySample};
 use crate::renderer::{CalibrationRenderer, CalibrationView};
 
+pub type ComboSink = tron_core::sink::ComboSink<dyn for<'a> Sink<&'a CalibrationAggregate<'a>>>;
+
 pub struct CalibrationRunConfig {
     pub checkerboard: CheckerboardSpec,
     pub min_samples: usize,
@@ -28,7 +30,16 @@ pub struct CalibrationRunConfig {
     pub output: PathBuf,
 }
 
-pub fn run<R, I>(rgb: R, ir: I, config: CalibrationRunConfig) -> Result<()>
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct CalibrationAggregate<'a> {
+    #[serde(skip)]
+    pub rgb: Frame<'a>,
+    #[serde(skip)]
+    pub ir: Frame<'a>,
+    pub sync_delta_us: i64,
+}
+
+pub fn run<R, I>(rgb: R, ir: I, sinks: ComboSink, config: CalibrationRunConfig) -> Result<()>
 where
     R: FrameSource + Send,
     I: FrameSource + Send,
@@ -36,13 +47,14 @@ where
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let frames = StereoFrameSource::new(rgb, ir, config.max_sync_delta_us);
-    let mut app = WindowApp::new(frames, config);
+    let mut app = WindowApp::new(frames, sinks, config);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
 
 struct WindowApp<R, I> {
     frames: StereoFrameSource<R, I>,
+    sinks: ComboSink,
     rgb_checkerboard: CheckerboardDetectionState,
     ir_checkerboard: CheckerboardDetectionState,
     sample_builder: CheckerboardSampleBuilder,
@@ -63,10 +75,15 @@ where
     R: FrameSource + Send,
     I: FrameSource + Send,
 {
-    fn new(frames: StereoFrameSource<R, I>, config: CalibrationRunConfig) -> Self {
+    fn new(
+        frames: StereoFrameSource<R, I>,
+        sinks: ComboSink,
+        config: CalibrationRunConfig,
+    ) -> Self {
         let checkerboard = OpenCvCheckerboardConfig::new(config.checkerboard);
         Self {
             frames,
+            sinks,
             rgb_checkerboard: CheckerboardDetectionState::new(checkerboard),
             ir_checkerboard: CheckerboardDetectionState::new(checkerboard),
             sample_builder: CheckerboardSampleBuilder::new(config.checkerboard),
@@ -162,10 +179,11 @@ where
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(Size {
+                    let size = Size {
                         width: size.width,
                         height: size.height,
-                    });
+                    };
+                    renderer.resize(size);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -201,8 +219,13 @@ where
                     }
                     return;
                 };
-                let rgb = pair.left;
-                let ir = pair.right;
+                let aggregate = CalibrationAggregate {
+                    rgb: pair.left,
+                    ir: pair.right,
+                    sync_delta_us: pair.delta_us,
+                };
+                let rgb = aggregate.rgb;
+                let ir = aggregate.ir;
 
                 let rgb_detect_start = Instant::now();
                 if let Err(err) = self.rgb_checkerboard.update(Some(&rgb)) {
@@ -249,6 +272,10 @@ where
                     rgb_checkerboard,
                     ir_checkerboard,
                 })) {
+                    self.set_error(event_loop, err);
+                    return;
+                }
+                if let Err(err) = pollster::block_on(self.sinks.consume(&aggregate)) {
                     self.set_error(event_loop, err);
                     return;
                 }

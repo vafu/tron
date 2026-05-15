@@ -8,17 +8,18 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
+use crate::persistence::Persistence;
 use crate::pipeline::Tick;
 use crate::renderer::Renderer;
-use crate::sink::ComboSink;
+use crate::sink::{ComboSink, ToggleSink};
 
-pub fn run<T>(ticker: T, sinks: ComboSink) -> Result<()>
+pub fn run<T>(ticker: T, sinks: ComboSink, persistence: ToggleSink<Persistence>) -> Result<()>
 where
     T: Tick,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(ticker, sinks);
+    let mut app = WindowApp::new(ticker, sinks, persistence);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -26,22 +27,24 @@ where
 struct WindowApp<T> {
     ticker: T,
     sinks: ComboSink,
-    sinks_ready: bool,
+    persistence: ToggleSink<Persistence>,
     rendered_pair_id: Option<(u64, u64)>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
+    renderer: Option<Renderer>,
     result: Result<()>,
 }
 
 impl<T> WindowApp<T> {
-    fn new(ticker: T, sinks: ComboSink) -> Self {
+    fn new(ticker: T, sinks: ComboSink, persistence: ToggleSink<Persistence>) -> Self {
         Self {
             ticker,
             sinks,
-            sinks_ready: false,
+            persistence,
             rendered_pair_id: None,
             window_id: None,
             window: None,
+            renderer: None,
             result: Ok(()),
         }
     }
@@ -57,7 +60,7 @@ where
     T: Tick,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.sinks_ready {
+        if self.renderer.is_some() {
             return;
         }
 
@@ -80,8 +83,7 @@ where
         )) {
             Ok(renderer) => {
                 self.window = Some(window);
-                self.sinks.push_front(renderer);
-                self.sinks_ready = true;
+                self.renderer = Some(renderer);
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
@@ -107,15 +109,15 @@ where
                     && !event.repeat
                     && event.physical_key == PhysicalKey::Code(KeyCode::Space) =>
             {
-                match self.sinks.toggle_enabled() {
-                    Some(true) => eprintln!("collector: persistence engaged"),
-                    Some(false) => eprintln!("collector: persistence disengaged"),
-                    None => eprintln!("collector: no toggleable sink configured"),
+                if self.persistence.toggle_enabled() {
+                    eprintln!("collector: persistence engaged");
+                } else {
+                    eprintln!("collector: persistence disengaged");
                 }
             }
             WindowEvent::Resized(size) => {
-                if self.sinks_ready {
-                    self.sinks.resize(Size {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(Size {
                         width: size.width,
                         height: size.height,
                     });
@@ -142,7 +144,15 @@ where
                     return;
                 }
 
-                if !self.sinks_ready {
+                let Some(renderer) = self.renderer.as_mut() else {
+                    return;
+                };
+                if let Err(err) = pollster::block_on(renderer.consume(&aggregate)) {
+                    self.set_error(event_loop, err);
+                    return;
+                }
+                if let Err(err) = pollster::block_on(self.persistence.consume(&aggregate)) {
+                    self.set_error(event_loop, err);
                     return;
                 }
                 if let Err(err) = pollster::block_on(self.sinks.consume(&aggregate)) {

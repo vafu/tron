@@ -6,7 +6,7 @@ use tron::capture::{WindowsHelloV4lConfig, open_windows_hello_v4l_streams};
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind};
 use tron_core::capture::v4l_control::V4lCameraRoiControl;
-use tron_core::render::http::HttpMetadataRenderer;
+use tron_core::render::http::HttpJsonSink;
 
 use crate::camera_roi::{CameraRoiConfig, CameraRoiDriver};
 use crate::pipeline::PlaygroundPipelineConfig;
@@ -135,20 +135,19 @@ fn run(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    let metadata = if cli.no_metadata_http {
-        None
-    } else {
-        let renderer = HttpMetadataRenderer::bind_available(("127.0.0.1", cli.metadata_port), 20)?;
+    let mut sinks = window::ComboSink::new();
+    if !cli.no_metadata_http {
+        let metadata = HttpJsonSink::bind_available(("127.0.0.1", cli.metadata_port), 20)?;
         eprintln!(
             "tron-playground: metadata http://{}/metadata",
-            renderer.local_addr()
+            metadata.local_addr()
         );
-        Some(renderer)
-    };
+        sinks.push_box(Box::new(metadata));
+    }
     window::run(
         rgb_latest,
         ir_latest,
-        metadata,
+        sinks,
         camera_roi,
         PlaygroundPipelineConfig {
             roi_threshold: cli.roi_threshold,

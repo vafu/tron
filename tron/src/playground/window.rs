@@ -1,26 +1,29 @@
 use crate::camera_roi::CameraRoiDriver;
-use crate::pipeline::{PlaygroundInput, PlaygroundPipeline, PlaygroundPipelineConfig};
+use crate::pipeline::{
+    PlaygroundInput, PlaygroundOutput, PlaygroundPipeline, PlaygroundPipelineConfig,
+};
 use crate::renderer::{PlaygroundRenderer, PlaygroundView};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tron::latest::LatestFrameSource;
 use tron_api::{Sink, Size};
-use tron_core::render::http::HttpMetadataRenderer;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
 
+pub type ComboSink = tron_core::sink::ComboSink<dyn for<'a> Sink<&'a PlaygroundOutput<'a>>>;
+
 pub fn run(
     rgb: LatestFrameSource,
     ir: LatestFrameSource,
-    metadata: Option<HttpMetadataRenderer>,
+    sinks: ComboSink,
     camera_roi: Option<CameraRoiDriver>,
     pipeline_config: PlaygroundPipelineConfig,
 ) -> Result<()> {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(rgb, ir, metadata, camera_roi, pipeline_config)?;
+    let mut app = WindowApp::new(rgb, ir, sinks, camera_roi, pipeline_config)?;
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -31,7 +34,7 @@ struct WindowApp {
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
     renderer: Option<PlaygroundRenderer>,
-    metadata: Option<HttpMetadataRenderer>,
+    sinks: ComboSink,
     camera_roi: Option<CameraRoiDriver>,
     pipeline: PlaygroundPipeline,
     result: Result<()>,
@@ -41,7 +44,7 @@ impl WindowApp {
     fn new(
         rgb: LatestFrameSource,
         ir: LatestFrameSource,
-        metadata: Option<HttpMetadataRenderer>,
+        sinks: ComboSink,
         camera_roi: Option<CameraRoiDriver>,
         pipeline_config: PlaygroundPipelineConfig,
     ) -> Result<Self> {
@@ -51,7 +54,7 @@ impl WindowApp {
             window_id: None,
             window: None,
             renderer: None,
-            metadata,
+            sinks,
             camera_roi,
             pipeline: PlaygroundPipeline::new(pipeline_config)?,
             result: Ok(()),
@@ -110,10 +113,13 @@ impl ApplicationHandler for WindowApp {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => renderer.resize(Size {
-                width: size.width,
-                height: size.height,
-            }),
+            WindowEvent::Resized(size) => {
+                let size = Size {
+                    width: size.width,
+                    height: size.height,
+                };
+                renderer.resize(size);
+            }
             WindowEvent::RedrawRequested => {
                 let rgb = match self.rgb.next_frame() {
                     Ok(frame) => frame,
@@ -165,9 +171,7 @@ impl ApplicationHandler for WindowApp {
                         return;
                     }
                 }
-                if let Some(metadata) = self.metadata.as_mut()
-                    && let Err(err) = pollster::block_on(metadata.consume(output.metadata))
-                {
+                if let Err(err) = pollster::block_on(self.sinks.consume(&output)) {
                     self.set_error(event_loop, err);
                     return;
                 }

@@ -4,6 +4,7 @@ use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{CameraOpenRequest, CameraOpener, FrameSource, PixelFormat, SensorKind};
 use tron_core::capture::v4l::V4lCameraOpener;
 use tron_core::capture::v4l_control::V4lCameraRoiControl;
+use tron_core::render::http::HttpJsonSink;
 
 mod overlay;
 mod roi;
@@ -52,9 +53,8 @@ fn main() -> Result<()> {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let request = camera_request(&cli);
     let source = V4lCameraOpener::with_decoded_mjpeg_format(PixelFormat::from(cli.decode_format))
-        .open(request)?;
+        .open(camera_request(&cli))?;
     let info = source.info().clone();
     eprintln!(
         "roi-control: opened {} {:?} {}x{}",
@@ -80,7 +80,20 @@ fn run(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    window::run(Box::new(source), controller, cli.sweep_speed, uvc_stepper)
+    let mut sinks = window::ComboSink::new();
+    let metadata = HttpJsonSink::bind_available(("127.0.0.1", 8765), 100)?;
+    eprintln!(
+        "roi-control: metadata http://{}/metadata",
+        metadata.local_addr()
+    );
+    sinks.push_box(Box::new(metadata));
+    window::run(
+        Box::new(source),
+        controller,
+        cli.sweep_speed,
+        uvc_stepper,
+        sinks,
+    )
 }
 
 fn camera_request(cli: &Cli) -> CameraOpenRequest {

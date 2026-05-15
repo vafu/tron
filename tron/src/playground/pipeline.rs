@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::exposure_roi::{ClippedExposureRoiConfig, ClippedExposureRoiDetector};
 use crate::metadata::{CameraStatsProcessor, PlaygroundMetadata};
 use anyhow::Result;
+use serde::Serialize;
 use std::path::PathBuf;
 use tron_api::{Frame, NoContext, OwnedFrame, Processor, RoiResult};
 use tron_core::process::frame_diff::{
@@ -19,9 +20,13 @@ pub struct PlaygroundInput {
     pub ir: Option<Arc<OwnedFrame>>,
 }
 
+#[derive(Serialize)]
 pub struct PlaygroundOutput<'a> {
+    #[serde(skip)]
     pub rgb: Option<Arc<OwnedFrame>>,
+    #[serde(skip)]
     pub ir_diff: Option<Frame<'a>>,
+    #[serde(skip)]
     pub depth_cue: Option<Frame<'a>>,
     pub roi: Option<RoiResult>,
     pub rgb_roi: Option<RoiResult>,

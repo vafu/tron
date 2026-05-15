@@ -14,15 +14,18 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
+pub type ComboSink = tron_core::sink::ComboSink<dyn for<'a> Sink<&'a RoiAggregate<'a>>>;
+
 pub fn run(
     stream: Box<dyn FrameSource + 'static>,
     controller: RoiController,
     sweep_speed: f32,
     uvc_stepper: Option<UvcStepper>,
+    sinks: ComboSink,
 ) -> Result<()> {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(stream, controller, sweep_speed, uvc_stepper);
+    let mut app = WindowApp::new(stream, controller, sweep_speed, uvc_stepper, sinks);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -39,6 +42,7 @@ struct WindowApp {
     dragging_roi: bool,
     sweep: RoiSweep,
     uvc_stepper: Option<UvcStepper>,
+    sinks: ComboSink,
     result: Result<()>,
 }
 
@@ -48,6 +52,7 @@ impl WindowApp {
         controller: RoiController,
         sweep_speed: f32,
         uvc_stepper: Option<UvcStepper>,
+        sinks: ComboSink,
     ) -> Self {
         Self {
             stream,
@@ -64,6 +69,7 @@ impl WindowApp {
             dragging_roi: false,
             sweep: RoiSweep::new(sweep_speed),
             uvc_stepper,
+            sinks,
             result: Ok(()),
         }
     }
@@ -287,10 +293,12 @@ impl ApplicationHandler for WindowApp {
                             .update(&mut self.controller, frame.meta.size, now)?;
                         self.sweep
                             .maybe_log(frame, self.controller.rect(), Instant::now());
-                        pollster::block_on(renderer.consume(RoiView {
+                        let aggregate = RoiAggregate {
                             frame,
                             roi: self.controller.rect(),
-                        }))
+                        };
+                        pollster::block_on(renderer.consume(aggregate))?;
+                        pollster::block_on(self.sinks.consume(&aggregate))
                     }
                     None => Ok(()),
                 }) {
@@ -358,9 +366,11 @@ fn window_to_frame(
     Some((x, y))
 }
 
-struct RoiView<'a> {
-    frame: Frame<'a>,
-    roi: Rect,
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct RoiAggregate<'a> {
+    #[serde(skip)]
+    pub frame: Frame<'a>,
+    pub roi: Rect,
 }
 
 struct RoiWindowRenderer {
@@ -446,8 +456,8 @@ impl RoiWindowRenderer {
 }
 
 #[async_trait::async_trait(?Send)]
-impl<'a> Sink<RoiView<'a>> for RoiWindowRenderer {
-    async fn consume(&mut self, view: RoiView<'a>) -> Result<()> {
+impl<'a> Sink<RoiAggregate<'a>> for RoiWindowRenderer {
+    async fn consume(&mut self, view: RoiAggregate<'a>) -> Result<()> {
         let surface_frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

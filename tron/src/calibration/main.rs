@@ -13,6 +13,7 @@ use tron_api::{
 use tron_core::projection::{
     CheckerboardDepthProjection, DepthProjectionMapSource, StaticProjectionMapSource,
 };
+use tron_core::render::http::HttpJsonSink;
 use tron_core::sensor::vl53l5cx_serial::Vl53l5cxSerialDepthSource;
 
 mod check;
@@ -133,6 +134,14 @@ fn run(cli: Cli) -> Result<()> {
         streams.ir_info.size.height
     );
 
+    let mut sinks = window::ComboSink::new();
+    let metadata = HttpJsonSink::bind_available(("127.0.0.1", 8765), 100)?;
+    eprintln!(
+        "tron-calibration: metadata http://{}/metadata",
+        metadata.local_addr()
+    );
+    sinks.push_box(Box::new(metadata));
+
     if let Some(path) = cli.check.as_ref() {
         let file = std::fs::File::open(path)
             .map(std::io::BufReader::new)
@@ -177,6 +186,7 @@ fn run(cli: Cli) -> Result<()> {
     window::run(
         rgb_stream,
         ir_stream,
+        sinks,
         window::CalibrationRunConfig {
             checkerboard: checkerboard_spec(&cli),
             min_samples: cli.min_samples,

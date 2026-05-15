@@ -1,12 +1,14 @@
+use serde::Serialize;
 use tron_api::{DepthSample, Frame, Rect, RoiResult};
 use tron_core::projection::HandProjectionOutput;
 use tron_core::roi::mediapipe::HandLandmarks;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Aggregate<'a> {
+    #[serde(skip)]
     pub rgb: Frame<'a>,
+    #[serde(skip)]
     pub ir: Frame<'a>,
-    #[allow(dead_code)]
     pub sync_delta_us: i64,
     pub palm_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,

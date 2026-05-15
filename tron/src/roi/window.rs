@@ -368,7 +368,6 @@ fn window_to_frame(
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct RoiAggregate<'a> {
-    #[serde(skip)]
     pub frame: Frame<'a>,
     pub roi: Rect,
 }

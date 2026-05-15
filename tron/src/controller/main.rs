@@ -87,9 +87,15 @@ fn run(cli: Cli) -> Result<()> {
         "controller: opened rgb {} {:?} {}x{}",
         info.id, info.format, info.size.width, info.size.height
     );
+    let stream = MirroredFrameSource::horizontal(stream);
+    let stream: Box<dyn tron_api::FrameSource + Send> = if let Some(max_fps) = cli.max_fps {
+        Box::new(FpsThrottledFrameSource::new(stream, max_fps)?)
+    } else {
+        Box::new(stream)
+    };
 
     let pipeline = pipeline::Pipeline::new(
-        FpsThrottledFrameSource::new(MirroredFrameSource::horizontal(stream), cli.max_fps)?,
+        stream,
         pipeline::PipelineConfig {
             palm_model: cli.rgb_mediapipe_model,
             palm: MediaPipeRoiConfig {

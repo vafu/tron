@@ -15,13 +15,15 @@ pub enum SensorKind {
     Ir,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureFormat {
     Mjpeg,
     Gray8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(usize)]
 pub enum PixelFormat {
     Gray8 = 1,
@@ -47,7 +49,8 @@ impl TryFrom<CaptureFormat> for PixelFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TimestampSource {
     StartOfExposure,
     EndOfFrame,
@@ -55,14 +58,15 @@ pub enum TimestampSource {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct FrameTimestamp {
     pub camera_monotonic_us: Option<i64>,
     pub source: TimestampSource,
+    #[serde(skip)]
     pub received_at: Instant,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct FrameMeta {
     pub id: FrameId,
     pub sensor: SensorKind,
@@ -71,10 +75,11 @@ pub struct FrameMeta {
     pub sequence: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Frame<'a> {
     pub meta: FrameMeta,
     pub format: PixelFormat,
+    #[serde(skip)]
     pub buffer: ViewBuffer<'a>,
 }
 
@@ -142,11 +147,12 @@ impl FrameMut<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct OwnedFrame {
     pub meta: FrameMeta,
     pub format: PixelFormat,
     pub stride: usize,
+    #[serde(skip)]
     pub data: Vec<u8>,
 }
 
@@ -302,4 +308,18 @@ pub trait FrameSource {
     fn info(&self) -> &OpenedCameraInfo;
 
     async fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>>;
+}
+
+#[async_trait::async_trait]
+impl<S> FrameSource for Box<S>
+where
+    S: FrameSource + Send + ?Sized,
+{
+    fn info(&self) -> &OpenedCameraInfo {
+        (**self).info()
+    }
+
+    async fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>> {
+        (**self).next_frame().await
+    }
 }

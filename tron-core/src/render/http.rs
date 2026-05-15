@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tron_api::Sink;
@@ -8,7 +9,12 @@ use tron_api::Sink;
 #[derive(Clone)]
 pub struct HttpJsonSink {
     addr: SocketAddr,
-    state: Arc<Mutex<String>>,
+    state: Arc<Mutex<HttpState>>,
+}
+
+struct HttpState {
+    latest: String,
+    subscribers: Vec<mpsc::Sender<String>>,
 }
 
 impl HttpJsonSink {
@@ -61,7 +67,10 @@ fn spawn_bound(listener: TcpListener) -> Result<HttpJsonSink> {
     let addr = listener
         .local_addr()
         .context("read metadata HTTP address")?;
-    let state = Arc::new(Mutex::new("{}".to_owned()));
+    let state = Arc::new(Mutex::new(HttpState {
+        latest: "{}".to_owned(),
+        subscribers: Vec::new(),
+    }));
     let server_state = state.clone();
 
     thread::Builder::new()
@@ -69,10 +78,13 @@ fn spawn_bound(listener: TcpListener) -> Result<HttpJsonSink> {
         .spawn(move || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(mut stream) => {
-                        if let Err(err) = serve(&mut stream, &server_state) {
-                            eprintln!("metadata-http: request failed: {err:#}");
-                        }
+                    Ok(stream) => {
+                        let request_state = server_state.clone();
+                        thread::spawn(move || {
+                            if let Err(err) = serve(stream, &request_state) {
+                                eprintln!("metadata-http: request failed: {err:#}");
+                            }
+                        });
                     }
                     Err(err) => eprintln!("metadata-http: accept failed: {err:#}"),
                 }
@@ -93,19 +105,28 @@ where
         V: 'a,
     {
         let body = serde_json::to_string(&view).context("serialize HTTP JSON view")?;
-        *self.state.lock().expect("metadata state lock poisoned") = body;
+        let mut state = self.state.lock().expect("metadata state lock poisoned");
+        state.latest = body.clone();
+        state
+            .subscribers
+            .retain(|subscriber| subscriber.send(body.clone()).is_ok());
         Ok(())
     }
 }
 
-fn serve(stream: &mut TcpStream, state: &Arc<Mutex<String>>) -> Result<()> {
+fn serve(mut stream: TcpStream, state: &Arc<Mutex<HttpState>>) -> Result<()> {
     let mut buf = [0u8; 2048];
     let n = stream
         .read(&mut buf)
         .context("read metadata HTTP request")?;
     let request = String::from_utf8_lossy(&buf[..n]);
     let Some(first_line) = request.lines().next() else {
-        write_response(stream, 400, "text/plain; charset=utf-8", b"bad request")?;
+        write_response(
+            &mut stream,
+            400,
+            "text/plain; charset=utf-8",
+            b"bad request",
+        )?;
         return Ok(());
     };
     let mut parts = first_line.split_whitespace();
@@ -114,7 +135,7 @@ fn serve(stream: &mut TcpStream, state: &Arc<Mutex<String>>) -> Result<()> {
 
     if method != "GET" {
         write_response(
-            stream,
+            &mut stream,
             405,
             "text/plain; charset=utf-8",
             b"method not allowed",
@@ -124,25 +145,74 @@ fn serve(stream: &mut TcpStream, state: &Arc<Mutex<String>>) -> Result<()> {
 
     match path {
         "/" | "/index.html" => write_response(
-            stream,
+            &mut stream,
             200,
             "text/html; charset=utf-8",
             INDEX_HTML.as_bytes(),
         )?,
         "/metadata" | "/metadata.json" => {
-            let body = state.lock().expect("metadata state lock poisoned").clone();
+            let body = state
+                .lock()
+                .expect("metadata state lock poisoned")
+                .latest
+                .clone();
             write_response(
-                stream,
+                &mut stream,
                 200,
                 "application/json; charset=utf-8",
                 body.as_bytes(),
             )?;
         }
-        "/health" => write_response(stream, 200, "text/plain; charset=utf-8", b"ok")?,
-        _ => write_response(stream, 404, "text/plain; charset=utf-8", b"not found")?,
+        "/events" => serve_events(stream, state)?,
+        "/health" => write_response(&mut stream, 200, "text/plain; charset=utf-8", b"ok")?,
+        _ => write_response(&mut stream, 404, "text/plain; charset=utf-8", b"not found")?,
     }
 
     Ok(())
+}
+
+fn serve_events(mut stream: TcpStream, state: &Arc<Mutex<HttpState>>) -> Result<()> {
+    let (tx, rx) = mpsc::channel();
+    let initial = {
+        let mut state = state.lock().expect("metadata state lock poisoned");
+        let initial = state.latest.clone();
+        state.subscribers.push(tx);
+        initial
+    };
+    write_event_stream_headers(&mut stream)?;
+    write_sse_event(&mut stream, &initial)?;
+    for body in rx {
+        if write_sse_event(&mut stream, &body).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn write_event_stream_headers(stream: &mut TcpStream) -> Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Cache-Control: no-store\r\n\
+         Content-Type: text/event-stream\r\n\
+         Connection: keep-alive\r\n\
+         \r\n\
+         retry: 1000\r\n\
+         \r\n"
+    )
+    .context("write metadata event stream headers")?;
+    stream.flush().context("flush metadata event stream")?;
+    Ok(())
+}
+
+fn write_sse_event(stream: &mut TcpStream, body: &str) -> Result<()> {
+    writeln!(stream, "event: metadata").context("write metadata event name")?;
+    for line in body.lines() {
+        writeln!(stream, "data: {line}").context("write metadata event body")?;
+    }
+    writeln!(stream).context("finish metadata event")?;
+    stream.flush().context("flush metadata event")
 }
 
 fn write_response(
@@ -318,42 +388,115 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }));
     }
 
-    function renderCamera(el, camera) {
-      camera ||= {};
+    const cameraStats = new Map();
+
+    function frameFor(data, name) {
+      const direct = data?.[name];
+      if (direct?.meta) return direct;
+      if (name === 'ir') return data?.ir_diff?.meta ? data.ir_diff : data?.depth_cue?.meta ? data.depth_cue : direct;
+      return direct;
+    }
+
+    function cameraRows(name, frame) {
+      const meta = frame?.meta || {};
+      const timestamp = meta.timestamp || {};
+      const previous = cameraStats.get(name);
+      const now = performance.now();
+      let fps = null;
+      let frameDeltaUs = null;
+
+      if (previous && meta.id !== undefined && previous.id !== meta.id) {
+        const elapsedMs = now - previous.seenAt;
+        if (elapsedMs > 0) {
+          fps = 1000 / elapsedMs;
+        }
+        if (
+          timestamp.camera_monotonic_us !== undefined &&
+          timestamp.camera_monotonic_us !== null &&
+          previous.cameraMonotonicUs !== undefined &&
+          previous.cameraMonotonicUs !== null
+        ) {
+          frameDeltaUs = timestamp.camera_monotonic_us - previous.cameraMonotonicUs;
+        }
+      }
+
+      if (meta.id !== undefined) {
+        cameraStats.set(name, {
+          id: meta.id,
+          seenAt: now,
+          cameraMonotonicUs: timestamp.camera_monotonic_us,
+        });
+      }
+
+      return [
+        ['sensor', meta.sensor],
+        ['format', frame?.format],
+        ['fps', fps],
+        ['frame delta', frameDeltaUs, 'us'],
+        ['age', null, 'us'],
+        ['frame id', meta.id],
+        ['sequence', meta.sequence],
+        ['camera timestamp', timestamp.camera_monotonic_us, 'us'],
+      ];
+    }
+
+    function renderCamera(el, name, frame) {
       renderDl(el, [
-        ['sensor', camera.sensor],
-        ['fps', camera.fps],
-        ['frame delta', camera.frame_delta_us, 'us'],
-        ['age', camera.age_us, 'us'],
-        ['frame id', camera.frame_id],
-        ['sequence', camera.sequence],
-        ['camera timestamp', camera.camera_monotonic_us, 'us'],
+        ...cameraRows(name, frame),
       ]);
     }
 
-    async function refresh() {
-      const started = performance.now();
+    let lastEventAt = null;
+
+    function renderMetadata(data) {
+      const now = performance.now();
+      const eventGap = lastEventAt === null ? null : now - lastEventAt;
+      lastEventAt = now;
+      renderCamera(rgbEl, 'rgb', frameFor(data, 'rgb'));
+      renderCamera(irEl, 'ir', frameFor(data, 'ir'));
+      renderDl(timingEl, [
+        ['rgb-ir delta', data.rgb_ir_delta_us ?? data.sync_delta_us, 'us'],
+        ['event gap', eventGap, 'ms'],
+      ]);
+      jsonEl.textContent = JSON.stringify(data, null, 2);
+      statusEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
+      statusEl.className = '';
+    }
+
+    function connectEvents() {
+      const events = new EventSource('/events');
+      events.addEventListener('open', () => {
+        statusEl.textContent = 'connected';
+        statusEl.className = '';
+      });
+      events.addEventListener('metadata', (event) => {
+        try {
+          renderMetadata(JSON.parse(event.data));
+        } catch (error) {
+          statusEl.textContent = `error: ${error.message}`;
+          statusEl.className = 'warn';
+        }
+      });
+      events.addEventListener('error', () => {
+        statusEl.textContent = 'reconnecting';
+        statusEl.className = 'warn';
+      });
+    }
+
+    async function fetchOnce() {
       try {
         const response = await fetch('/metadata', { cache: 'no-store' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        renderCamera(rgbEl, data.rgb);
-        renderCamera(irEl, data.ir);
-        renderDl(timingEl, [
-          ['rgb-ir delta', data.rgb_ir_delta_us, 'us'],
-          ['http fetch', performance.now() - started, 'ms'],
-        ]);
-        jsonEl.textContent = JSON.stringify(data, null, 2);
-        statusEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
-        statusEl.className = '';
+        renderMetadata(data);
       } catch (error) {
         statusEl.textContent = `error: ${error.message}`;
         statusEl.className = 'warn';
       }
     }
 
-    refresh();
-    setInterval(refresh, 250);
+    connectEvents();
+    fetchOnce();
   </script>
 </body>
 </html>

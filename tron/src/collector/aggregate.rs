@@ -5,9 +5,7 @@ use tron_core::roi::mediapipe::HandLandmarks;
 
 #[derive(Debug, Serialize)]
 pub struct Aggregate<'a> {
-    #[serde(skip)]
     pub rgb: Frame<'a>,
-    #[serde(skip)]
     pub ir: Frame<'a>,
     pub sync_delta_us: i64,
     pub palm_roi: Option<RoiResult>,

@@ -20,7 +20,6 @@ pub struct PipelineConfig {
 
 #[derive(Serialize)]
 pub struct ControllerFrame<'a> {
-    #[serde(skip)]
     pub rgb: Frame<'a>,
     pub palm_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,

@@ -22,11 +22,8 @@ pub struct PlaygroundInput {
 
 #[derive(Serialize)]
 pub struct PlaygroundOutput<'a> {
-    #[serde(skip)]
     pub rgb: Option<Arc<OwnedFrame>>,
-    #[serde(skip)]
     pub ir_diff: Option<Frame<'a>>,
-    #[serde(skip)]
     pub depth_cue: Option<Frame<'a>>,
     pub roi: Option<RoiResult>,
     pub rgb_roi: Option<RoiResult>,

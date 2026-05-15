@@ -32,9 +32,7 @@ pub struct CalibrationRunConfig {
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct CalibrationAggregate<'a> {
-    #[serde(skip)]
     pub rgb: Frame<'a>,
-    #[serde(skip)]
     pub ir: Frame<'a>,
     pub sync_delta_us: i64,
 }

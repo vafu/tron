@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tron::capture::open_v4l_stream;
 use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{
     CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size, spawn_event_channels,
 };
-use tron_core::pointer::AbsolutePointerProducer;
+use tron_core::pointer::{AbsolutePointerProducer, JoystickPointerProducer};
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::transform::MirroredFrameSource;
 
@@ -49,6 +49,16 @@ struct Cli {
     /// MediaPipe-style scale applied to the landmark tracking rect.
     #[arg(long, default_value_t = 1.2)]
     rgb_mediapipe_landmark_roi_scale: f32,
+
+    /// Pointer producer used by the controller demo.
+    #[arg(long, value_enum, default_value = "absolute")]
+    pointer_mode: PointerMode,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum PointerMode {
+    Absolute,
+    Joystick,
 }
 
 #[tokio::main]
@@ -87,7 +97,10 @@ fn run(cli: Cli) -> Result<()> {
             },
         },
     )?;
-    let pointer = spawn_event_channels(AbsolutePointerProducer::default(), 8, 32);
+    let pointer = match cli.pointer_mode {
+        PointerMode::Absolute => spawn_event_channels(AbsolutePointerProducer::default(), 8, 32),
+        PointerMode::Joystick => spawn_event_channels(JoystickPointerProducer::default(), 8, 32),
+    };
     window::run(pipeline, pointer)
 }
 

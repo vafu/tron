@@ -33,6 +33,10 @@ name = "collector"
 path = "src/collector/main.rs"
 
 [[bin]]
+name = "controller"
+path = "src/controller/main.rs"
+
+[[bin]]
 name = "roi-control"
 path = "src/roi/main.rs"
 

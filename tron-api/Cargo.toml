@@ -9,3 +9,4 @@ async-trait.workspace = true
 glam.workspace = true
 ndarray.workspace = true
 serde.workspace = true
+tokio.workspace = true

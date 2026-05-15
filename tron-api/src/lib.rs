@@ -1,7 +1,10 @@
 pub mod calib;
 pub mod capture;
 pub mod depth;
+pub mod event;
 pub mod frame;
+pub mod gesture;
+pub mod pointer;
 pub mod process;
 pub mod projection;
 pub mod render;
@@ -59,10 +62,13 @@ pub use capture::{
     CameraOpenRequest, CameraOpener, CameraRoiControl, CameraSelector, OpenedCameraInfo,
 };
 pub use depth::{DepthSample, DepthSource};
+pub use event::{EventProducer, EventProducerChannels, spawn_event_channels};
 pub use frame::{
     CaptureFormat, Frame, FrameId, FrameMeta, FrameMut, FrameSource, FrameTimestamp, OwnedFrame,
     PixelFormat, SensorKind, TimestampSource,
 };
+pub use gesture::{GestureFrame, HandGesture, PalmPose2d};
+pub use pointer::{PointerCancelReason, PointerEvent, PointerInput, PointerSink};
 pub use process::{InPlaceFrameProcessor, Processor};
 pub use projection::{DepthPointProjection, DepthProjectionMap, ProjectionMapSource};
 pub use render::{NoContext, Sink};

@@ -84,8 +84,14 @@ fn spawn_bound(listener: TcpListener) -> Result<HttpJsonSink> {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Sink<serde_json::Value> for HttpJsonSink {
-    async fn consume(&mut self, view: serde_json::Value) -> Result<()> {
+impl<V> Sink<V> for HttpJsonSink
+where
+    V: serde::Serialize,
+{
+    async fn consume<'a>(&'a mut self, view: V) -> Result<()>
+    where
+        V: 'a,
+    {
         let body = serde_json::to_string(&view).context("serialize HTTP JSON view")?;
         *self.state.lock().expect("metadata state lock poisoned") = body;
         Ok(())

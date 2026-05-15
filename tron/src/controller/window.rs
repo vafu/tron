@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tron_api::{EventProducerChannels, PointerEvent, PointerInput, Sink, Size};
+use tron_api::{EventProducerChannels, PointerInput, PointerOutput, Sink, Size};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -12,7 +12,7 @@ use winit::window::{WindowAttributes, WindowId};
 use crate::pipeline::Tick;
 use crate::renderer::Renderer;
 
-pub fn run<T>(ticker: T, pointer: EventProducerChannels<PointerInput, PointerEvent>) -> Result<()>
+pub fn run<T>(ticker: T, pointer: EventProducerChannels<PointerInput, PointerOutput>) -> Result<()>
 where
     T: Tick,
 {
@@ -26,7 +26,7 @@ where
 struct WindowApp<T> {
     ticker: T,
     pointer_input: mpsc::Sender<PointerInput>,
-    pointer_output: mpsc::Receiver<PointerEvent>,
+    pointer_output: mpsc::Receiver<PointerOutput>,
     _pointer_task: JoinHandle<Result<()>>,
     rendered_frame_id: Option<u64>,
     window_id: Option<WindowId>,
@@ -36,7 +36,7 @@ struct WindowApp<T> {
 }
 
 impl<T> WindowApp<T> {
-    fn new(ticker: T, pointer: EventProducerChannels<PointerInput, PointerEvent>) -> Self {
+    fn new(ticker: T, pointer: EventProducerChannels<PointerInput, PointerOutput>) -> Self {
         Self {
             ticker,
             pointer_input: pointer.input,

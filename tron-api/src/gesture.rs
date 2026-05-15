@@ -23,7 +23,7 @@ pub struct PalmPose2d {
 pub enum HandGesture {
     NoHand,
     OpenPalm,
-    Pinch { strength: f32 },
+    Pinch { strength: f32, position: Point2d },
     Pointing,
     Unknown,
 }

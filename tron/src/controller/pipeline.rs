@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tron_api::{Frame, FrameSource, GestureFrame, NoContext, Processor, RoiResult};
 use tron_core::gesture::{GesturePreprocessor, GesturePreprocessorInput};
+use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
 use tron_core::roi::landmark::{LandmarkRoiInput, LandmarkRoiProcessor};
 use tron_core::roi::mediapipe::{
     HandLandmarks, MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput,
@@ -38,6 +39,7 @@ pub struct Pipeline<S> {
     source: S,
     palm: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
+    landmark_filter: OneEuroLandmarkFilter,
     landmark_roi: LandmarkRoiProcessor,
     gesture: GesturePreprocessor,
 }
@@ -55,6 +57,7 @@ where
                 config.landmark_model,
                 config.landmarks,
             )?,
+            landmark_filter: OneEuroLandmarkFilter::default(),
             landmark_roi,
             gesture: GesturePreprocessor,
         })
@@ -73,6 +76,7 @@ where
             },
             NoContext,
         )?;
+        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
         let landmark_roi = self.landmark_roi.process(
             LandmarkRoiInput {
                 landmarks: landmarks.as_ref(),

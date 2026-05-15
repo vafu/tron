@@ -4,4 +4,5 @@ pub mod http;
 pub mod line_overlay;
 pub mod roi_overlay;
 pub mod text;
+pub mod thick_line_overlay;
 pub mod wgpu;

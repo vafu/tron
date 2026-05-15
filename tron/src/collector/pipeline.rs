@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tron_api::{DepthSource, FrameSource, NoContext, Processor};
 use tron_core::StereoFrameSource;
+use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
 use tron_core::projection::{
     CheckerboardDepthProjection, HandProjectionInput, HandProjectionProcessor,
 };
@@ -36,6 +37,7 @@ pub struct Pipeline<R, I> {
     frames: StereoFrameSource<R, I>,
     palm: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
+    landmark_filter: OneEuroLandmarkFilter,
     landmark_roi: LandmarkRoiProcessor,
     camera_roi: Option<CameraRoiFollowProcessor>,
     hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
@@ -56,6 +58,7 @@ where
                 config.landmark_model,
                 config.landmarks,
             )?,
+            landmark_filter: OneEuroLandmarkFilter::default(),
             landmark_roi,
             camera_roi: config.camera_roi.map(CameraRoiFollowProcessor::new),
             hand_projection: config.hand_projection,
@@ -78,6 +81,7 @@ where
             },
             NoContext,
         )?;
+        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
 
         if let Some(ref landmarks) = landmarks {
             let valid_count = landmarks

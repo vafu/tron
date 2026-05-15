@@ -8,6 +8,26 @@ pub struct PointerInput {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PointerOutput {
+    Event(PointerEvent),
+    Visualization(PointerVisualization),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PointerVisualization {
+    Joystick(PointerJoystickVisualization),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerJoystickVisualization {
+    pub timestamp: Instant,
+    pub anchor: Option<Point2d>,
+    pub current: Option<Point2d>,
+    pub deadzone_radius: f64,
+    pub engaged: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerEvent {
     Move {
         timestamp: Instant,

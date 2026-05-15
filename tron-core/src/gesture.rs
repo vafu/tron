@@ -9,7 +9,7 @@ use crate::roi::mediapipe::HandLandmarks;
 
 const THUMB_TIP: usize = 4;
 const INDEX_TIP: usize = 8;
-const PINCH_DISTANCE_OF_PALM: f64 = 0.28;
+const PINCH_DISTANCE_OF_PALM: f64 = 0.1;
 
 #[derive(Clone, Copy, Debug)]
 pub struct GesturePreprocessorInput<'a> {
@@ -35,11 +35,48 @@ impl Processor<GesturePreprocessorInput<'_>, NoContext> for GesturePreprocessor 
             Some(landmarks) => classify_gesture(landmarks, palm, input.frame_size),
             None => HandGesture::NoHand,
         };
-        Ok(GestureFrame {
+        let output = GestureFrame {
             timestamp: input.timestamp,
             palm,
             gesture,
-        })
+        };
+        trace_gesture_output(&output);
+        Ok(output)
+    }
+}
+
+fn trace_gesture_output(output: &GestureFrame) {
+    let palm_center = output.palm.map(|palm| palm.center);
+    let palm_extent = output.palm.map(|palm| palm.extent);
+    match output.gesture {
+        HandGesture::Pinch { strength, position } => {
+            tracing::debug!(
+                target: "tron_core::gesture",
+                gesture = "pinch",
+                pinch_strength = strength,
+                pinch_x = position.x,
+                pinch_y = position.y,
+                palm_center_x = palm_center.map(|point| point.x),
+                palm_center_y = palm_center.map(|point| point.y),
+                palm_extent_x = palm_extent.map(|point| point.x),
+                palm_extent_y = palm_extent.map(|point| point.y),
+                ?output.timestamp,
+                "gesture preprocessor output"
+            );
+        }
+        HandGesture::Pointing => {
+            tracing::debug!(
+                target: "tron_core::gesture",
+                gesture = "pointing",
+                palm_center_x = palm_center.map(|point| point.x),
+                palm_center_y = palm_center.map(|point| point.y),
+                palm_extent_x = palm_extent.map(|point| point.x),
+                palm_extent_y = palm_extent.map(|point| point.y),
+                ?output.timestamp,
+                "gesture preprocessor output"
+            );
+        }
+        _ => {}
     }
 }
 
@@ -62,7 +99,10 @@ fn classify_gesture(
     let normalized_distance = distance / palm_extent;
     if normalized_distance <= PINCH_DISTANCE_OF_PALM {
         let strength = (1.0 - normalized_distance / PINCH_DISTANCE_OF_PALM).clamp(0.0, 1.0) as f32;
-        return HandGesture::Pinch { strength };
+        return HandGesture::Pinch {
+            strength,
+            position: (thumb + index) * 0.5,
+        };
     }
     HandGesture::OpenPalm
 }
@@ -169,6 +209,10 @@ mod tests {
                 NoContext,
             )
             .unwrap();
-        assert!(matches!(output.gesture, HandGesture::Pinch { .. }));
+        let HandGesture::Pinch { position, .. } = output.gesture else {
+            panic!("expected pinch");
+        };
+        assert!(position.x > 0.15);
+        assert!(position.x < 0.17);
     }
 }

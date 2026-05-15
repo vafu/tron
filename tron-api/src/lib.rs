@@ -68,7 +68,10 @@ pub use frame::{
     PixelFormat, SensorKind, TimestampSource,
 };
 pub use gesture::{GestureFrame, HandGesture, PalmPose2d};
-pub use pointer::{PointerCancelReason, PointerEvent, PointerInput, PointerSink};
+pub use pointer::{
+    PointerCancelReason, PointerEvent, PointerInput, PointerJoystickVisualization, PointerOutput,
+    PointerSink, PointerVisualization,
+};
 pub use process::{InPlaceFrameProcessor, Processor};
 pub use projection::{DepthPointProjection, DepthProjectionMap, ProjectionMapSource};
 pub use render::{NoContext, Sink};

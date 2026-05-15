@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tron_api::{
     EventProducer, HandGesture, Point2d, PointerCancelReason, PointerEvent, PointerInput,
+    PointerOutput,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -20,17 +21,17 @@ impl Default for AbsolutePointerProducer {
     }
 }
 
-impl EventProducer<PointerInput, PointerEvent> for AbsolutePointerProducer {
+impl EventProducer<PointerInput, PointerOutput> for AbsolutePointerProducer {
     fn spawn(
         self,
         mut input: mpsc::Receiver<PointerInput>,
-        output: mpsc::Sender<PointerEvent>,
+        output: mpsc::Sender<PointerOutput>,
     ) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             let mut state = AbsolutePointerState::default();
             while let Some(input) = input.recv().await {
                 for event in state.update(input, self) {
-                    if output.send(event).await.is_err() {
+                    if output.send(PointerOutput::Event(event)).await.is_err() {
                         return Ok(());
                     }
                 }
@@ -76,7 +77,7 @@ impl AbsolutePointerState {
         }];
 
         let pinch_strength = match input.gesture.gesture {
-            HandGesture::Pinch { strength } => strength,
+            HandGesture::Pinch { strength, .. } => strength,
             _ => 0.0,
         };
         if !self.primary_down && pinch_strength >= config.pinch_down_strength {
@@ -139,7 +140,10 @@ mod tests {
         let events = state.update(
             input(
                 Point2d::new(0.30, 0.5),
-                HandGesture::Pinch { strength: 0.8 },
+                HandGesture::Pinch {
+                    strength: 0.8,
+                    position: Point2d::new(0.30, 0.5),
+                },
             ),
             AbsolutePointerProducer::default(),
         );

@@ -3,7 +3,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior};
 use tron_api::{
-    EventProducer, HandGesture, Point2d, PointerCancelReason, PointerEvent, PointerInput,
+    EventProducer, HandGesture, Point2d, PointerEvent, PointerInput, PointerJoystickVisualization,
+    PointerOutput, PointerVisualization,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -20,18 +21,18 @@ impl Default for JoystickPointerProducer {
         Self {
             pinch_down_strength: 0.55,
             pinch_up_strength: 0.35,
-            deadzone: 0.035,
+            deadzone: 0.015,
             speed_per_second: 2.8,
             tick_interval: Duration::from_millis(16),
         }
     }
 }
 
-impl EventProducer<PointerInput, PointerEvent> for JoystickPointerProducer {
+impl EventProducer<PointerInput, PointerOutput> for JoystickPointerProducer {
     fn spawn(
         self,
         mut input: mpsc::Receiver<PointerInput>,
-        output: mpsc::Sender<PointerEvent>,
+        output: mpsc::Sender<PointerOutput>,
     ) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             let mut state = JoystickPointerState::default();
@@ -44,15 +45,15 @@ impl EventProducer<PointerInput, PointerEvent> for JoystickPointerProducer {
                         let Some(input) = input else {
                             return Ok(());
                         };
-                        for event in state.update_input(input, self) {
-                            if output.send(event).await.is_err() {
+                        for output_item in state.update_input(input, self) {
+                            if output.send(output_item).await.is_err() {
                                 return Ok(());
                             }
                         }
                     }
                     _ = interval.tick() => {
-                        for event in state.tick(self) {
-                            if output.send(event).await.is_err() {
+                        for output_item in state.tick(self) {
+                            if output.send(output_item).await.is_err() {
                                 return Ok(());
                             }
                         }
@@ -76,46 +77,54 @@ impl JoystickPointerState {
         &mut self,
         input: PointerInput,
         config: JoystickPointerProducer,
-    ) -> Vec<PointerEvent> {
+    ) -> Vec<PointerOutput> {
         let timestamp = input.gesture.timestamp;
-        let Some(palm) = input.gesture.palm else {
-            return self.cancel(timestamp, PointerCancelReason::LostTracking);
-        };
+        if input.gesture.palm.is_none() {
+            return self.cancel(timestamp, config);
+        }
         if matches!(input.gesture.gesture, HandGesture::NoHand) {
-            return self.cancel(timestamp, PointerCancelReason::LostTracking);
+            return self.cancel(timestamp, config);
         }
 
-        let position = palm.center.clamp(Point2d::ZERO, Point2d::ONE);
-        self.current_position = Some(position);
         self.tracking = true;
 
-        let pinch_strength = match input.gesture.gesture {
-            HandGesture::Pinch { strength } => strength,
-            _ => 0.0,
-        };
-
-        let mut events = Vec::new();
-        if !self.primary_down {
-            events.push(PointerEvent::Move {
-                timestamp,
-                position: Some(position),
-                delta: Point2d::ZERO,
-            });
-            if pinch_strength >= config.pinch_down_strength {
-                self.primary_down = true;
-                self.anchor_position = Some(position);
-                events.push(PointerEvent::Down { timestamp });
+        let pinch = match input.gesture.gesture {
+            HandGesture::Pinch { strength, position } => {
+                Some((strength, position.clamp(Point2d::ZERO, Point2d::ONE)))
             }
-        } else if pinch_strength <= config.pinch_up_strength {
-            self.primary_down = false;
-            self.anchor_position = None;
-            events.push(PointerEvent::Up { timestamp });
+            _ => None,
+        };
+        if let Some((_, position)) = pinch {
+            self.current_position = Some(position);
         }
 
+        let mut events = Vec::new();
+        match (self.primary_down, pinch) {
+            (false, Some((strength, position))) if strength >= config.pinch_down_strength => {
+                self.primary_down = true;
+                self.anchor_position = Some(position);
+                events.push(PointerOutput::Event(PointerEvent::Down { timestamp }));
+            }
+            (true, Some((strength, _))) if strength <= config.pinch_up_strength => {
+                self.primary_down = false;
+                self.anchor_position = None;
+                self.current_position = None;
+                events.push(PointerOutput::Event(PointerEvent::Up { timestamp }));
+            }
+            (true, None) => {
+                self.primary_down = false;
+                self.anchor_position = None;
+                self.current_position = None;
+                events.push(PointerOutput::Event(PointerEvent::Up { timestamp }));
+            }
+            _ => {}
+        }
+
+        events.push(self.visualization(timestamp, config));
         events
     }
 
-    fn tick(&mut self, config: JoystickPointerProducer) -> Vec<PointerEvent> {
+    fn tick(&mut self, config: JoystickPointerProducer) -> Vec<PointerOutput> {
         if !self.primary_down {
             return Vec::new();
         }
@@ -131,26 +140,44 @@ impl JoystickPointerState {
 
         let active = displacement * ((length - config.deadzone) / length);
         let seconds = config.tick_interval.as_secs_f64();
-        vec![PointerEvent::Move {
+        vec![PointerOutput::Event(PointerEvent::Move {
             timestamp: std::time::Instant::now(),
             position: None,
             delta: active * config.speed_per_second * seconds,
-        }]
+        })]
     }
 
     fn cancel(
         &mut self,
         timestamp: std::time::Instant,
-        reason: PointerCancelReason,
-    ) -> Vec<PointerEvent> {
-        if !self.tracking && !self.primary_down {
-            return Vec::new();
-        }
+        config: JoystickPointerProducer,
+    ) -> Vec<PointerOutput> {
+        let was_down = self.primary_down;
         self.anchor_position = None;
         self.current_position = None;
         self.primary_down = false;
         self.tracking = false;
-        vec![PointerEvent::Cancel { timestamp, reason }]
+        let mut events = vec![self.visualization(timestamp, config)];
+        if was_down {
+            events.push(PointerOutput::Event(PointerEvent::Up { timestamp }));
+        }
+        events
+    }
+
+    fn visualization(
+        &self,
+        timestamp: std::time::Instant,
+        config: JoystickPointerProducer,
+    ) -> PointerOutput {
+        PointerOutput::Visualization(PointerVisualization::Joystick(
+            PointerJoystickVisualization {
+                timestamp,
+                anchor: self.anchor_position,
+                current: self.current_position,
+                deadzone_radius: config.deadzone,
+                engaged: self.primary_down,
+            },
+        ))
     }
 }
 
@@ -182,36 +209,58 @@ mod tests {
         let config = JoystickPointerProducer::default();
 
         let events = state.update_input(
-            input(Point2d::new(0.5, 0.5), HandGesture::Pinch { strength: 0.8 }),
+            input(
+                Point2d::new(0.5, 0.5),
+                HandGesture::Pinch {
+                    strength: 0.8,
+                    position: Point2d::new(0.52, 0.48),
+                },
+            ),
             config,
         );
         assert_eq!(events.len(), 2);
         assert!(matches!(
             events[0],
-            PointerEvent::Move {
-                position: Some(_),
-                ..
-            }
+            PointerOutput::Event(PointerEvent::Down { .. })
         ));
-        assert!(matches!(events[1], PointerEvent::Down { .. }));
+        assert!(matches!(
+            events[1],
+            PointerOutput::Visualization(PointerVisualization::Joystick(
+                PointerJoystickVisualization {
+                    anchor: Some(anchor),
+                    engaged: true,
+                    ..
+                }
+            )) if anchor == Point2d::new(0.52, 0.48)
+        ));
 
-        assert!(
-            state
-                .update_input(
-                    input(
-                        Point2d::new(0.65, 0.5),
-                        HandGesture::Pinch { strength: 0.8 }
-                    ),
-                    config,
-                )
-                .is_empty()
+        let events = state.update_input(
+            input(
+                Point2d::new(0.65, 0.5),
+                HandGesture::Pinch {
+                    strength: 0.8,
+                    position: Point2d::new(0.70, 0.48),
+                },
+            ),
+            config,
         );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            PointerOutput::Visualization(PointerVisualization::Joystick(
+                PointerJoystickVisualization {
+                    current: Some(current),
+                    engaged: true,
+                    ..
+                }
+            )) if current == Point2d::new(0.70, 0.48)
+        ));
 
         let events = state.tick(config);
         assert_eq!(events.len(), 1);
-        let PointerEvent::Move {
+        let PointerOutput::Event(PointerEvent::Move {
             position, delta, ..
-        } = events[0]
+        }) = events[0]
         else {
             panic!("expected relative move");
         };
@@ -225,14 +274,33 @@ mod tests {
         let mut state = JoystickPointerState::default();
         let config = JoystickPointerProducer::default();
         state.update_input(
-            input(Point2d::new(0.5, 0.5), HandGesture::Pinch { strength: 0.8 }),
+            input(
+                Point2d::new(0.5, 0.5),
+                HandGesture::Pinch {
+                    strength: 0.8,
+                    position: Point2d::new(0.5, 0.5),
+                },
+            ),
             config,
         );
 
         let events =
             state.update_input(input(Point2d::new(0.5, 0.5), HandGesture::OpenPalm), config);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], PointerEvent::Up { .. }));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            PointerOutput::Event(PointerEvent::Up { .. })
+        ));
+        assert!(matches!(
+            events[1],
+            PointerOutput::Visualization(PointerVisualization::Joystick(
+                PointerJoystickVisualization {
+                    anchor: None,
+                    engaged: false,
+                    ..
+                }
+            ))
+        ));
         assert!(state.tick(config).is_empty());
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tron_api::{PixelFormat, PointerEvent, Sink, Size};
+use tron_api::{PixelFormat, PointerOutput, Sink, Size};
 use tron_core::render::hand_landmarks_overlay::{
     HandLandmarksOverlayRenderer, HandLandmarksOverlayView,
 };
@@ -101,7 +101,7 @@ impl<'a> Sink<&'a ControllerFrame<'a>> for Renderer {
                     }))?;
                 }
                 self.pointer
-                    .render(surface.device, surface.queue, &mut pass)?;
+                    .render(surface.device, surface.queue, &mut pass, surface.size)?;
                 Ok(())
             },
         )
@@ -109,8 +109,8 @@ impl<'a> Sink<&'a ControllerFrame<'a>> for Renderer {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Sink<PointerEvent> for Renderer {
-    async fn consume(&mut self, event: PointerEvent) -> Result<()> {
-        self.pointer.consume(event).await
+impl Sink<PointerOutput> for Renderer {
+    async fn consume(&mut self, output: PointerOutput) -> Result<()> {
+        self.pointer.consume(output).await
     }
 }

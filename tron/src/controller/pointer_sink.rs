@@ -6,8 +6,10 @@ pub struct PointerOverlaySink {
     overlay: LineOverlayRenderer,
     position: Option<Point2d>,
     down: bool,
-    vertices: [LineVertex; 4],
+    vertices: [LineVertex; POINTER_VERTEX_COUNT],
 }
+
+const POINTER_VERTEX_COUNT: usize = 20;
 
 impl PointerOverlaySink {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
@@ -19,10 +21,7 @@ impl PointerOverlaySink {
             ),
             position: None,
             down: false,
-            vertices: [LineVertex {
-                position: [0.0, 0.0],
-                color: [0.0, 0.0, 0.0, 0.0],
-            }; 4],
+            vertices: [TRANSPARENT_VERTEX; POINTER_VERTEX_COUNT],
         }
     }
 
@@ -72,31 +71,40 @@ impl Sink<PointerEvent> for PointerOverlaySink {
     }
 }
 
-fn pointer_vertices(position: Point2d, down: bool) -> [LineVertex; 4] {
+const TRANSPARENT_VERTEX: LineVertex = LineVertex {
+    position: [0.0, 0.0],
+    color: [0.0, 0.0, 0.0, 0.0],
+};
+
+fn pointer_vertices(position: Point2d, down: bool) -> [LineVertex; POINTER_VERTEX_COUNT] {
     let x = (position.x * 2.0 - 1.0) as f32;
     let y = (1.0 - position.y * 2.0) as f32;
-    let radius = if down { 0.04 } else { 0.025 };
+    let radius = if down { 0.055 } else { 0.038 };
     let color = if down {
         [1.0, 0.25, 0.12, 1.0]
     } else {
         [0.1, 1.0, 0.9, 1.0]
     };
-    [
-        LineVertex {
-            position: [x - radius, y],
+    let offsets = [-0.012, -0.006, 0.0, 0.006, 0.012];
+    let mut vertices = [TRANSPARENT_VERTEX; POINTER_VERTEX_COUNT];
+    for (index, offset) in offsets.into_iter().enumerate() {
+        let base = index * 4;
+        vertices[base] = LineVertex {
+            position: [x - radius, y + offset],
             color,
-        },
-        LineVertex {
-            position: [x + radius, y],
+        };
+        vertices[base + 1] = LineVertex {
+            position: [x + radius, y + offset],
             color,
-        },
-        LineVertex {
-            position: [x, y - radius],
+        };
+        vertices[base + 2] = LineVertex {
+            position: [x + offset, y - radius],
             color,
-        },
-        LineVertex {
-            position: [x, y + radius],
+        };
+        vertices[base + 3] = LineVertex {
+            position: [x + offset, y + radius],
             color,
-        },
-    ]
+        };
+    }
+    vertices
 }

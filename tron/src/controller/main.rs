@@ -7,7 +7,9 @@ use tron::config::{CameraArgs, PixelFormatArg};
 use tron_api::{
     CameraOpenRequest, CaptureFormat, PixelFormat, SensorKind, Size, spawn_event_channels,
 };
-use tron_core::pointer::{AbsolutePointerProducer, JoystickPointerProducer};
+use tron_core::pointer::{
+    AbsolutePointerProducer, JoystickPointerProducer, RelativePointerProducer,
+};
 use tron_core::render::http::HttpJsonSink;
 use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig};
 use tron_core::transform::{FpsThrottledFrameSource, MirroredFrameSource};
@@ -65,6 +67,7 @@ struct Cli {
 enum PointerMode {
     Absolute,
     Joystick,
+    Relative,
 }
 
 #[tokio::main]
@@ -112,6 +115,7 @@ fn run(cli: Cli) -> Result<()> {
     let pointer = match cli.pointer_mode {
         PointerMode::Absolute => spawn_event_channels(AbsolutePointerProducer::default(), 8, 32),
         PointerMode::Joystick => spawn_event_channels(JoystickPointerProducer::default(), 8, 32),
+        PointerMode::Relative => spawn_event_channels(RelativePointerProducer::default(), 8, 32),
     };
     let mut sinks = window::ComboSink::new();
     let metadata = HttpJsonSink::bind_available(("127.0.0.1", 8765), 100)?;

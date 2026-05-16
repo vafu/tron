@@ -8,6 +8,8 @@ use tron_api::{
     Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size,
 };
 
+use super::{letterbox_inverse_affine, preprocess_bgra};
+
 const INPUT_SIZE: usize = 256;
 const SCORE_CLIP: f32 = 100.0;
 const PALM_KEYPOINTS: usize = 7;
@@ -61,7 +63,7 @@ impl Processor<Frame<'_>> for MediaPipeRoiProcessor {
             "MediaPipe ROI processor expects BGRA8 RGB frames, got {:?}",
             input.format
         );
-        let resize = preprocess_bgra(input, &mut self.input)?;
+        let resize = preprocess_palm_bgra(input, &mut self.input)?;
         let tensor = TensorRef::from_array_view(([1, 3, INPUT_SIZE, INPUT_SIZE], &*self.input))?;
         let outputs = self.session.run(ort::inputs!["image" => tensor])?;
         let (_, coords) = outputs["box_coords"]
@@ -70,10 +72,13 @@ impl Processor<Frame<'_>> for MediaPipeRoiProcessor {
         let (_, scores) = outputs["box_scores"]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe box_scores")?;
+
         let detection = best_detection(coords, scores, &self.anchors, self.config.min_score);
+
         Ok(detection.map(|detection| {
             let oriented_box =
                 detection.to_oriented_box(resize, input.meta.size, self.config.box_scale);
+
             let rect = oriented_box
                 .and_then(|bbox| bbox.enclosing_rect(input.meta.size))
                 .or_else(|| detection.to_frame_rect(resize, input.meta.size, self.config.box_scale))
@@ -131,7 +136,7 @@ impl Detection {
         let middle_mcp = self.keypoint_to_frame(MIDDLE_MCP_KEYPOINT, resize);
 
         // MediaPipe Hand Landmark model expects fingertips at the top (y=0).
-        // The orientation axis should point from middle-MCP to wrist.
+        // The orientation axis points from middle-MCP knuckle to the wrist.
         let axis_y = wrist - middle_mcp;
         let palm_len = axis_y.length();
         if palm_len < 1.0 || !palm_len.is_finite() {
@@ -141,25 +146,15 @@ impl Detection {
         }
 
         let axis_y = axis_y / palm_len;
-        // axis_x should be axis_y rotated 90 deg clockwise to maintain right-handedness.
-        // If axis_y is backward (down), axis_x should be right.
+        // axis_x is axis_y rotated 90 deg clockwise.
         let axis_x = Vec2::new(axis_y.y, -axis_y.x);
+
+        // ROI size is derived from either the predicted box or the actual palm length.
         let raw_width = (self.width.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
         let raw_height = (self.height.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
 
         // Shift center along axis_y (middle-MCP to wrist).
-        // Standard shift is -0.5, but since axis_y is flipped, we use +0.5.
-        // wait, MEDIAPIPE_PALM_SHIFT_Y is -0.5.
-        // If axis_y is middle-mcp to wrist, then +axis_y is towards wrist.
-        // We want to shift towards fingertips (opposite of axis_y).
-        // So we shift by -0.5 * height * axis_y.
-        // The original code was center + (-shift * height * axis_y) where axis_y was wrist to mcp.
-        // center + (-(-0.5) * height * forward) = center + 0.5 * height * forward.
-        // Now center + (-(-0.5) * height * backward) = center + 0.5 * height * backward.
-        // That's WRONG. We want center + 0.5 * height * forward.
-        // If axis_y is backward, then forward = -axis_y.
-        // center + 0.5 * height * (-axis_y) = center - 0.5 * height * axis_y.
-        // So we want + shift * height * axis_y if shift is -0.5.
+        // Since axis_y points towards the wrist, we move by negative axis_y (towards fingertips).
         let center = center + axis_y * (MEDIAPIPE_PALM_SHIFT_Y * raw_height);
 
         let side = raw_width.max(raw_height).max(1.0) * fingertip_scale.max(1.0);
@@ -202,11 +197,13 @@ struct Anchor {
     height: f32,
 }
 
-fn preprocess_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping> {
+fn preprocess_palm_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping> {
     let source_w = frame.meta.size.width as usize;
     let source_h = frame.meta.size.height as usize;
     anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
-    let pixels = frame.view()?;
+    let stride = frame.buffer.stride();
+    anyhow::ensure!(stride == source_w * 4, "frame must be tightly packed BGRA8");
+
     let (resized_w, resized_h) = if source_h >= source_w {
         (INPUT_SIZE * source_w / source_h, INPUT_SIZE)
     } else {
@@ -214,46 +211,21 @@ fn preprocess_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping
     };
     let pad_x = (INPUT_SIZE - resized_w) / 2;
     let pad_y = (INPUT_SIZE - resized_h) / 2;
-    output.fill(0.0);
 
     let scale_x = source_w as f32 / resized_w as f32;
     let scale_y = source_h as f32 / resized_h as f32;
 
-    for y in 0..resized_h {
-        let src_yf = (y as f32 + 0.5) * scale_y - 0.5;
-        let y0 = src_yf.floor() as isize;
-        let y1 = y0 + 1;
-        let dy = src_yf - y0 as f32;
+    let transform = letterbox_inverse_affine(
+        frame.meta.size,
+        resized_w,
+        resized_h,
+        pad_x,
+        pad_y,
+        frame.buffer.is_horizontally_mirrored(),
+        frame.buffer.is_vertically_mirrored(),
+    )?;
+    preprocess_bgra(frame, INPUT_SIZE, &transform, "palm", output)?;
 
-        for x in 0..resized_w {
-            let src_xf = (x as f32 + 0.5) * scale_x - 0.5;
-            let x0 = src_xf.floor() as isize;
-            let x1 = x0 + 1;
-            let dx = src_xf - x0 as f32;
-
-            let mut r = 0.0;
-            let mut g = 0.0;
-            let mut b = 0.0;
-
-            for (iy, weight_y) in [(y0, 1.0 - dy), (y1, dy)] {
-                let iy = iy.clamp(0, source_h as isize - 1) as usize;
-                for (ix, weight_x) in [(x0, 1.0 - dx), (x1, dx)] {
-                    let ix = ix.clamp(0, source_w as isize - 1) as usize;
-                    let weight = weight_x * weight_y;
-                    r += pixels[[iy, ix, 2]] as f32 * weight;
-                    g += pixels[[iy, ix, 1]] as f32 * weight;
-                    b += pixels[[iy, ix, 0]] as f32 * weight;
-                }
-            }
-
-            let dst_x = pad_x + x;
-            let dst_y = pad_y + y;
-            let dst = dst_y * INPUT_SIZE + dst_x;
-            output[dst] = r / 255.0;
-            output[INPUT_SIZE * INPUT_SIZE + dst] = g / 255.0;
-            output[2 * INPUT_SIZE * INPUT_SIZE + dst] = b / 255.0;
-        }
-    }
     Ok(ResizeMapping {
         scale: scale_x,
         pad_x: pad_x as f32 * scale_x,
@@ -276,12 +248,12 @@ fn best_detection(
         }
         let base = i * 18;
         let anchor = anchors[i];
-        // MediaPipe palm detection uses reverse_output_order, so raw boxes and
-        // keypoints are decoded as x/y pairs.
+
         let x_center = coords[base] / INPUT_SIZE as f32 * anchor.width + anchor.x_center;
         let y_center = coords[base + 1] / INPUT_SIZE as f32 * anchor.height + anchor.y_center;
         let width = coords[base + 2] / INPUT_SIZE as f32 * anchor.width;
         let height = coords[base + 3] / INPUT_SIZE as f32 * anchor.height;
+
         let mut keypoints = [[0.0; 2]; PALM_KEYPOINTS];
         for (keypoint, point) in keypoints.iter_mut().enumerate() {
             let offset = base + 4 + keypoint * 2;

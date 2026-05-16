@@ -7,7 +7,9 @@ use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
 use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
 
-const DEFAULT_INPUT_SIZE: usize = 224;
+use super::{crop_inverse_affine, dump_landmark_overlay, preprocess_bgra};
+
+const DEFAULT_INPUT_SIZE: usize = 256;
 const HAND_LANDMARKS: usize = 21;
 const LANDMARK_COORDS: usize = 3;
 const WRIST_LANDMARK: usize = 0;
@@ -245,7 +247,20 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
             input.frame.format
         );
         let crop = crop_from_roi(input.roi, input.frame.meta.size);
-        preprocess_bgra(input.frame, crop, self.input_size, &mut self.input)?;
+        let transform = crop_inverse_affine(
+            input.frame.meta.size,
+            crop,
+            self.input_size,
+            input.frame.buffer.is_horizontally_mirrored(),
+            input.frame.buffer.is_vertically_mirrored(),
+        )?;
+        preprocess_bgra(
+            input.frame,
+            self.input_size,
+            &transform,
+            "landmark",
+            &mut self.input,
+        )?;
         let tensor =
             TensorRef::from_array_view(([1, 3, self.input_size, self.input_size], &*self.input))?;
         let outputs = self.session.run(vec![(self.input_name.as_str(), tensor)])?;
@@ -270,6 +285,7 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
             .take(HAND_LANDMARKS * LANDMARK_COORDS)
             .fold(0.0_f32, |max, value| max.max(value.abs()));
         let mut points = [HandLandmark::default(); HAND_LANDMARKS];
+        let mut crop_points = [None; HAND_LANDMARKS];
         for i in 0..HAND_LANDMARKS {
             let base = i * LANDMARK_COORDS;
             let x = landmarks[base];
@@ -296,6 +312,7 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 continue;
             }
 
+            crop_points[i] = Some(Vec2::new(nx, ny));
             let [frame_x, frame_y] = crop.transform_point2(Vec2::new(nx, ny)).to_array();
             points[i] = HandLandmark {
                 x: frame_x,
@@ -311,6 +328,12 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 points[i].y
             );
         }
+        dump_landmark_overlay(
+            input.frame.meta.id,
+            self.input_size,
+            &self.input,
+            &crop_points,
+        )?;
 
         let handedness = self
             .handedness_output
@@ -441,58 +464,6 @@ fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Affine2 {
         Vec2::new(0.0, y1 - y0),
         Vec2::new(x0, y0),
     )
-}
-
-fn preprocess_bgra(
-    frame: Frame<'_>,
-    crop: Affine2,
-    input_size: usize,
-    output: &mut [f32],
-) -> Result<()> {
-    let source_w = frame.meta.size.width as usize;
-    let source_h = frame.meta.size.height as usize;
-    anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
-    let pixels = frame.view()?;
-    output.fill(0.0);
-    let input_sizef = input_size as f32;
-    for y in 0..input_size {
-        let ny = (y as f32 + 0.5) / input_sizef;
-        for x in 0..input_size {
-            let nx = (x as f32 + 0.5) / input_sizef;
-            let [src_xf, src_yf] = crop.transform_point2(Vec2::new(nx, ny)).to_array();
-            let src_xf = src_xf - 0.5;
-            let src_yf = src_yf - 0.5;
-
-            let x0 = src_xf.floor() as isize;
-            let y0 = src_yf.floor() as isize;
-            let x1 = x0 + 1;
-            let y1 = y0 + 1;
-
-            let dx = src_xf - x0 as f32;
-            let dy = src_yf - y0 as f32;
-
-            let mut r = 0.0;
-            let mut g = 0.0;
-            let mut b = 0.0;
-
-            for (iy, weight_y) in [(y0, 1.0 - dy), (y1, dy)] {
-                let iy = iy.clamp(0, source_h as isize - 1) as usize;
-                for (ix, weight_x) in [(x0, 1.0 - dx), (x1, dx)] {
-                    let ix = ix.clamp(0, source_w as isize - 1) as usize;
-                    let weight = weight_x * weight_y;
-                    r += pixels[[iy, ix, 2]] as f32 * weight;
-                    g += pixels[[iy, ix, 1]] as f32 * weight;
-                    b += pixels[[iy, ix, 0]] as f32 * weight;
-                }
-            }
-
-            let dst = y * input_size + x;
-            output[dst] = r / 255.0;
-            output[input_size * input_size + dst] = g / 255.0;
-            output[2 * input_size * input_size + dst] = b / 255.0;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

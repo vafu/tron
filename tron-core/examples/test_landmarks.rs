@@ -3,7 +3,7 @@ use ort::value::TensorRef;
 
 fn main() -> anyhow::Result<()> {
     let model_path = "../models/hand_landmark/hand_landmark.onnx";
-    let session = Session::builder()?.commit_from_file(model_path)?;
+    let mut session = Session::builder()?.commit_from_file(model_path)?;
 
     let input_size = 256;
     let input = vec![0.5f32; 3 * input_size * input_size];

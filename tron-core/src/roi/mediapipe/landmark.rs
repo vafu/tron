@@ -609,13 +609,10 @@ mod tests {
             timestamp: Instant::now(),
         };
         let roi = landmarks
-            .bounding_roi(
-                Size {
-                    width: 100,
-                    height: 100,
-                },
-                1.0,
-            )
+            .bounding_roi(Size {
+                width: 100,
+                height: 100,
+            })
             .expect("roi");
         assert_eq!(roi.rect.x, 10);
         assert_eq!(roi.rect.y, 20);
@@ -636,13 +633,10 @@ mod tests {
             timestamp: Instant::now(),
         };
         let roi = landmarks
-            .bounding_roi(
-                Size {
-                    width: 100,
-                    height: 100,
-                },
-                1.0,
-            )
+            .bounding_roi(Size {
+                width: 100,
+                height: 100,
+            })
             .expect("roi");
         // For a single point at (10.2, 20.8):
         // x0 = floor(10.2) = 10, y0 = floor(20.8) = 20

@@ -7,7 +7,8 @@ use tron_core::gesture::{GesturePreprocessor, GesturePreprocessorInput};
 use tron_core::process::landmark_velocity::{HandLandmarkMotion, LandmarkVelocityProcessor};
 use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
 use tron_core::roi::landmark::{
-    LandmarkRoiInput, LandmarkRoiProcessor, LandmarkTrackingRoiProcessor,
+    LandmarkRoiInput, LandmarkRoiProcessor, LandmarkTrackingRoiProcessor, LandmarkVelocityRoiInput,
+    LandmarkVelocityRoiProcessor,
 };
 use tron_core::roi::mediapipe::{
     HandLandmarks, MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput,
@@ -50,6 +51,7 @@ pub struct Pipeline<S> {
     landmark_velocity: LandmarkVelocityProcessor,
     landmark_roi: LandmarkRoiProcessor,
     landmark_tracking_roi_processor: LandmarkTrackingRoiProcessor,
+    landmark_velocity_roi_processor: LandmarkVelocityRoiProcessor,
     prev_roi: Option<RoiResult>,
     last_pinch_state: Option<bool>,
     gesture: GesturePreprocessor,
@@ -62,6 +64,7 @@ where
     pub fn new(source: S, config: PipelineConfig) -> Result<Self> {
         let landmark_roi = LandmarkRoiProcessor::new();
         let landmark_tracking_roi_processor = LandmarkTrackingRoiProcessor::new();
+        let landmark_velocity_roi_processor = LandmarkVelocityRoiProcessor::new();
         Ok(Self {
             source,
             palm: MediaPipeRoiProcessor::new(config.palm_model, config.palm)?,
@@ -73,6 +76,7 @@ where
             landmark_velocity: LandmarkVelocityProcessor::new(),
             landmark_roi,
             landmark_tracking_roi_processor,
+            landmark_velocity_roi_processor,
             prev_roi: None,
             last_pinch_state: None,
             gesture: GesturePreprocessor,
@@ -98,20 +102,26 @@ where
             NoContext,
         )?;
 
-        self.prev_roi =
-            // None;
-            self.landmark_tracking_roi_processor.process(
+        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
+        let landmark_motion = self
+            .landmark_velocity
+            .process(landmarks.clone(), NoContext)?;
+        let tracking_roi = self.landmark_tracking_roi_processor.process(
             LandmarkRoiInput {
                 landmarks: landmarks.as_ref(),
                 frame_size: rgb.meta.size,
             },
             NoContext,
         )?;
-
-        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
-        let landmark_motion = self
-            .landmark_velocity
-            .process(landmarks.clone(), NoContext)?;
+        let output_roi = self.landmark_velocity_roi_processor.process(
+            LandmarkVelocityRoiInput {
+                roi: tracking_roi,
+                motion: landmark_motion.as_ref(),
+                frame_size: rgb.meta.size,
+            },
+            NoContext,
+        )?;
+        self.prev_roi = output_roi;
 
         let gesture = self.gesture.process(
             GesturePreprocessorInput {
@@ -139,13 +149,13 @@ where
             rgb,
             palm_roi: _palm_roi,
             landmark_input_roi: processing_roi,
-            output_roi: self.landmark_roi.process(
+            output_roi: output_roi.or(self.landmark_roi.process(
                 LandmarkRoiInput {
                     landmarks: landmarks.as_ref(),
                     frame_size: rgb.meta.size,
                 },
                 NoContext,
-            )?,
+            )?),
             landmarks,
             landmark_motion,
             gesture,

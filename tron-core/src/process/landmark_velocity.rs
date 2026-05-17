@@ -28,6 +28,7 @@ impl HandLandmarkVelocity {
 pub struct HandLandmarkMotion {
     pub landmarks: HandLandmarks,
     pub velocities: [HandLandmarkVelocity; HAND_LANDMARKS],
+    pub dt_secs: f32,
     #[serde(skip)]
     pub timestamp: Instant,
 }
@@ -60,7 +61,7 @@ impl Processor<Option<HandLandmarks>, NoContext> for LandmarkVelocityProcessor {
             return Ok(None);
         };
 
-        let velocities = self
+        let velocity_sample = self
             .previous
             .as_ref()
             .and_then(|previous| landmark_velocities(previous, &landmarks));
@@ -69,15 +70,24 @@ impl Processor<Option<HandLandmarks>, NoContext> for LandmarkVelocityProcessor {
         Ok(Some(HandLandmarkMotion {
             timestamp: landmarks.timestamp,
             landmarks,
-            velocities: velocities.unwrap_or([HandLandmarkVelocity::default(); HAND_LANDMARKS]),
+            velocities: velocity_sample
+                .map(|sample| sample.velocities)
+                .unwrap_or([HandLandmarkVelocity::default(); HAND_LANDMARKS]),
+            dt_secs: velocity_sample.map(|sample| sample.dt_secs).unwrap_or(0.0),
         }))
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LandmarkVelocitySample {
+    velocities: [HandLandmarkVelocity; HAND_LANDMARKS],
+    dt_secs: f32,
 }
 
 fn landmark_velocities(
     previous: &HandLandmarks,
     current: &HandLandmarks,
-) -> Option<[HandLandmarkVelocity; HAND_LANDMARKS]> {
+) -> Option<LandmarkVelocitySample> {
     let dt = current
         .timestamp
         .checked_duration_since(previous.timestamp)?
@@ -94,7 +104,10 @@ fn landmark_velocities(
     {
         *velocity = landmark_velocity(*previous, *current, dt);
     }
-    Some(velocities)
+    Some(LandmarkVelocitySample {
+        velocities,
+        dt_secs: dt,
+    })
 }
 
 fn landmark_velocity(
@@ -157,6 +170,7 @@ mod tests {
         assert_eq!(output.velocities[0].x, 0.0);
         assert_eq!(output.velocities[0].y, 0.0);
         assert_eq!(output.velocities[0].z, 0.0);
+        assert_eq!(output.dt_secs, 0.0);
     }
 
     #[test]
@@ -195,6 +209,7 @@ mod tests {
         assert_eq!(output.velocities[0].x, 40.0);
         assert_eq!(output.velocities[0].y, -80.0);
         assert_eq!(output.velocities[0].z, 10.0);
+        assert!((output.dt_secs - 0.1).abs() < f32::EPSILON);
     }
 
     #[test]

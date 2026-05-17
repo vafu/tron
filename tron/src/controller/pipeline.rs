@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tron_api::{Frame, FrameSource, GestureFrame, HandGesture, NoContext, Processor, RoiResult};
 use tron_core::gesture::{GesturePreprocessor, GesturePreprocessorInput};
+use tron_core::process::landmark_velocity::{HandLandmarkMotion, LandmarkVelocityProcessor};
 use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
 use tron_core::roi::landmark::{
     LandmarkRoiInput, LandmarkRoiProcessor, LandmarkTrackingRoiProcessor,
@@ -26,6 +27,7 @@ pub struct ControllerFrame<'a> {
     pub palm_roi: Option<RoiResult>,
     pub landmark_input_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,
+    pub landmark_motion: Option<HandLandmarkMotion>,
     pub output_roi: Option<RoiResult>,
     pub gesture: GestureFrame,
 }
@@ -45,6 +47,7 @@ pub struct Pipeline<S> {
     palm: MediaPipeRoiProcessor,
     landmarks: MediaPipeHandLandmarkProcessor,
     landmark_filter: OneEuroLandmarkFilter,
+    landmark_velocity: LandmarkVelocityProcessor,
     landmark_roi: LandmarkRoiProcessor,
     landmark_tracking_roi_processor: LandmarkTrackingRoiProcessor,
     prev_roi: Option<RoiResult>,
@@ -67,6 +70,7 @@ where
                 config.landmarks,
             )?,
             landmark_filter: OneEuroLandmarkFilter::default(),
+            landmark_velocity: LandmarkVelocityProcessor::new(),
             landmark_roi,
             landmark_tracking_roi_processor,
             prev_roi: None,
@@ -105,6 +109,9 @@ where
         )?;
 
         let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
+        let landmark_motion = self
+            .landmark_velocity
+            .process(landmarks.clone(), NoContext)?;
 
         let gesture = self.gesture.process(
             GesturePreprocessorInput {
@@ -140,6 +147,7 @@ where
                 NoContext,
             )?,
             landmarks,
+            landmark_motion,
             gesture,
         }))
     }

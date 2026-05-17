@@ -3,6 +3,9 @@ use tron_api::{PixelFormat, PointerOutput, Sink, Size};
 use tron_core::render::hand_landmarks_overlay::{
     HandLandmarksOverlayRenderer, HandLandmarksOverlayView,
 };
+use tron_core::render::hand_velocity_overlay::{
+    HandVelocityOverlayRenderer, HandVelocityOverlayView,
+};
 use tron_core::render::roi_overlay::{RoiOverlayRenderer, RoiOverlayView};
 use tron_core::render::wgpu::{
     NdcRect, WgpuCachedFrameView, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext,
@@ -18,6 +21,7 @@ pub struct Renderer {
     landmark_input_roi_overlay: RoiOverlayRenderer,
     roi_overlay: RoiOverlayRenderer,
     landmarks_overlay: HandLandmarksOverlayRenderer,
+    velocity_overlay: HandVelocityOverlayRenderer,
     pointer: PointerOverlaySink,
 }
 
@@ -31,6 +35,7 @@ impl Renderer {
             landmark_input_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
             roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
             landmarks_overlay: HandLandmarksOverlayRenderer::new(surface.device(), format),
+            velocity_overlay: HandVelocityOverlayRenderer::new(surface.device(), format),
             pointer: PointerOverlaySink::new(surface.device(), format),
             surface,
         })
@@ -136,6 +141,17 @@ impl<'a> Sink<&'a ControllerFrame<'a>> for Renderer {
                         queue: surface.queue,
                         pass: &mut pass,
                         landmarks,
+                        frame_size: rgb.meta.size,
+                        rect: NdcRect::FULL,
+                        target_size: surface.size,
+                    }))?;
+                }
+                if let Some(motion) = view.landmark_motion.as_ref() {
+                    pollster::block_on(self.velocity_overlay.consume(HandVelocityOverlayView {
+                        device: surface.device,
+                        queue: surface.queue,
+                        pass: &mut pass,
+                        motion,
                         frame_size: rgb.meta.size,
                         rect: NdcRect::FULL,
                         target_size: surface.size,

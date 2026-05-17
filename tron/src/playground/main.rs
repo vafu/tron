@@ -70,7 +70,7 @@ struct Cli {
     rgb_mediapipe_roi: bool,
 
     /// ONNX model path for RGB MediaPipe ROI detection.
-    #[arg(long, default_value = "models/hand_detector/model.onnx")]
+    #[arg(long, default_value = "models/google_hand_detector/model.onnx")]
     rgb_mediapipe_model: PathBuf,
 
     /// Minimum MediaPipe palm detector confidence for RGB ROI.

@@ -7,7 +7,9 @@ use ort::session::Session;
 use ort::value::{TensorRef, ValueType};
 use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
 
-use super::{crop_inverse_affine, dump_landmark_overlay, preprocess_bgra};
+use super::{
+    ModelInputLayout, crop_inverse_affine, dump_landmark_overlay, model_input_spec, preprocess_bgra,
+};
 
 const DEFAULT_INPUT_SIZE: usize = 256;
 const HAND_LANDMARKS: usize = 21;
@@ -299,6 +301,7 @@ pub struct MediaPipeHandLandmarkProcessor {
     config: MediaPipeHandLandmarkConfig,
     input_name: String,
     input_size: usize,
+    input_layout: ModelInputLayout,
     landmarks_output: usize,
     presence_output: Option<usize>,
     handedness_output: Option<usize>,
@@ -322,13 +325,15 @@ impl MediaPipeHandLandmarkProcessor {
             .first()
             .context("MediaPipe hand landmark model has no inputs")?;
         let input_name = input.name().to_owned();
-        let input_size = square_input_size(input.dtype()).unwrap_or(DEFAULT_INPUT_SIZE);
+        let (input_size, input_layout) =
+            model_input_spec(input.dtype()).unwrap_or((DEFAULT_INPUT_SIZE, ModelInputLayout::Nchw));
         let (landmarks_output, presence_output, handedness_output) = classify_outputs(&session)?;
         Ok(Self {
             session,
             config,
             input_name,
             input_size,
+            input_layout,
             landmarks_output,
             presence_output,
             handedness_output,
@@ -350,6 +355,7 @@ impl MediaPipeHandLandmarkProcessor {
         dump_landmark_overlay(
             frame_id,
             self.input_size,
+            self.input_layout,
             &self.input,
             &self.last_debug_crop_points,
         )
@@ -381,12 +387,13 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
         preprocess_bgra(
             input.frame,
             self.input_size,
+            self.input_layout,
             &transform,
             "landmark",
             &mut self.input,
         )?;
         let tensor =
-            TensorRef::from_array_view(([1, 3, self.input_size, self.input_size], &*self.input))?;
+            TensorRef::from_array_view((self.input_layout.shape(self.input_size), &*self.input))?;
         let outputs = self.session.run(vec![(self.input_name.as_str(), tensor)])?;
         let (_, landmarks) = outputs[self.landmarks_output]
             .try_extract_tensor::<f32>()
@@ -473,19 +480,6 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
             handedness,
             timestamp: Instant::now(),
         }))
-    }
-}
-
-fn square_input_size(value_type: &ValueType) -> Option<usize> {
-    let ValueType::Tensor { shape, .. } = value_type else {
-        return None;
-    };
-    let height = *shape.get(2)?;
-    let width = *shape.get(3)?;
-    if height > 0 && height == width {
-        Some(height as usize)
-    } else {
-        None
     }
 }
 

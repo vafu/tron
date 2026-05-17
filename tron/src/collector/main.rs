@@ -52,11 +52,11 @@ struct Cli {
     max_sync_delta_us: u64,
 
     /// ONNX model path for RGB MediaPipe ROI detection.
-    #[arg(long, default_value = "models/hand_detector/model.onnx")]
+    #[arg(long, default_value = "models/google_hand_detector/model.onnx")]
     rgb_mediapipe_model: PathBuf,
 
     /// ONNX model path for RGB MediaPipe hand landmark extraction.
-    #[arg(long, default_value = "models/hand_landmark/hand_landmark.onnx")]
+    #[arg(long, default_value = "models/google_hand_landmark/hand_landmark.onnx")]
     rgb_mediapipe_landmark_model: PathBuf,
 
     /// Minimum MediaPipe palm detector confidence for RGB ROI.

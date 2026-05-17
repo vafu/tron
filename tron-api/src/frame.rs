@@ -310,6 +310,10 @@ pub trait FrameSource {
     async fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>>;
 }
 
+pub trait IterableFrameSource: FrameSource {
+    fn prev_frame(&mut self) -> anyhow::Result<bool>;
+}
+
 #[async_trait::async_trait]
 impl<S> FrameSource for Box<S>
 where
@@ -321,5 +325,14 @@ where
 
     async fn next_frame(&mut self) -> anyhow::Result<Option<Frame<'_>>> {
         (**self).next_frame().await
+    }
+}
+
+impl<S> IterableFrameSource for Box<S>
+where
+    S: IterableFrameSource + Send + ?Sized,
+{
+    fn prev_frame(&mut self) -> anyhow::Result<bool> {
+        (**self).prev_frame()
     }
 }

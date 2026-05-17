@@ -7,6 +7,7 @@ use glam::{Affine2, Vec2};
 use opencv::core::{self, Mat, Vec4b};
 use opencv::imgproc;
 use opencv::prelude::*;
+use ort::value::ValueType;
 use tron_api::{Frame, PixelFormat, Size};
 
 mod landmark;
@@ -44,9 +45,81 @@ const HAND_CONNECTIONS: [(usize, usize); 20] = [
     (19, 20),
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModelInputLayout {
+    Nchw,
+    Nhwc,
+}
+
+trait TensorLayout {
+    fn shape(input_size: usize) -> [usize; 4];
+
+    fn offset(channel: usize, y: usize, x: usize, input_size: usize) -> usize;
+}
+
+struct NchwLayout;
+struct NhwcLayout;
+
+// TODO cleanup!
+impl TensorLayout for NchwLayout {
+    fn shape(input_size: usize) -> [usize; 4] {
+        [1, MODEL_INPUT_CHANNELS, input_size, input_size]
+    }
+
+    fn offset(channel: usize, y: usize, x: usize, input_size: usize) -> usize {
+        channel * input_size * input_size + y * input_size + x
+    }
+}
+
+impl TensorLayout for NhwcLayout {
+    fn shape(input_size: usize) -> [usize; 4] {
+        [1, input_size, input_size, MODEL_INPUT_CHANNELS]
+    }
+
+    fn offset(channel: usize, y: usize, x: usize, input_size: usize) -> usize {
+        (y * input_size + x) * MODEL_INPUT_CHANNELS + channel
+    }
+}
+
+impl ModelInputLayout {
+    pub(super) fn shape(self, input_size: usize) -> [usize; 4] {
+        match self {
+            Self::Nchw => NchwLayout::shape(input_size),
+            Self::Nhwc => NhwcLayout::shape(input_size),
+        }
+    }
+
+    fn offset(self, channel: usize, y: usize, x: usize, input_size: usize) -> usize {
+        match self {
+            Self::Nchw => NchwLayout::offset(channel, y, x, input_size),
+            Self::Nhwc => NhwcLayout::offset(channel, y, x, input_size),
+        }
+    }
+}
+
+pub(super) fn model_input_spec(value_type: &ValueType) -> Option<(usize, ModelInputLayout)> {
+    let ValueType::Tensor { shape, .. } = value_type else {
+        return None;
+    };
+    let c = *shape.get(1)?;
+    let h = *shape.get(2)?;
+    let w = *shape.get(3)?;
+    if c == 3 && h > 0 && h == w {
+        return Some((h as usize, ModelInputLayout::Nchw));
+    }
+    let h = *shape.get(1)?;
+    let w = *shape.get(2)?;
+    let c = *shape.get(3)?;
+    if c == 3 && h > 0 && h == w {
+        return Some((h as usize, ModelInputLayout::Nhwc));
+    }
+    None
+}
+
 pub(super) fn preprocess_bgra(
     frame: Frame<'_>,
     input_size: usize,
+    layout: ModelInputLayout,
     inverse_affine: &Mat,
     debug_label: &str,
     output: &mut [f32],
@@ -91,7 +164,7 @@ pub(super) fn preprocess_bgra(
     .context("warp MediaPipe model input")?;
 
     let _ = debug_label;
-    bgra_mat_to_nchw(&warped, input_size, output)
+    bgra_mat_to_tensor(&warped, input_size, layout, output)
 }
 
 pub(super) fn letterbox_inverse_affine(
@@ -171,7 +244,12 @@ fn apply_mirror_to_affine(
     (x_axis, y_axis, origin)
 }
 
-fn bgra_mat_to_nchw(input: &Mat, input_size: usize, output: &mut [f32]) -> Result<()> {
+fn bgra_mat_to_tensor(
+    input: &Mat,
+    input_size: usize,
+    layout: ModelInputLayout,
+    output: &mut [f32],
+) -> Result<()> {
     let input_size_squared = input_size * input_size;
     let bytes = input.data_bytes()?;
     anyhow::ensure!(
@@ -185,10 +263,9 @@ fn bgra_mat_to_nchw(input: &Mat, input_size: usize, output: &mut [f32]) -> Resul
             let g = bytes[offset + 1];
             let r = bytes[offset + 2];
 
-            let dst = y * input_size + x;
-            output[dst] = r as f32 / 255.0;
-            output[input_size_squared + dst] = g as f32 / 255.0;
-            output[2 * input_size_squared + dst] = b as f32 / 255.0;
+            output[layout.offset(0, y, x, input_size)] = r as f32 / 255.0;
+            output[layout.offset(1, y, x, input_size)] = g as f32 / 255.0;
+            output[layout.offset(2, y, x, input_size)] = b as f32 / 255.0;
         }
     }
     Ok(())
@@ -197,6 +274,7 @@ fn bgra_mat_to_nchw(input: &Mat, input_size: usize, output: &mut [f32]) -> Resul
 pub(super) fn dump_landmark_overlay(
     frame_id: u64,
     input_size: usize,
+    layout: ModelInputLayout,
     tensor: &[f32],
     points: &[Option<Vec2>; 21],
 ) -> Result<()> {
@@ -204,7 +282,7 @@ pub(super) fn dump_landmark_overlay(
         return Ok(());
     };
 
-    let mut rgb = tensor_to_rgb(input_size, tensor)?;
+    let mut rgb = tensor_to_rgb(input_size, layout, tensor)?;
     for (a, b) in HAND_CONNECTIONS {
         let Some(a) = points[a] else {
             continue;
@@ -228,21 +306,26 @@ pub(super) fn dump_landmark_overlay(
     write_rgb_ppm(&path, input_size, &rgb)
 }
 
-fn tensor_to_rgb(input_size: usize, tensor: &[f32]) -> Result<Vec<u8>> {
+fn tensor_to_rgb(input_size: usize, layout: ModelInputLayout, tensor: &[f32]) -> Result<Vec<u8>> {
     let input_size_squared = input_size * input_size;
     anyhow::ensure!(
         tensor.len() >= MODEL_INPUT_CHANNELS * input_size_squared,
         "MediaPipe tensor debug buffer too small"
     );
     let mut rgb = vec![0_u8; input_size_squared * MODEL_INPUT_CHANNELS];
-    for i in 0..input_size_squared {
-        rgb[i * MODEL_INPUT_CHANNELS] = tensor[i].mul_add(255.0, 0.0).clamp(0.0, 255.0) as u8;
-        rgb[i * MODEL_INPUT_CHANNELS + 1] = tensor[input_size_squared + i]
-            .mul_add(255.0, 0.0)
-            .clamp(0.0, 255.0) as u8;
-        rgb[i * MODEL_INPUT_CHANNELS + 2] = tensor[2 * input_size_squared + i]
-            .mul_add(255.0, 0.0)
-            .clamp(0.0, 255.0) as u8;
+    for y in 0..input_size {
+        for x in 0..input_size {
+            let dst = (y * input_size + x) * MODEL_INPUT_CHANNELS;
+            rgb[dst] = tensor[layout.offset(0, y, x, input_size)]
+                .mul_add(255.0, 0.0)
+                .clamp(0.0, 255.0) as u8;
+            rgb[dst + 1] = tensor[layout.offset(1, y, x, input_size)]
+                .mul_add(255.0, 0.0)
+                .clamp(0.0, 255.0) as u8;
+            rgb[dst + 2] = tensor[layout.offset(2, y, x, input_size)]
+                .mul_add(255.0, 0.0)
+                .clamp(0.0, 255.0) as u8;
+        }
     }
     Ok(rgb)
 }

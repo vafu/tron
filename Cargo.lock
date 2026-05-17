@@ -2700,6 +2700,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "glam",
+ "memmap2",
  "opencv",
  "ort",
  "pollster",

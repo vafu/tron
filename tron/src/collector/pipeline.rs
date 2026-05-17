@@ -31,8 +31,6 @@ pub struct PipelineConfig {
     pub depth_source: Option<Box<dyn DepthSource + Send>>,
 }
 
-const LANDMARK_TRACKING_ROI_SCALE: f32 = 2.0;
-
 pub trait Tick {
     fn tick(&mut self) -> Result<Option<Aggregate<'_>>>;
 }
@@ -56,9 +54,8 @@ where
     I: FrameSource + Send,
 {
     pub fn new(rgb: R, ir: I, config: PipelineConfig) -> Result<Self> {
-        let landmark_roi = LandmarkRoiProcessor::new(config.landmarks.roi_scale);
-        let landmark_tracking_roi_processor =
-            LandmarkTrackingRoiProcessor::new(LANDMARK_TRACKING_ROI_SCALE);
+        let landmark_roi = LandmarkRoiProcessor::new();
+        let landmark_tracking_roi_processor = LandmarkTrackingRoiProcessor::new();
         Ok(Self {
             frames: StereoFrameSource::new(rgb, ir, config.max_sync_delta_us),
             palm: MediaPipeRoiProcessor::new(config.palm_model, config.palm)?,

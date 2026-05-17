@@ -4,7 +4,7 @@ use ort::value::ValueType;
 fn main() -> anyhow::Result<()> {
     let model_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "models/hand_detector/model.onnx".to_string());
+        .unwrap_or_else(|| "models/google_hand_detector/model.onnx".to_string());
     let session = Session::builder()?.commit_from_file(model_path)?;
 
     println!("Inputs:");

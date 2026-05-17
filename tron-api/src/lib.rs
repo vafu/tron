@@ -64,8 +64,8 @@ pub use capture::{
 pub use depth::{DepthSample, DepthSource};
 pub use event::{EventProducer, EventProducerChannels, spawn_event_channels};
 pub use frame::{
-    CaptureFormat, Frame, FrameId, FrameMeta, FrameMut, FrameSource, FrameTimestamp, OwnedFrame,
-    PixelFormat, SensorKind, TimestampSource,
+    CaptureFormat, Frame, FrameId, FrameMeta, FrameMut, FrameSource, FrameTimestamp,
+    IterableFrameSource, OwnedFrame, PixelFormat, SensorKind, TimestampSource,
 };
 pub use gesture::{GestureFrame, HandGesture, PalmPose2d};
 pub use pointer::{

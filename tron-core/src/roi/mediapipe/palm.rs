@@ -3,14 +3,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use glam::Vec2;
 use ort::session::Session;
-use ort::value::TensorRef;
+use ort::value::{TensorRef, ValueType};
 use tron_api::{
     Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size,
 };
 
-use super::{letterbox_inverse_affine, preprocess_bgra};
+use super::{ModelInputLayout, letterbox_inverse_affine, model_input_spec, preprocess_bgra};
 
-const INPUT_SIZE: usize = 256;
+const DEFAULT_INPUT_SIZE: usize = 256;
 const SCORE_CLIP: f32 = 100.0;
 const PALM_KEYPOINTS: usize = 7;
 const WRIST_KEYPOINT: usize = 0;
@@ -36,6 +36,11 @@ impl Default for MediaPipeRoiConfig {
 pub struct MediaPipeRoiProcessor {
     session: Session,
     config: MediaPipeRoiConfig,
+    input_name: String,
+    input_size: usize,
+    input_layout: ModelInputLayout,
+    coords_output: usize,
+    scores_output: usize,
     input: Vec<f32>,
     anchors: Vec<Anchor>,
 }
@@ -45,11 +50,24 @@ impl MediaPipeRoiProcessor {
         let session = Session::builder()?
             .commit_from_file(model_path.as_ref())
             .with_context(|| format!("load MediaPipe hand detector {:?}", model_path.as_ref()))?;
+        let input = session
+            .inputs()
+            .first()
+            .context("MediaPipe hand detector model has no inputs")?;
+        let input_name = input.name().to_owned();
+        let (input_size, input_layout) =
+            model_input_spec(input.dtype()).unwrap_or((DEFAULT_INPUT_SIZE, ModelInputLayout::Nchw));
+        let (coords_output, scores_output, anchor_count) = classify_outputs(&session)?;
         Ok(Self {
             session,
             config,
-            input: vec![0.0; 3 * INPUT_SIZE * INPUT_SIZE],
-            anchors: generate_palm_anchors(),
+            input_name,
+            input_size,
+            input_layout,
+            coords_output,
+            scores_output,
+            input: vec![0.0; 3 * input_size * input_size],
+            anchors: generate_palm_anchors(input_size, anchor_count),
         })
     }
 }
@@ -63,25 +81,44 @@ impl Processor<Frame<'_>> for MediaPipeRoiProcessor {
             "MediaPipe ROI processor expects BGRA8 RGB frames, got {:?}",
             input.format
         );
-        let resize = preprocess_palm_bgra(input, &mut self.input)?;
-        let tensor = TensorRef::from_array_view(([1, 3, INPUT_SIZE, INPUT_SIZE], &*self.input))?;
-        let outputs = self.session.run(ort::inputs!["image" => tensor])?;
-        let (_, coords) = outputs["box_coords"]
+        let resize =
+            preprocess_palm_bgra(input, self.input_size, self.input_layout, &mut self.input)?;
+        let tensor =
+            TensorRef::from_array_view((self.input_layout.shape(self.input_size), &*self.input))?;
+        let outputs = self.session.run(vec![(self.input_name.as_str(), tensor)])?;
+        let (_, coords) = outputs[self.coords_output]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe box_coords")?;
-        let (_, scores) = outputs["box_scores"]
+        let (_, scores) = outputs[self.scores_output]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe box_scores")?;
 
-        let detection = best_detection(coords, scores, &self.anchors, self.config.min_score);
+        let detection = best_detection(
+            coords,
+            scores,
+            &self.anchors,
+            self.config.min_score,
+            self.input_size,
+        );
 
         Ok(detection.map(|detection| {
-            let oriented_box =
-                detection.to_oriented_box(resize, input.meta.size, self.config.box_scale);
+            let oriented_box = detection.to_oriented_box(
+                resize,
+                input.meta.size,
+                self.input_size,
+                self.config.box_scale,
+            );
 
             let rect = oriented_box
                 .and_then(|bbox| bbox.enclosing_rect(input.meta.size))
-                .or_else(|| detection.to_frame_rect(resize, input.meta.size, self.config.box_scale))
+                .or_else(|| {
+                    detection.to_frame_rect(
+                        resize,
+                        input.meta.size,
+                        self.input_size,
+                        self.config.box_scale,
+                    )
+                })
                 .unwrap_or(Rect {
                     x: 0,
                     y: 0,
@@ -114,14 +151,16 @@ impl Detection {
         self,
         resize: ResizeMapping,
         frame_size: Size,
+        input_size: usize,
         box_scale: f32,
     ) -> Option<Rect> {
-        let width = (self.width * box_scale).max(1.0 / INPUT_SIZE as f32);
-        let height = (self.height * box_scale).max(1.0 / INPUT_SIZE as f32);
-        let x0 = (self.x_center - width * 0.5) * resize.scale * INPUT_SIZE as f32 - resize.pad_x;
-        let y0 = (self.y_center - height * 0.5) * resize.scale * INPUT_SIZE as f32 - resize.pad_y;
-        let x1 = (self.x_center + width * 0.5) * resize.scale * INPUT_SIZE as f32 - resize.pad_x;
-        let y1 = (self.y_center + height * 0.5) * resize.scale * INPUT_SIZE as f32 - resize.pad_y;
+        let input_size = input_size as f32;
+        let width = (self.width * box_scale).max(1.0 / input_size);
+        let height = (self.height * box_scale).max(1.0 / input_size);
+        let x0 = (self.x_center - width * 0.5) * resize.scale * input_size - resize.pad_x;
+        let y0 = (self.y_center - height * 0.5) * resize.scale * input_size - resize.pad_y;
+        let x1 = (self.x_center + width * 0.5) * resize.scale * input_size - resize.pad_x;
+        let y1 = (self.y_center + height * 0.5) * resize.scale * input_size - resize.pad_y;
         rect_from_f32(x0, y0, x1, y1, frame_size)
     }
 
@@ -129,11 +168,12 @@ impl Detection {
         self,
         resize: ResizeMapping,
         frame_size: Size,
+        input_size: usize,
         fingertip_scale: f32,
     ) -> Option<OrientedBoundingBox> {
-        let center = self.center_to_frame(resize);
-        let wrist = self.keypoint_to_frame(WRIST_KEYPOINT, resize);
-        let middle_mcp = self.keypoint_to_frame(MIDDLE_MCP_KEYPOINT, resize);
+        let center = self.center_to_frame(resize, input_size);
+        let wrist = self.keypoint_to_frame(WRIST_KEYPOINT, resize, input_size);
+        let middle_mcp = self.keypoint_to_frame(MIDDLE_MCP_KEYPOINT, resize, input_size);
 
         // MediaPipe Hand Landmark model expects fingertips at the top (y=0).
         // The orientation axis points from middle-MCP knuckle to the wrist.
@@ -141,7 +181,7 @@ impl Detection {
         let palm_len = axis_y.length();
         if palm_len < 1.0 || !palm_len.is_finite() {
             return self
-                .to_frame_rect(resize, frame_size, fingertip_scale)
+                .to_frame_rect(resize, frame_size, input_size, fingertip_scale)
                 .map(rect_to_oriented_box);
         }
 
@@ -150,8 +190,9 @@ impl Detection {
         let axis_x = Vec2::new(axis_y.y, -axis_y.x);
 
         // ROI size is derived from either the predicted box or the actual palm length.
-        let raw_width = (self.width.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
-        let raw_height = (self.height.abs() * resize.scale * INPUT_SIZE as f32).max(palm_len);
+        let input_size = input_size as f32;
+        let raw_width = (self.width.abs() * resize.scale * input_size).max(palm_len);
+        let raw_height = (self.height.abs() * resize.scale * input_size).max(palm_len);
 
         // Shift center along axis_y (middle-MCP to wrist).
         // Since axis_y points towards the wrist, we move by negative axis_y (towards fingertips).
@@ -169,22 +210,29 @@ impl Detection {
         Some(OrientedBoundingBox { corners })
     }
 
-    fn center_to_frame(self, resize: ResizeMapping) -> Vec2 {
+    fn center_to_frame(self, resize: ResizeMapping, input_size: usize) -> Vec2 {
+        let input_size = input_size as f32;
         Vec2::new(
-            self.x_center * resize.scale * INPUT_SIZE as f32 - resize.pad_x,
-            self.y_center * resize.scale * INPUT_SIZE as f32 - resize.pad_y,
+            self.x_center * resize.scale * input_size - resize.pad_x,
+            self.y_center * resize.scale * input_size - resize.pad_y,
         )
     }
 
-    fn keypoint_to_frame(self, index: usize, resize: ResizeMapping) -> Vec2 {
-        self.keypoint_to_frame_point(self.keypoints[index], resize)
+    fn keypoint_to_frame(self, index: usize, resize: ResizeMapping, input_size: usize) -> Vec2 {
+        self.keypoint_to_frame_point(self.keypoints[index], resize, input_size)
     }
 
-    fn keypoint_to_frame_point(self, point: [f32; 2], resize: ResizeMapping) -> Vec2 {
+    fn keypoint_to_frame_point(
+        self,
+        point: [f32; 2],
+        resize: ResizeMapping,
+        input_size: usize,
+    ) -> Vec2 {
         let [x, y] = point;
+        let input_size = input_size as f32;
         Vec2::new(
-            x * resize.scale * INPUT_SIZE as f32 - resize.pad_x,
-            y * resize.scale * INPUT_SIZE as f32 - resize.pad_y,
+            x * resize.scale * input_size - resize.pad_x,
+            y * resize.scale * input_size - resize.pad_y,
         )
     }
 }
@@ -197,7 +245,12 @@ struct Anchor {
     height: f32,
 }
 
-fn preprocess_palm_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMapping> {
+fn preprocess_palm_bgra(
+    frame: Frame<'_>,
+    input_size: usize,
+    input_layout: ModelInputLayout,
+    output: &mut [f32],
+) -> Result<ResizeMapping> {
     let source_w = frame.meta.size.width as usize;
     let source_h = frame.meta.size.height as usize;
     anyhow::ensure!(source_w > 0 && source_h > 0, "empty RGB frame");
@@ -205,12 +258,12 @@ fn preprocess_palm_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMa
     anyhow::ensure!(stride == source_w * 4, "frame must be tightly packed BGRA8");
 
     let (resized_w, resized_h) = if source_h >= source_w {
-        (INPUT_SIZE * source_w / source_h, INPUT_SIZE)
+        (input_size * source_w / source_h, input_size)
     } else {
-        (INPUT_SIZE, INPUT_SIZE * source_h / source_w)
+        (input_size, input_size * source_h / source_w)
     };
-    let pad_x = (INPUT_SIZE - resized_w) / 2;
-    let pad_y = (INPUT_SIZE - resized_h) / 2;
+    let pad_x = (input_size - resized_w) / 2;
+    let pad_y = (input_size - resized_h) / 2;
 
     let scale_x = source_w as f32 / resized_w as f32;
     let scale_y = source_h as f32 / resized_h as f32;
@@ -224,7 +277,7 @@ fn preprocess_palm_bgra(frame: Frame<'_>, output: &mut [f32]) -> Result<ResizeMa
         frame.buffer.is_horizontally_mirrored(),
         frame.buffer.is_vertically_mirrored(),
     )?;
-    preprocess_bgra(frame, INPUT_SIZE, &transform, "palm", output)?;
+    preprocess_bgra(frame, input_size, input_layout, &transform, "palm", output)?;
 
     Ok(ResizeMapping {
         scale: scale_x,
@@ -238,6 +291,7 @@ fn best_detection(
     scores: &[f32],
     anchors: &[Anchor],
     min_score: f32,
+    input_size: usize,
 ) -> Option<Detection> {
     let n = anchors.len().min(scores.len()).min(coords.len() / 18);
     let mut best = None;
@@ -249,16 +303,17 @@ fn best_detection(
         let base = i * 18;
         let anchor = anchors[i];
 
-        let x_center = coords[base] / INPUT_SIZE as f32 * anchor.width + anchor.x_center;
-        let y_center = coords[base + 1] / INPUT_SIZE as f32 * anchor.height + anchor.y_center;
-        let width = coords[base + 2] / INPUT_SIZE as f32 * anchor.width;
-        let height = coords[base + 3] / INPUT_SIZE as f32 * anchor.height;
+        let input_size = input_size as f32;
+        let x_center = coords[base] / input_size * anchor.width + anchor.x_center;
+        let y_center = coords[base + 1] / input_size * anchor.height + anchor.y_center;
+        let width = coords[base + 2] / input_size * anchor.width;
+        let height = coords[base + 3] / input_size * anchor.height;
 
         let mut keypoints = [[0.0; 2]; PALM_KEYPOINTS];
         for (keypoint, point) in keypoints.iter_mut().enumerate() {
             let offset = base + 4 + keypoint * 2;
-            let x = coords[offset] / INPUT_SIZE as f32 * anchor.width + anchor.x_center;
-            let y = coords[offset + 1] / INPUT_SIZE as f32 * anchor.height + anchor.y_center;
+            let x = coords[offset] / input_size * anchor.width + anchor.x_center;
+            let y = coords[offset + 1] / input_size * anchor.height + anchor.y_center;
             *point = [x, y];
         }
         let detection = Detection {
@@ -289,11 +344,93 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     }
 }
 
-fn generate_palm_anchors() -> Vec<Anchor> {
-    let strides = [8usize, 16, 32, 32, 32];
+fn classify_outputs(session: &Session) -> Result<(usize, usize, usize)> {
+    let outputs = session.outputs();
+    let mut coords_output = None;
+    let mut scores_output = None;
+
+    for (i, output) in outputs.iter().enumerate() {
+        let name = output.name().to_ascii_lowercase();
+        let (elements, last_dim) = output_tensor_shape(output.dtype());
+        if coords_output.is_none()
+            && (name.contains("box_coords")
+                || name.contains("regressor")
+                || last_dim == Some(18)
+                || (elements > 0 && last_dim != Some(1) && elements % 18 == 0))
+        {
+            coords_output = Some((i, elements / 18));
+        }
+        if scores_output.is_none()
+            && (name.contains("box_scores")
+                || name.contains("classificator")
+                || name.contains("score")
+                || last_dim == Some(1))
+            && elements > 0
+        {
+            scores_output = Some(i);
+        }
+    }
+
+    let Some((coords_output, anchor_count)) = coords_output else {
+        let outputs = outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                let shape = match output.dtype() {
+                    ValueType::Tensor { shape, .. } => format!("{shape:?}"),
+                    _ => "not a tensor".to_string(),
+                };
+                format!("{i}:{}:{shape}", output.name())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "MediaPipe hand detector model has no box coordinate output; outputs: {outputs}"
+        );
+    };
+    let scores_output = scores_output.unwrap_or_else(|| {
+        outputs
+            .iter()
+            .enumerate()
+            .find_map(|(i, output)| {
+                matches!(output.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == anchor_count)
+                    .then_some(i)
+            })
+            .unwrap_or(coords_output.saturating_add(1).min(outputs.len().saturating_sub(1)))
+    });
+    Ok((coords_output, scores_output, anchor_count))
+}
+
+fn output_tensor_shape(value_type: &ValueType) -> (usize, Option<i64>) {
+    match value_type {
+        ValueType::Tensor { shape, .. } => (shape.num_elements(), shape.last().copied()),
+        _ => (0, None),
+    }
+}
+
+fn generate_palm_anchors(input_size: usize, anchor_count: usize) -> Vec<Anchor> {
+    let candidates: &[&[usize]] = &[&[8, 16, 32, 32, 32], &[8, 16, 16, 16]];
+    for strides in candidates {
+        let anchors = generate_palm_anchors_for_strides(input_size, strides);
+        if anchors.len() == anchor_count {
+            return anchors;
+        }
+    }
+    let anchors = generate_palm_anchors_for_strides(input_size, candidates[0]);
+    tracing::warn!(
+        "generated {} palm anchors for {}x{} detector, but model has {} anchors",
+        anchors.len(),
+        input_size,
+        input_size,
+        anchor_count
+    );
+    anchors
+}
+
+fn generate_palm_anchors_for_strides(input_size: usize, strides: &[usize]) -> Vec<Anchor> {
     let mut anchors = Vec::with_capacity(2944);
-    for stride in strides {
-        let feature_map = INPUT_SIZE.div_ceil(stride);
+    for &stride in strides {
+        let feature_map = input_size.div_ceil(stride);
         for y in 0..feature_map {
             for x in 0..feature_map {
                 let x_center = (x as f32 + 0.5) / feature_map as f32;
@@ -339,7 +476,8 @@ mod tests {
 
     #[test]
     fn palm_anchor_count_matches_model() {
-        assert_eq!(generate_palm_anchors().len(), 2944);
+        assert_eq!(generate_palm_anchors(256, 2944).len(), 2944);
+        assert_eq!(generate_palm_anchors(192, 2016).len(), 2016);
     }
 
     #[test]
@@ -368,13 +506,14 @@ mod tests {
                     pad_y: 0.0,
                 },
                 Size {
-                    width: INPUT_SIZE as u32,
-                    height: INPUT_SIZE as u32,
+                    width: DEFAULT_INPUT_SIZE as u32,
+                    height: DEFAULT_INPUT_SIZE as u32,
                 },
+                DEFAULT_INPUT_SIZE,
                 MEDIAPIPE_PALM_SCALE,
             )
             .unwrap();
-        let wrist_y = 0.5 * INPUT_SIZE as f32;
+        let wrist_y = 0.5 * DEFAULT_INPUT_SIZE as f32;
         // c0, c1 are now the "forward" (fingertips) side.
         let forward = (box_.corners[0][1] + box_.corners[1][1]) * 0.5 - wrist_y;
         let back = wrist_y - (box_.corners[2][1] + box_.corners[3][1]) * 0.5;

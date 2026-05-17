@@ -1,5 +1,6 @@
 use anyhow::Result;
-use tron_api::{PixelFormat, PointerOutput, Sink, Size};
+use tron_api::{PixelFormat, PointerOutput, RoiResult, Sink, Size};
+use tron_core::process::landmark_velocity::HandLandmarkMotion;
 use tron_core::render::hand_landmarks_overlay::{
     HandLandmarksOverlayRenderer, HandLandmarksOverlayView,
 };
@@ -10,6 +11,7 @@ use tron_core::render::roi_overlay::{RoiOverlayRenderer, RoiOverlayView};
 use tron_core::render::wgpu::{
     NdcRect, WgpuCachedFrameView, WgpuFrameRenderer, WgpuFrameView, WgpuSurfaceContext,
 };
+use tron_core::roi::mediapipe::HandLandmarks;
 
 use crate::pipeline::ControllerFrame;
 use crate::pointer_sink::PointerOverlaySink;
@@ -23,6 +25,12 @@ pub struct Renderer {
     landmarks_overlay: HandLandmarksOverlayRenderer,
     velocity_overlay: HandVelocityOverlayRenderer,
     pointer: PointerOverlaySink,
+    cached_frame_size: Option<Size>,
+    cached_palm_roi: Option<RoiResult>,
+    cached_landmark_input_roi: Option<RoiResult>,
+    cached_output_roi: Option<RoiResult>,
+    cached_landmarks: Option<HandLandmarks>,
+    cached_motion: Option<HandLandmarkMotion>,
 }
 
 impl Renderer {
@@ -38,6 +46,12 @@ impl Renderer {
             velocity_overlay: HandVelocityOverlayRenderer::new(surface.device(), format),
             pointer: PointerOverlaySink::new(surface.device(), format),
             surface,
+            cached_frame_size: None,
+            cached_palm_roi: None,
+            cached_landmark_input_roi: None,
+            cached_output_roi: None,
+            cached_landmarks: None,
+            cached_motion: None,
         })
     }
 
@@ -62,6 +76,75 @@ impl Renderer {
                     rect: NdcRect::FULL,
                     target_size: surface.size,
                 }))?;
+                if let Some(frame_size) = self.cached_frame_size {
+                    if let Some(palm_roi) = self.cached_palm_roi {
+                        pollster::block_on(self.palm_roi_overlay.consume(RoiOverlayView {
+                            device: surface.device,
+                            queue: surface.queue,
+                            pass: &mut pass,
+                            roi: palm_roi.rect,
+                            oriented_roi: palm_roi.oriented_box,
+                            color: [1.0, 0.9, 0.0, 1.0],
+                            frame_size,
+                            rect: NdcRect::FULL,
+                            target_size: surface.size,
+                        }))?;
+                    }
+                    if let Some(landmark_input_roi) = self.cached_landmark_input_roi {
+                        pollster::block_on(self.landmark_input_roi_overlay.consume(
+                            RoiOverlayView {
+                                device: surface.device,
+                                queue: surface.queue,
+                                pass: &mut pass,
+                                roi: landmark_input_roi.rect,
+                                oriented_roi: landmark_input_roi.oriented_box,
+                                color: [0.2, 1.0, 0.2, 1.0],
+                                frame_size,
+                                rect: NdcRect::FULL,
+                                target_size: surface.size,
+                            },
+                        ))?;
+                    }
+                    if let Some(rgb_roi) = self.cached_output_roi {
+                        pollster::block_on(self.roi_overlay.consume(RoiOverlayView {
+                            device: surface.device,
+                            queue: surface.queue,
+                            pass: &mut pass,
+                            roi: rgb_roi.rect,
+                            oriented_roi: rgb_roi.oriented_box,
+                            color: [1.0, 0.12, 0.12, 1.0],
+                            frame_size,
+                            rect: NdcRect::FULL,
+                            target_size: surface.size,
+                        }))?;
+                    }
+                    if let Some(landmarks) = self.cached_landmarks.as_ref() {
+                        pollster::block_on(self.landmarks_overlay.consume(
+                            HandLandmarksOverlayView {
+                                device: surface.device,
+                                queue: surface.queue,
+                                pass: &mut pass,
+                                landmarks,
+                                frame_size,
+                                rect: NdcRect::FULL,
+                                target_size: surface.size,
+                            },
+                        ))?;
+                    }
+                    if let Some(motion) = self.cached_motion.as_ref() {
+                        pollster::block_on(self.velocity_overlay.consume(
+                            HandVelocityOverlayView {
+                                device: surface.device,
+                                queue: surface.queue,
+                                pass: &mut pass,
+                                motion,
+                                frame_size,
+                                rect: NdcRect::FULL,
+                                target_size: surface.size,
+                            },
+                        ))?;
+                    }
+                }
                 self.pointer
                     .render(surface.device, surface.queue, &mut pass, surface.size)?;
                 Ok(())
@@ -76,6 +159,12 @@ impl<'a> Sink<&'a ControllerFrame<'a>> for Renderer {
         if view.rgb.format != PixelFormat::Bgra8 {
             anyhow::bail!("controller RGB feed expects BGRA8 frames");
         }
+        self.cached_frame_size = Some(view.rgb.meta.size);
+        self.cached_palm_roi = view.palm_roi;
+        self.cached_landmark_input_roi = view.landmark_input_roi;
+        self.cached_output_roi = view.output_roi;
+        self.cached_landmarks = view.landmarks.clone();
+        self.cached_motion = view.landmark_motion.clone();
 
         self.surface.render(
             "tron-controller-render-pass",

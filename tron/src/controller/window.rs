@@ -5,8 +5,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tron_api::{EventProducerChannels, PointerInput, PointerOutput, Sink, Size};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
 use crate::pipeline::{ControllerFrame, Tick};
@@ -130,6 +131,25 @@ where
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat =>
+            {
+                let moved = match event.physical_key {
+                    PhysicalKey::Code(KeyCode::ArrowLeft) => self.ticker.prev_frame(),
+                    PhysicalKey::Code(KeyCode::ArrowRight) => self.ticker.next_frame(),
+                    _ => return,
+                };
+                match moved {
+                    Ok(true) => {
+                        self.rendered_frame_id = None;
+                        if let Some(window) = self.window.as_ref() {
+                            window.request_redraw();
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => self.set_error(event_loop, err),
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     let size = Size {

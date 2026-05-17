@@ -2,7 +2,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 fn main() -> anyhow::Result<()> {
-    let model_path = "../models/hand_landmark/hand_landmark.onnx";
+    let model_path = "../models/google_hand_landmark/hand_landmark.onnx";
     let mut session = Session::builder()?.commit_from_file(model_path)?;
 
     let input_size = 256;

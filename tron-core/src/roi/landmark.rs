@@ -10,13 +10,20 @@ pub struct LandmarkRoiInput<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct LandmarkRoiProcessor {
-    scale: f32,
-}
+pub struct LandmarkRoiProcessor {}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LandmarkTrackingRoiProcessor {}
 
 impl LandmarkRoiProcessor {
-    pub fn new(scale: f32) -> Self {
-        Self { scale }
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl LandmarkTrackingRoiProcessor {
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
@@ -30,6 +37,20 @@ impl Processor<LandmarkRoiInput<'_>, NoContext> for LandmarkRoiProcessor {
     ) -> Result<Self::Output> {
         Ok(input
             .landmarks
-            .and_then(|landmarks| landmarks.bounding_roi(input.frame_size, self.scale)))
+            .and_then(|landmarks| landmarks.bounding_roi(input.frame_size)))
+    }
+}
+
+impl Processor<LandmarkRoiInput<'_>, NoContext> for LandmarkTrackingRoiProcessor {
+    type Output = Option<RoiResult>;
+
+    fn process(
+        &mut self,
+        input: LandmarkRoiInput<'_>,
+        _context: NoContext,
+    ) -> Result<Self::Output> {
+        Ok(input
+            .landmarks
+            .and_then(|landmarks| landmarks.tracking_roi(input.frame_size)))
     }
 }

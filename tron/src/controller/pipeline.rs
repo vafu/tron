@@ -2,10 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::Serialize;
-use tron_api::{Frame, FrameSource, GestureFrame, NoContext, Processor, RoiResult};
+use tron_api::{Frame, FrameSource, GestureFrame, HandGesture, NoContext, Processor, RoiResult};
 use tron_core::gesture::{GesturePreprocessor, GesturePreprocessorInput};
 use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
-use tron_core::roi::landmark::{LandmarkRoiInput, LandmarkRoiProcessor};
+use tron_core::roi::landmark::{
+    LandmarkRoiInput, LandmarkRoiProcessor, LandmarkTrackingRoiProcessor,
+};
 use tron_core::roi::mediapipe::{
     HandLandmarks, MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput,
     MediaPipeHandLandmarkProcessor, MediaPipeRoiConfig, MediaPipeRoiProcessor,
@@ -22,8 +24,9 @@ pub struct PipelineConfig {
 pub struct ControllerFrame<'a> {
     pub rgb: Frame<'a>,
     pub palm_roi: Option<RoiResult>,
+    pub landmark_input_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,
-    pub rgb_roi: Option<RoiResult>,
+    pub output_roi: Option<RoiResult>,
     pub gesture: GestureFrame,
 }
 
@@ -43,6 +46,9 @@ pub struct Pipeline<S> {
     landmarks: MediaPipeHandLandmarkProcessor,
     landmark_filter: OneEuroLandmarkFilter,
     landmark_roi: LandmarkRoiProcessor,
+    landmark_tracking_roi_processor: LandmarkTrackingRoiProcessor,
+    prev_roi: Option<RoiResult>,
+    last_pinch_state: Option<bool>,
     gesture: GesturePreprocessor,
 }
 
@@ -51,7 +57,8 @@ where
     S: FrameSource + Send,
 {
     pub fn new(source: S, config: PipelineConfig) -> Result<Self> {
-        let landmark_roi = LandmarkRoiProcessor::new(config.landmarks.roi_scale);
+        let landmark_roi = LandmarkRoiProcessor::new();
+        let landmark_tracking_roi_processor = LandmarkTrackingRoiProcessor::new();
         Ok(Self {
             source,
             palm: MediaPipeRoiProcessor::new(config.palm_model, config.palm)?,
@@ -61,6 +68,9 @@ where
             )?,
             landmark_filter: OneEuroLandmarkFilter::default(),
             landmark_roi,
+            landmark_tracking_roi_processor,
+            prev_roi: None,
+            last_pinch_state: None,
             gesture: GesturePreprocessor,
         })
     }
@@ -70,38 +80,66 @@ where
             return Ok(None);
         };
 
-        let palm_roi = self.palm.process(rgb, NoContext)?;
+        let mut _palm_roi: Option<RoiResult> = None;
+        let processing_roi = self.prev_roi.or_else(|| {
+            _palm_roi = self.palm.process(rgb, NoContext).unwrap();
+            _palm_roi
+        });
+
         let landmarks = self.landmarks.process(
             MediaPipeHandLandmarkInput {
                 frame: rgb,
-                roi: palm_roi,
+                roi: processing_roi,
             },
             NoContext,
         )?;
-        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
-        let landmark_roi = self.landmark_roi.process(
+
+        self.prev_roi =
+            // None;
+            self.landmark_tracking_roi_processor.process(
             LandmarkRoiInput {
                 landmarks: landmarks.as_ref(),
                 frame_size: rgb.meta.size,
             },
             NoContext,
         )?;
-        let rgb_roi = landmark_roi.or(palm_roi);
+
+        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
+
         let gesture = self.gesture.process(
             GesturePreprocessorInput {
                 landmarks: landmarks.as_ref(),
-                palm_roi,
+                palm_roi: processing_roi,
                 frame_size: rgb.meta.size,
                 timestamp: rgb.meta.timestamp.received_at,
             },
             NoContext,
         )?;
+        if landmarks.is_some() {
+            let pinch = matches!(gesture.gesture, HandGesture::Pinch { .. });
+            let should_dump = self
+                .last_pinch_state
+                .is_some_and(|previous| previous != pinch);
+            self.last_pinch_state = Some(pinch);
+            if should_dump {
+                self.landmarks.dump_last_debug()?;
+            }
+        } else {
+            self.last_pinch_state = None;
+        }
 
         Ok(Some(ControllerFrame {
             rgb,
-            palm_roi,
+            palm_roi: _palm_roi,
+            landmark_input_roi: processing_roi,
+            output_roi: self.landmark_roi.process(
+                LandmarkRoiInput {
+                    landmarks: landmarks.as_ref(),
+                    frame_size: rgb.meta.size,
+                },
+                NoContext,
+            )?,
             landmarks,
-            rgb_roi,
             gesture,
         }))
     }

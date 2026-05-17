@@ -15,8 +15,13 @@ const LANDMARK_COORDS: usize = 3;
 const WRIST_LANDMARK: usize = 0;
 const INDEX_MCP_LANDMARK: usize = 5;
 const MIDDLE_MCP_LANDMARK: usize = 9;
+const RING_MCP_LANDMARK: usize = 13;
 const PINKY_MCP_LANDMARK: usize = 17;
 const MEDIAPIPE_LANDMARK_SCALE: f32 = 1.0;
+const MEDIAPIPE_LANDMARK_TARGET_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+const MEDIAPIPE_LANDMARK_TRACKING_SHIFT_Y: f32 = -0.1;
+const MEDIAPIPE_LANDMARK_TRACKING_SCALE: f32 = 2.0;
+const MEDIAPIPE_LANDMARK_RECT_INDICES: [usize; 12] = [0, 1, 2, 3, 5, 6, 9, 10, 13, 14, 17, 18];
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH: f32 = 0.20;
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH: f32 = 0.10;
 const PINKY_MCP_EDGE_EPSILON_PX: f32 = 4.0;
@@ -74,20 +79,23 @@ pub enum Handedness {
 }
 
 impl HandLandmarks {
-    pub fn bounding_roi(&self, frame_size: Size, scale: f32) -> Option<RoiResult> {
-        landmark_bounding_roi(&self.points, frame_size, scale)
+    pub fn bounding_roi(&self, frame_size: Size) -> Option<RoiResult> {
+        landmark_bounding_roi(&self.points, frame_size)
+    }
+
+    pub fn tracking_roi(&self, frame_size: Size) -> Option<RoiResult> {
+        landmark_tracking_roi(&self.points, frame_size)
     }
 }
 
 fn landmark_bounding_roi(
     points: &[HandLandmark; HAND_LANDMARKS],
     frame_size: Size,
-    scale: f32,
 ) -> Option<RoiResult> {
     let (min, max) = landmark_bounds(points)?;
     let [x0, y0] = min.to_array();
     let [x1, y1] = max.to_array();
-    let scale = scale.max(1.0);
+    let scale = 1.0;
     let margin = landmark_silhouette_margin(points).unwrap_or(0.0).max(0.0);
     let (left_edge_margin, right_edge_margin) =
         pinky_edge_margins(points, min.x, max.x).unwrap_or((0.0, 0.0));
@@ -132,6 +140,104 @@ fn landmark_bounding_roi(
         rect,
         oriented_box: None,
     })
+}
+
+fn landmark_tracking_roi(
+    points: &[HandLandmark; HAND_LANDMARKS],
+    frame_size: Size,
+) -> Option<RoiResult> {
+    let image_size = Vec2::new(frame_size.width as f32, frame_size.height as f32);
+    if image_size.x <= 0.0 || image_size.y <= 0.0 {
+        return None;
+    }
+
+    let rect_points = MEDIAPIPE_LANDMARK_RECT_INDICES
+        .iter()
+        .map(|&index| points[index].xy())
+        .collect::<Option<Vec<_>>>()?;
+    let rotation = mediapipe_landmark_rect_rotation(points)?;
+    let reverse_angle = normalize_radians(-rotation);
+    let reverse_sin = reverse_angle.sin();
+    let reverse_cos = reverse_angle.cos();
+    let rotation_sin = rotation.sin();
+    let rotation_cos = rotation.cos();
+
+    let mut axis_min = Vec2::splat(f32::INFINITY);
+    let mut axis_max = Vec2::splat(f32::NEG_INFINITY);
+    for point in &rect_points {
+        axis_min = axis_min.min(*point);
+        axis_max = axis_max.max(*point);
+    }
+    let axis_aligned_center = (axis_min + axis_max) * 0.5;
+
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for point in &rect_points {
+        let original = *point - axis_aligned_center;
+        let projected_x = original.x * reverse_cos - original.y * reverse_sin;
+        let projected_y = original.x * reverse_sin + original.y * reverse_cos;
+        min_x = min_x.min(projected_x);
+        max_x = max_x.max(projected_x);
+        min_y = min_y.min(projected_y);
+        max_y = max_y.max(projected_y);
+    }
+
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    if width <= 0.0 || height <= 0.0 || !width.is_finite() || !height.is_finite() {
+        return None;
+    }
+
+    let projected_center = Vec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+    let mut center = Vec2::new(
+        projected_center.x * rotation_cos - projected_center.y * rotation_sin,
+        projected_center.x * rotation_sin + projected_center.y * rotation_cos,
+    ) + axis_aligned_center;
+
+    center += Vec2::new(
+        -height * MEDIAPIPE_LANDMARK_TRACKING_SHIFT_Y * rotation_sin,
+        height * MEDIAPIPE_LANDMARK_TRACKING_SHIFT_Y * rotation_cos,
+    );
+
+    let side = width.max(height).max(1.0) * MEDIAPIPE_LANDMARK_TRACKING_SCALE;
+    let x_axis = Vec2::new(rotation_cos, rotation_sin) * (side * 0.5);
+    let y_axis = Vec2::new(-rotation_sin, rotation_cos) * (side * 0.5);
+    let oriented_box = tron_api::OrientedBoundingBox {
+        corners: [
+            center - x_axis - y_axis,
+            center + x_axis - y_axis,
+            center + x_axis + y_axis,
+            center - x_axis + y_axis,
+        ]
+        .map(|corner| corner.to_array()),
+    };
+    let rect = oriented_box.enclosing_rect(frame_size)?;
+
+    Some(RoiResult {
+        rect,
+        oriented_box: Some(oriented_box),
+    })
+}
+
+fn mediapipe_landmark_rect_rotation(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<f32> {
+    let wrist = points[WRIST_LANDMARK].xy()?;
+    let index_mcp = points[INDEX_MCP_LANDMARK].xy()?;
+    let middle_mcp = points[MIDDLE_MCP_LANDMARK].xy()?;
+    let ring_mcp = points[RING_MCP_LANDMARK].xy()?;
+    let finger_center = ((index_mcp + ring_mcp) * 0.5 + middle_mcp) * 0.5;
+    let rotation = MEDIAPIPE_LANDMARK_TARGET_ANGLE
+        - (-(finger_center.y - wrist.y)).atan2(finger_center.x - wrist.x);
+    Some(normalize_radians(rotation))
+}
+
+fn normalize_radians(angle: f32) -> f32 {
+    angle
+        - 2.0
+            * std::f32::consts::PI
+            * ((angle - -std::f32::consts::PI) / (2.0 * std::f32::consts::PI)).floor()
 }
 
 fn pinky_edge_margins(
@@ -197,6 +303,8 @@ pub struct MediaPipeHandLandmarkProcessor {
     presence_output: Option<usize>,
     handedness_output: Option<usize>,
     input: Vec<f32>,
+    last_debug_frame_id: Option<u64>,
+    last_debug_crop_points: [Option<Vec2>; HAND_LANDMARKS],
 }
 
 impl MediaPipeHandLandmarkProcessor {
@@ -225,11 +333,26 @@ impl MediaPipeHandLandmarkProcessor {
             presence_output,
             handedness_output,
             input: vec![0.0; 3 * input_size * input_size],
+            last_debug_frame_id: None,
+            last_debug_crop_points: [None; HAND_LANDMARKS],
         })
     }
 
     pub fn config(&self) -> &MediaPipeHandLandmarkConfig {
         &self.config
+    }
+
+    pub fn dump_last_debug(&self) -> Result<()> {
+        let Some(frame_id) = self.last_debug_frame_id else {
+            return Ok(());
+        };
+
+        dump_landmark_overlay(
+            frame_id,
+            self.input_size,
+            &self.input,
+            &self.last_debug_crop_points,
+        )
     }
 }
 
@@ -246,6 +369,7 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
             "MediaPipe hand landmark processor expects BGRA8 RGB frames, got {:?}",
             input.frame.format
         );
+        self.last_debug_frame_id = None;
         let crop = crop_from_roi(input.roi, input.frame.meta.size);
         let transform = crop_inverse_affine(
             input.frame.meta.size,
@@ -328,12 +452,8 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 points[i].y
             );
         }
-        dump_landmark_overlay(
-            input.frame.meta.id,
-            self.input_size,
-            &self.input,
-            &crop_points,
-        )?;
+        self.last_debug_frame_id = Some(input.frame.meta.id);
+        self.last_debug_crop_points = crop_points;
 
         let handedness = self
             .handedness_output

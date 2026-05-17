@@ -9,6 +9,7 @@ pub struct Aggregate<'a> {
     pub ir: Frame<'a>,
     pub sync_delta_us: i64,
     pub palm_roi: Option<RoiResult>,
+    pub landmark_input_roi: Option<RoiResult>,
     pub landmarks: Option<HandLandmarks>,
     pub rgb_roi: Option<RoiResult>,
     pub camera_roi: Option<Rect>,

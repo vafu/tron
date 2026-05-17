@@ -90,7 +90,7 @@ pub(super) fn preprocess_bgra(
     )
     .context("warp MediaPipe model input")?;
 
-    dump_model_input(debug_label, frame.meta.id, input_size, &warped)?;
+    let _ = debug_label;
     bgra_mat_to_nchw(&warped, input_size, output)
 }
 
@@ -191,44 +191,6 @@ fn bgra_mat_to_nchw(input: &Mat, input_size: usize, output: &mut [f32]) -> Resul
             output[2 * input_size_squared + dst] = b as f32 / 255.0;
         }
     }
-    Ok(())
-}
-
-fn dump_model_input(label: &str, frame_id: u64, input_size: usize, input: &Mat) -> Result<()> {
-    let Some(root) = std::env::var_os(DEBUG_DUMP_DIR_ENV).map(PathBuf::from) else {
-        return Ok(());
-    };
-
-    fs::create_dir_all(&root).with_context(|| {
-        format!(
-            "create MediaPipe debug dump directory {:?}",
-            root.as_os_str()
-        )
-    })?;
-    let path = root.join(format!("{label}-{frame_id:08}.ppm"));
-    let mut writer = BufWriter::new(
-        File::create(&path)
-            .with_context(|| format!("create MediaPipe debug dump {:?}", path.as_os_str()))?,
-    );
-    writeln!(writer, "P6\n{input_size} {input_size}\n255")
-        .with_context(|| format!("write MediaPipe debug dump header {:?}", path.as_os_str()))?;
-
-    let bytes = input.data_bytes()?;
-    anyhow::ensure!(
-        bytes.len() >= input_size * input_size * BGRA_CHANNELS,
-        "MediaPipe debug dump input buffer too small"
-    );
-    let mut rgb = vec![0_u8; input_size * input_size * MODEL_INPUT_CHANNELS];
-    for i in 0..input_size * input_size {
-        let src = i * BGRA_CHANNELS;
-        let dst = i * MODEL_INPUT_CHANNELS;
-        rgb[dst] = bytes[src + 2];
-        rgb[dst + 1] = bytes[src + 1];
-        rgb[dst + 2] = bytes[src];
-    }
-    writer
-        .write_all(&rgb)
-        .with_context(|| format!("write MediaPipe debug dump pixels {:?}", path.as_os_str()))?;
     Ok(())
 }
 

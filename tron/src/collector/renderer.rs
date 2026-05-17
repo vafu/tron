@@ -13,6 +13,7 @@ pub struct Renderer {
     rgb: WgpuFrameRenderer,
     ir: WgpuFrameRenderer,
     rgb_palm_roi_overlay: RoiOverlayRenderer,
+    rgb_landmark_input_roi_overlay: RoiOverlayRenderer,
     rgb_roi_overlay: RoiOverlayRenderer,
     ir_roi_overlay: RoiOverlayRenderer,
     rgb_landmarks_overlay: HandLandmarksOverlayRenderer,
@@ -27,6 +28,7 @@ impl Renderer {
             rgb: WgpuFrameRenderer::new(surface.device(), format),
             ir: WgpuFrameRenderer::new(surface.device(), format),
             rgb_palm_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
+            rgb_landmark_input_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
             rgb_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
             ir_roi_overlay: RoiOverlayRenderer::new(surface.device(), format),
             rgb_landmarks_overlay: HandLandmarksOverlayRenderer::new(surface.device(), format),
@@ -74,11 +76,26 @@ impl<'a> Sink<&'a Aggregate<'a>> for Renderer {
                         pass: &mut pass,
                         roi: rgb_palm_roi.rect,
                         oriented_roi: rgb_palm_roi.oriented_box,
-                        color: [1.0, 0.62, 0.08, 1.0],
+                        color: [1.0, 0.9, 0.0, 1.0],
                         frame_size: rgb.meta.size,
                         rect: rgbrect,
                         target_size: surface.size,
                     }))?;
+                }
+                if let Some(rgb_landmark_input_roi) = view.landmark_input_roi {
+                    pollster::block_on(self.rgb_landmark_input_roi_overlay.consume(
+                        RoiOverlayView {
+                            device: surface.device,
+                            queue: surface.queue,
+                            pass: &mut pass,
+                            roi: rgb_landmark_input_roi.rect,
+                            oriented_roi: rgb_landmark_input_roi.oriented_box,
+                            color: [0.2, 1.0, 0.2, 1.0],
+                            frame_size: rgb.meta.size,
+                            rect: rgbrect,
+                            target_size: surface.size,
+                        },
+                    ))?;
                 }
                 if let Some(rgb_roi) = view.rgb_roi {
                     pollster::block_on(self.rgb_roi_overlay.consume(RoiOverlayView {
@@ -87,7 +104,7 @@ impl<'a> Sink<&'a Aggregate<'a>> for Renderer {
                         pass: &mut pass,
                         roi: rgb_roi.rect,
                         oriented_roi: rgb_roi.oriented_box,
-                        color: [0.2, 1.0, 0.2, 1.0],
+                        color: [1.0, 0.12, 0.12, 1.0],
                         frame_size: rgb.meta.size,
                         rect: rgbrect,
                         target_size: surface.size,

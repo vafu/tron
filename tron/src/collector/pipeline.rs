@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use tron_api::{DepthSource, FrameSource, NoContext, Processor};
+use tron_api::{DepthSource, FrameSource, NoContext, Processor, RoiResult};
 use tron_core::StereoFrameSource;
 use tron_core::process::one_euro_landmarks::OneEuroLandmarkFilter;
 use tron_core::projection::{
@@ -10,7 +10,9 @@ use tron_core::projection::{
 use tron_core::roi::camera::{
     CameraRoiFollowConfig, CameraRoiFollowInput, CameraRoiFollowProcessor,
 };
-use tron_core::roi::landmark::{LandmarkRoiInput, LandmarkRoiProcessor};
+use tron_core::roi::landmark::{
+    LandmarkRoiInput, LandmarkRoiProcessor, LandmarkTrackingRoiProcessor,
+};
 use tron_core::roi::mediapipe::{
     MediaPipeHandLandmarkConfig, MediaPipeHandLandmarkInput, MediaPipeHandLandmarkProcessor,
     MediaPipeRoiConfig, MediaPipeRoiProcessor,
@@ -29,6 +31,8 @@ pub struct PipelineConfig {
     pub depth_source: Option<Box<dyn DepthSource + Send>>,
 }
 
+const LANDMARK_TRACKING_ROI_SCALE: f32 = 2.0;
+
 pub trait Tick {
     fn tick(&mut self) -> Result<Option<Aggregate<'_>>>;
 }
@@ -39,6 +43,8 @@ pub struct Pipeline<R, I> {
     landmarks: MediaPipeHandLandmarkProcessor,
     landmark_filter: OneEuroLandmarkFilter,
     landmark_roi: LandmarkRoiProcessor,
+    landmark_tracking_roi_processor: LandmarkTrackingRoiProcessor,
+    landmark_tracking_roi: Option<RoiResult>,
     camera_roi: Option<CameraRoiFollowProcessor>,
     hand_projection: Option<HandProjectionProcessor<CheckerboardDepthProjection>>,
     depth_source: Option<Box<dyn DepthSource + Send>>,
@@ -51,6 +57,8 @@ where
 {
     pub fn new(rgb: R, ir: I, config: PipelineConfig) -> Result<Self> {
         let landmark_roi = LandmarkRoiProcessor::new(config.landmarks.roi_scale);
+        let landmark_tracking_roi_processor =
+            LandmarkTrackingRoiProcessor::new(LANDMARK_TRACKING_ROI_SCALE);
         Ok(Self {
             frames: StereoFrameSource::new(rgb, ir, config.max_sync_delta_us),
             palm: MediaPipeRoiProcessor::new(config.palm_model, config.palm)?,
@@ -60,6 +68,8 @@ where
             )?,
             landmark_filter: OneEuroLandmarkFilter::default(),
             landmark_roi,
+            landmark_tracking_roi_processor,
+            landmark_tracking_roi: None,
             camera_roi: config.camera_roi.map(CameraRoiFollowProcessor::new),
             hand_projection: config.hand_projection,
             depth_source: config.depth_source,
@@ -74,16 +84,16 @@ where
         let ir = pair.right;
 
         let palm_roi = self.palm.process(rgb, NoContext)?;
-        let landmarks = self.landmarks.process(
+        let input_roi = self.landmark_tracking_roi.or(palm_roi);
+        let raw_landmarks = self.landmarks.process(
             MediaPipeHandLandmarkInput {
                 frame: rgb,
-                roi: palm_roi,
+                roi: input_roi,
             },
             NoContext,
         )?;
-        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
 
-        if let Some(ref landmarks) = landmarks {
+        if let Some(ref landmarks) = raw_landmarks {
             let valid_count = landmarks
                 .points
                 .iter()
@@ -94,7 +104,7 @@ where
 
         let landmark_roi = self.landmark_roi.process(
             LandmarkRoiInput {
-                landmarks: landmarks.as_ref(),
+                landmarks: raw_landmarks.as_ref(),
                 frame_size: rgb.meta.size,
             },
             NoContext,
@@ -102,8 +112,20 @@ where
         if let Some(ref roi) = landmark_roi {
             tracing::info!("Landmark ROI: {:?}", roi.rect);
         }
+        let landmark_tracking_roi = self.landmark_tracking_roi_processor.process(
+            LandmarkRoiInput {
+                landmarks: raw_landmarks.as_ref(),
+                frame_size: rgb.meta.size,
+            },
+            NoContext,
+        )?;
+        self.landmark_tracking_roi = landmark_tracking_roi;
 
-        let rgb_roi = landmark_roi.or(palm_roi);
+        let landmarks = self.landmark_filter.process(raw_landmarks, NoContext)?;
+        let rgb_roi = landmark_roi
+            .or(landmark_tracking_roi)
+            .or(input_roi)
+            .or(palm_roi);
         let camera_roi = match self.camera_roi.as_mut() {
             Some(camera_roi) => camera_roi.process(
                 CameraRoiFollowInput {
@@ -143,6 +165,7 @@ where
             ir,
             sync_delta_us: pair.delta_us,
             palm_roi,
+            landmark_input_roi: input_roi,
             landmarks,
             rgb_roi,
             camera_roi,

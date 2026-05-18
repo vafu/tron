@@ -3,10 +3,14 @@ use std::time::Instant;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, MissedTickBehavior};
 use tron_api::{
     EventProducer, HandGesture, Point2d, PointerCancelReason, PointerEvent, PointerInput,
-    PointerJoystickVisualization, PointerOutput, PointerVisualization,
+    PointerJoystickVisualization, PointerOutput, PointerPredictionInput, PointerPredictionSample,
+    PointerPredictor, PointerVisualization,
 };
+
+use crate::pointer::OneEuroVelocityPointerPredictor;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RelativePointerProducer {
@@ -18,7 +22,8 @@ pub struct RelativePointerProducer {
     pub sensitivity: f64,
     pub smoothing_min_cutoff_hz: f64,
     pub smoothing_beta: f64,
-    pub velocity_prediction_secs: f64,
+    pub max_prediction_horizon: Duration,
+    pub tick_interval: Duration,
 }
 
 impl Default for RelativePointerProducer {
@@ -32,7 +37,8 @@ impl Default for RelativePointerProducer {
             sensitivity: 1.0,
             smoothing_min_cutoff_hz: 5.0,
             smoothing_beta: 0.08,
-            velocity_prediction_secs: 0.02,
+            max_prediction_horizon: Duration::from_millis(80),
+            tick_interval: Duration::from_millis(16),
         }
     }
 }
@@ -45,14 +51,30 @@ impl EventProducer<PointerInput, PointerOutput> for RelativePointerProducer {
     ) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             let mut state = RelativePointerState::default();
-            while let Some(input) = input.recv().await {
-                for output_item in state.update_input(input, self) {
-                    if output.send(output_item).await.is_err() {
-                        return Ok(());
+            let mut interval = tokio::time::interval(self.tick_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    input = input.recv() => {
+                        let Some(input) = input else {
+                            return Ok(());
+                        };
+                        for output_item in state.update_input(input, self) {
+                            if output.send(output_item).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        for output_item in state.tick(self) {
+                            if output.send(output_item).await.is_err() {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }
-            Ok(())
         })
     }
 }
@@ -63,7 +85,9 @@ struct RelativePointerState {
     current_position: Option<Point2d>,
     filtered_position: Option<Point2d>,
     last_timestamp: Option<Instant>,
-    last_offset: Point2d,
+    prediction_history: Vec<PointerPredictionSample>,
+    predictor: OneEuroVelocityPointerPredictor,
+    emitted_offset: Point2d,
     clutch_engaged: bool,
     button_down: bool,
 }
@@ -113,38 +137,20 @@ impl RelativePointerState {
                 self.clutch_engaged = true;
                 self.anchor_position = Some(sample.position);
                 self.current_position = Some(sample.position);
-                self.last_offset = Point2d::ZERO;
+                self.push_prediction_sample(timestamp, sample);
+                self.emitted_offset = Point2d::ZERO;
             }
             (true, Some(sample)) if sample.strength <= config.clutch_up_strength => {
-                self.clutch_engaged = false;
-                self.anchor_position = None;
-                self.current_position = None;
-                self.filtered_position = None;
-                self.last_timestamp = None;
-                self.last_offset = Point2d::ZERO;
+                self.reset_clutch();
             }
             (true, Some(sample)) => {
-                if let Some(anchor) = self.anchor_position {
-                    let position = sample.position;
-                    let offset = active_offset(position - anchor, config);
-                    let delta = offset - self.last_offset;
-                    self.last_offset = offset;
-                    if delta != Point2d::ZERO {
-                        events.push(PointerOutput::Event(PointerEvent::Move {
-                            timestamp,
-                            position: None,
-                            delta,
-                        }));
-                    }
+                self.push_prediction_sample(timestamp, sample);
+                if let Some(event) = self.move_to_position(timestamp, sample.position, config) {
+                    events.push(event);
                 }
             }
             (true, None) => {
-                self.clutch_engaged = false;
-                self.anchor_position = None;
-                self.current_position = None;
-                self.filtered_position = None;
-                self.last_timestamp = None;
-                self.last_offset = Point2d::ZERO;
+                self.reset_clutch();
             }
             _ => {}
         }
@@ -166,20 +172,29 @@ impl RelativePointerState {
         events
     }
 
+    fn tick(&mut self, config: RelativePointerProducer) -> Vec<PointerOutput> {
+        if !self.clutch_engaged {
+            return Vec::new();
+        }
+        let timestamp = Instant::now();
+        self.predict_position(timestamp, config)
+            .and_then(|position| self.move_to_position(timestamp, position, config))
+            .into_iter()
+            .collect()
+    }
+
     fn smooth_clutch_sample(
         &mut self,
         sample: ClutchSample,
         timestamp: Instant,
         config: RelativePointerProducer,
     ) -> ClutchSample {
-        let predicted_position = (sample.position
-            + sample.velocity * config.velocity_prediction_secs)
-            .clamp(Point2d::ZERO, Point2d::ONE);
+        let measured_position = sample.position.clamp(Point2d::ZERO, Point2d::ONE);
         let Some(previous) = self.filtered_position else {
-            self.filtered_position = Some(predicted_position);
+            self.filtered_position = Some(measured_position);
             self.last_timestamp = Some(timestamp);
             return ClutchSample {
-                position: predicted_position,
+                position: measured_position,
                 ..sample
             };
         };
@@ -193,25 +208,67 @@ impl RelativePointerState {
         let speed = sample.velocity.length();
         let cutoff = (config.smoothing_min_cutoff_hz + config.smoothing_beta * speed).max(0.001);
         let alpha = low_pass_alpha(dt, cutoff);
-        let position = previous.lerp(predicted_position, alpha);
+        let position = previous.lerp(measured_position, alpha);
 
         self.filtered_position = Some(position);
         self.last_timestamp = Some(timestamp);
         ClutchSample { position, ..sample }
     }
 
+    fn push_prediction_sample(&mut self, timestamp: Instant, sample: ClutchSample) {
+        self.prediction_history.push(PointerPredictionSample {
+            timestamp,
+            position: sample.position,
+            velocity: Some(sample.velocity),
+        });
+        let excess = self.prediction_history.len().saturating_sub(8);
+        if excess > 0 {
+            self.prediction_history.drain(0..excess);
+        }
+    }
+
+    fn predict_position(
+        &mut self,
+        timestamp: Instant,
+        config: RelativePointerProducer,
+    ) -> Option<Point2d> {
+        let latest = self.prediction_history.last()?;
+        let horizon = timestamp
+            .checked_duration_since(latest.timestamp)
+            .unwrap_or_default()
+            .min(config.max_prediction_horizon);
+        self.predictor
+            .predict(PointerPredictionInput {
+                history: &self.prediction_history,
+                horizon,
+            })
+            .map(|position| position.clamp(Point2d::ZERO, Point2d::ONE))
+    }
+
+    fn move_to_position(
+        &mut self,
+        timestamp: Instant,
+        position: Point2d,
+        config: RelativePointerProducer,
+    ) -> Option<PointerOutput> {
+        let anchor = self.anchor_position?;
+        let offset = active_offset(position - anchor, config);
+        let delta = offset - self.emitted_offset;
+        self.emitted_offset = offset;
+        (delta != Point2d::ZERO).then_some(PointerOutput::Event(PointerEvent::Move {
+            timestamp,
+            position: None,
+            delta,
+        }))
+    }
+
     fn cancel(
         &mut self,
-        timestamp: std::time::Instant,
+        timestamp: Instant,
         config: RelativePointerProducer,
     ) -> Vec<PointerOutput> {
         let was_button_down = self.button_down;
-        self.anchor_position = None;
-        self.current_position = None;
-        self.filtered_position = None;
-        self.last_timestamp = None;
-        self.last_offset = Point2d::ZERO;
-        self.clutch_engaged = false;
+        self.reset_clutch();
         self.button_down = false;
         let mut events = Vec::new();
         if was_button_down {
@@ -224,11 +281,18 @@ impl RelativePointerState {
         events
     }
 
-    fn visualization(
-        &self,
-        timestamp: std::time::Instant,
-        config: RelativePointerProducer,
-    ) -> PointerOutput {
+    fn reset_clutch(&mut self) {
+        self.anchor_position = None;
+        self.current_position = None;
+        self.filtered_position = None;
+        self.last_timestamp = None;
+        self.prediction_history.clear();
+        self.predictor.reset();
+        self.emitted_offset = Point2d::ZERO;
+        self.clutch_engaged = false;
+    }
+
+    fn visualization(&self, timestamp: Instant, config: RelativePointerProducer) -> PointerOutput {
         PointerOutput::Visualization(PointerVisualization::Joystick(
             PointerJoystickVisualization {
                 timestamp,
@@ -309,57 +373,39 @@ mod tests {
     }
 
     #[test]
-    fn relative_pointer_uses_clutch_home_as_origin_without_button_down() {
+    fn relative_pointer_applies_camera_sample_immediately() {
         let mut state = RelativePointerState::default();
         let config = RelativePointerProducer {
             deadzone: 0.0,
             smoothing_min_cutoff_hz: 1.0e9,
-            velocity_prediction_secs: 0.0,
+            tick_interval: Duration::from_millis(16),
             ..RelativePointerProducer::default()
         };
+        let timestamp = Instant::now();
 
-        let events = state.update_input(
-            input(
+        state.update_input(
+            input_at(
+                timestamp,
                 Point2d::new(0.5, 0.5),
                 HandGesture::Clutch,
-                vec![signal(HandGesture::Clutch, 0.8, Point2d::new(0.52, 0.48))],
+                vec![signal(HandGesture::Clutch, 0.8, Point2d::new(0.50, 0.50))],
             ),
             config,
         );
-        assert!(matches!(
-            events[0],
-            PointerOutput::Visualization(PointerVisualization::Joystick(_))
-        ));
-
         let events = state.update_input(
-            input(
+            input_at(
+                timestamp + Duration::from_millis(128),
                 Point2d::new(0.5, 0.5),
                 HandGesture::Clutch,
-                vec![signal(HandGesture::Clutch, 0.8, Point2d::new(0.62, 0.43))],
+                vec![signal(HandGesture::Clutch, 0.8, Point2d::new(0.66, 0.50))],
             ),
             config,
         );
-        let PointerOutput::Event(PointerEvent::Move {
-            position, delta, ..
-        }) = events[0]
-        else {
-            panic!("expected relative move");
-        };
-        assert_eq!(position, None);
-        assert_point_near(delta, Point2d::new(0.10, -0.05));
 
-        let events = state.update_input(
-            input(
-                Point2d::new(0.5, 0.5),
-                HandGesture::Clutch,
-                vec![signal(HandGesture::Clutch, 0.8, Point2d::new(0.57, 0.46))],
-            ),
-            config,
-        );
         let PointerOutput::Event(PointerEvent::Move { delta, .. }) = events[0] else {
-            panic!("expected relative move");
+            panic!("expected immediate relative move");
         };
-        assert_point_near(delta, Point2d::new(-0.05, 0.03));
+        assert_point_near(delta, Point2d::new(0.16, 0.0));
     }
 
     #[test]
@@ -390,6 +436,7 @@ mod tests {
         let mut state = RelativePointerState::default();
         let config = RelativePointerProducer {
             deadzone: 0.0,
+            smoothing_min_cutoff_hz: 1.0e9,
             ..RelativePointerProducer::default()
         };
         state.update_input(
@@ -430,25 +477,23 @@ mod tests {
             config,
         );
         assert!(matches!(
-            events[0],
-            PointerOutput::Event(PointerEvent::Move { .. })
+            events.first(),
+            Some(PointerOutput::Event(PointerEvent::Move { .. }))
         ));
-        assert!(matches!(
-            events[1],
-            PointerOutput::Event(PointerEvent::Up { .. })
-        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PointerOutput::Event(PointerEvent::Up { .. })))
+        );
     }
 
     #[test]
-    fn relative_pointer_predicts_clutch_position_from_velocity() {
+    fn relative_pointer_predicts_between_camera_samples_from_velocity() {
         let mut state = RelativePointerState::default();
-        let config = RelativePointerProducer {
-            velocity_prediction_secs: 0.02,
-            ..RelativePointerProducer::default()
-        };
+        let config = RelativePointerProducer::default();
         let timestamp = Instant::now();
 
-        let events = state.update_input(
+        state.update_input(
             input_at(
                 timestamp,
                 Point2d::new(0.5, 0.5),
@@ -462,16 +507,13 @@ mod tests {
             ),
             config,
         );
+        let predicted = state
+            .predict_position(timestamp + Duration::from_millis(20), config)
+            .unwrap();
 
-        assert!(matches!(
-            events[0],
-            PointerOutput::Visualization(PointerVisualization::Joystick(
-                PointerJoystickVisualization {
-                    anchor: Some(anchor),
-                    ..
-                }
-            )) if (anchor - Point2d::new(0.52, 0.5)).length() < 1.0e-12
-        ));
+        assert!(predicted.x > 0.5);
+        assert!(predicted.x < 0.52);
+        assert!((predicted.y - 0.5).abs() < 1.0e-12);
     }
 
     fn assert_point_near(actual: Point2d, expected: Point2d) {

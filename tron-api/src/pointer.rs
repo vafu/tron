@@ -1,10 +1,29 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{GestureFrame, Point2d, Sink};
 
 #[derive(Clone, Debug)]
 pub struct PointerInput {
     pub gesture: GestureFrame,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerPredictionSample {
+    pub timestamp: Instant,
+    pub position: Point2d,
+    pub velocity: Option<Point2d>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PointerPredictionInput<'a> {
+    pub history: &'a [PointerPredictionSample],
+    pub horizon: Duration,
+}
+
+pub trait PointerPredictor {
+    fn predict(&mut self, input: PointerPredictionInput<'_>) -> Option<Point2d>;
+
+    fn reset(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

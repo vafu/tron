@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tron_api::{NoContext, Processor};
 
+use crate::filter::{OneEuroConfig, OneEuroScalar};
 use crate::roi::mediapipe::{HandLandmark, HandLandmarks};
 
 const HAND_LANDMARKS: usize = 21;
@@ -19,6 +20,16 @@ impl Default for OneEuroLandmarkConfig {
             min_cutoff: 1.0,
             beta: 0.04,
             derivative_cutoff: 1.0,
+        }
+    }
+}
+
+impl From<OneEuroLandmarkConfig> for OneEuroConfig {
+    fn from(config: OneEuroLandmarkConfig) -> Self {
+        Self {
+            min_cutoff: config.min_cutoff,
+            beta: config.beta,
+            derivative_cutoff: config.derivative_cutoff,
         }
     }
 }
@@ -99,65 +110,11 @@ impl LandmarkFilterState {
         config: OneEuroLandmarkConfig,
     ) -> HandLandmark {
         HandLandmark::new(
-            self.x.filter(point.x, dt, config),
-            self.y.filter(point.y, dt, config),
-            self.z.filter(point.z, dt, config),
+            self.x.filter(point.x, dt, config.into()),
+            self.y.filter(point.y, dt, config.into()),
+            self.z.filter(point.z, dt, config.into()),
         )
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct OneEuroScalar {
-    previous_raw: Option<f64>,
-    previous_filtered: Option<f64>,
-    previous_derivative: Option<f64>,
-}
-
-impl OneEuroScalar {
-    fn filter(&mut self, value: f64, dt: f64, config: OneEuroLandmarkConfig) -> f64 {
-        if !value.is_finite() {
-            self.reset();
-            return f64::NAN;
-        }
-
-        let Some(previous_raw) = self.previous_raw else {
-            self.previous_raw = Some(value);
-            self.previous_filtered = Some(value);
-            self.previous_derivative = Some(0.0);
-            return value;
-        };
-
-        let derivative = (value - previous_raw) / dt;
-        let filtered_derivative = low_pass(
-            derivative,
-            self.previous_derivative.unwrap_or(derivative),
-            alpha(config.derivative_cutoff, dt),
-        );
-        let cutoff = config.min_cutoff + config.beta * filtered_derivative.abs();
-        let filtered = low_pass(
-            value,
-            self.previous_filtered.unwrap_or(value),
-            alpha(cutoff.max(f64::EPSILON), dt),
-        );
-
-        self.previous_raw = Some(value);
-        self.previous_filtered = Some(filtered);
-        self.previous_derivative = Some(filtered_derivative);
-        filtered
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-fn low_pass(value: f64, previous: f64, alpha: f64) -> f64 {
-    alpha * value + (1.0 - alpha) * previous
-}
-
-fn alpha(cutoff: f64, dt: f64) -> f64 {
-    let tau = 1.0 / (std::f64::consts::TAU * cutoff);
-    1.0 / (1.0 + tau / dt)
 }
 
 #[cfg(test)]

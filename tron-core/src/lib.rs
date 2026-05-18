@@ -1,6 +1,7 @@
 pub mod calib;
 pub mod capture;
 mod decode;
+pub mod filter;
 pub mod gesture;
 pub mod pointer;
 pub mod process;

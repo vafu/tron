@@ -33,12 +33,6 @@ pub struct ControllerFrame<'a> {
     pub gesture: GestureFrame,
 }
 
-impl ControllerFrame<'_> {
-    pub fn frame_id(&self) -> u64 {
-        self.rgb.meta.id
-    }
-}
-
 // TODO move to API, make generic, name "Pipeline"?
 pub trait Tick {
     fn tick(&mut self) -> Result<Option<ControllerFrame<'_>>>;

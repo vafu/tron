@@ -21,6 +21,7 @@ mod linux_pointer;
 mod pipeline;
 mod pointer_sink;
 mod renderer;
+mod runtime;
 mod window;
 
 #[derive(Debug, Parser)]
@@ -69,6 +70,10 @@ struct Cli {
     /// Emit pointer events through a Linux uinput virtual mouse.
     #[arg(long)]
     linux_pointer: bool,
+
+    /// Show the controller preview/debug window.
+    #[arg(long)]
+    preview: bool,
 
     /// Scale normalized pointer delta to Linux relative pointer units.
     #[arg(long, default_value_t = 1400.0)]
@@ -149,7 +154,7 @@ fn run(cli: Cli) -> Result<()> {
         PointerMode::Joystick => spawn_event_channels(JoystickPointerProducer::default(), 8, 32),
         PointerMode::Relative => spawn_event_channels(RelativePointerProducer::default(), 8, 32),
     };
-    let mut sinks = window::ComboSink::new();
+    let mut sinks = runtime::ComboSink::new();
     let metadata = HttpJsonSink::bind_available(("127.0.0.1", 8765), 100)?;
     eprintln!(
         "controller: metadata http://{}/metadata",
@@ -159,7 +164,7 @@ fn run(cli: Cli) -> Result<()> {
     if let Some(path) = cli.capture_dir {
         sinks.push_box(Box::new(capture::FrameImageCaptureSink::new(path)?));
     }
-    let mut pointer_sinks = window::PointerSink::new();
+    let mut pointer_sinks = runtime::PointerSink::new();
     if cli.linux_pointer {
         pointer_sinks.push_box(Box::new(linux_pointer::LinuxPointerSink::new(
             linux_pointer::LinuxPointerConfig {
@@ -168,7 +173,11 @@ fn run(cli: Cli) -> Result<()> {
         )?));
     }
 
-    window::run(pipeline, pointer, sinks, pointer_sinks)
+    if cli.preview {
+        window::run(pipeline, pointer, sinks, pointer_sinks)
+    } else {
+        runtime::run(pipeline, pointer, sinks, pointer_sinks)
+    }
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

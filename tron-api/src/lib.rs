@@ -96,7 +96,8 @@ pub use frame::{
 pub use gesture::{GestureFrame, GestureSignal, HandGesture, PalmPose2d};
 pub use pointer::{
     PointerCancelReason, PointerEvent, PointerInput, PointerJoystickVisualization, PointerOutput,
-    PointerSink, PointerVisualization,
+    PointerPredictionInput, PointerPredictionSample, PointerPredictor, PointerSink,
+    PointerVisualization,
 };
 pub use process::{InPlaceFrameProcessor, Processor};
 pub use projection::{DepthPointProjection, DepthProjectionMap, ProjectionMapSource};

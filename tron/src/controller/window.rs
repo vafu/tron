@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tron_api::{EventProducerChannels, PointerInput, PointerOutput, Sink, Size};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -10,11 +8,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
-use crate::pipeline::{ControllerFrame, Tick};
+use crate::pipeline::Tick;
 use crate::renderer::Renderer;
-
-pub type ComboSink = tron_core::sink::ComboSink<dyn for<'a> Sink<&'a ControllerFrame<'a>>>;
-pub type PointerSink = tron_core::sink::ComboSink<dyn Sink<PointerOutput>>;
+use crate::runtime::{ComboSink, ControllerRuntime, PointerSink};
 
 pub fn run<T>(
     ticker: T,
@@ -33,16 +29,11 @@ where
 }
 
 struct WindowApp<T> {
-    ticker: T,
-    pointer_input: mpsc::Sender<PointerInput>,
-    pointer_output: mpsc::Receiver<PointerOutput>,
-    _pointer_task: JoinHandle<Result<()>>,
-    sinks: ComboSink,
-    pointer_sinks: PointerSink,
-    rendered_frame_id: Option<u64>,
+    runtime: ControllerRuntime<T>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
     renderer: Option<Renderer>,
+    occluded: bool,
     result: Result<()>,
 }
 
@@ -54,16 +45,11 @@ impl<T> WindowApp<T> {
         pointer_sinks: PointerSink,
     ) -> Self {
         Self {
-            ticker,
-            pointer_input: pointer.input,
-            pointer_output: pointer.output,
-            _pointer_task: pointer.task,
-            sinks,
-            pointer_sinks,
-            rendered_frame_id: None,
+            runtime: ControllerRuntime::new(ticker, pointer, sinks, pointer_sinks),
             window_id: None,
             window: None,
             renderer: None,
+            occluded: false,
             result: Ok(()),
         }
     }
@@ -73,31 +59,46 @@ impl<T> WindowApp<T> {
         event_loop.exit();
     }
 
-    fn consume_pointer_output(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        output: PointerOutput,
-    ) -> bool {
-        if let Some(renderer) = self.renderer.as_mut() {
-            if let Err(err) = pollster::block_on(renderer.consume(output)) {
+    fn drain_pointer_output(&mut self, event_loop: &ActiveEventLoop) -> Option<bool> {
+        match self
+            .runtime
+            .drain_pointer_output(self.renderer.as_mut().map(|sink| sink as &mut dyn Sink<_>))
+        {
+            Ok(drained) => Some(drained),
+            Err(err) => {
                 self.set_error(event_loop, err);
-                return false;
+                None
             }
         }
-        if let Err(err) = pollster::block_on(self.pointer_sinks.consume(output)) {
-            self.set_error(event_loop, err);
-            return false;
-        }
-        true
     }
 
-    fn drain_pointer_output(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        while let Ok(event) = self.pointer_output.try_recv() {
-            if !self.consume_pointer_output(event_loop, event) {
-                return false;
+    fn process_next_frame(&mut self, event_loop: &ActiveEventLoop) -> Option<bool>
+    where
+        T: Tick,
+    {
+        let preview_sink = if self.occluded {
+            None
+        } else {
+            self.renderer
+                .as_mut()
+                .map(|sink| sink as &mut dyn for<'a> Sink<&'a crate::pipeline::ControllerFrame<'a>>)
+        };
+        match self.runtime.process_next_frame(preview_sink) {
+            Ok(processed) => Some(processed),
+            Err(err) => {
+                self.set_error(event_loop, err);
+                None
             }
         }
-        true
+    }
+
+    fn request_redraw_if_visible(&self) {
+        if self.occluded {
+            return;
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
     }
 }
 
@@ -154,13 +155,12 @@ where
                 if event.state == ElementState::Pressed && !event.repeat =>
             {
                 let moved = match event.physical_key {
-                    PhysicalKey::Code(KeyCode::ArrowLeft) => self.ticker.prev_frame(),
-                    PhysicalKey::Code(KeyCode::ArrowRight) => self.ticker.next_frame(),
+                    PhysicalKey::Code(KeyCode::ArrowLeft) => self.runtime.prev_frame(),
+                    PhysicalKey::Code(KeyCode::ArrowRight) => self.runtime.next_frame(),
                     _ => return,
                 };
                 match moved {
                     Ok(true) => {
-                        self.rendered_frame_id = None;
                         if let Some(window) = self.window.as_ref() {
                             window.request_redraw();
                         }
@@ -176,68 +176,42 @@ where
                         height: size.height,
                     };
                     renderer.resize(size);
-                    self.rendered_frame_id = None;
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if !occluded {
+                    self.request_redraw_if_visible();
                 }
             }
             WindowEvent::RedrawRequested => {
-                if !self.drain_pointer_output(event_loop) {
+                if self.drain_pointer_output(event_loop).is_none() {
                     return;
                 }
 
-                let frame = match self.ticker.tick() {
-                    Ok(frame) => frame,
-                    Err(err) => {
+                if self.occluded {
+                    return;
+                }
+                if let Some(renderer) = self.renderer.as_mut() {
+                    if let Err(err) = pollster::block_on(renderer.render_cached()) {
                         self.set_error(event_loop, err);
                         return;
                     }
-                };
-                let Some(frame) = frame else {
-                    if let Some(renderer) = self.renderer.as_mut() {
-                        if let Err(err) = pollster::block_on(renderer.render_cached()) {
-                            self.set_error(event_loop, err);
-                            return;
-                        }
-                    }
-                    if let Some(window) = self.window.as_ref() {
-                        window.request_redraw();
-                    }
-                    return;
-                };
-
-                let frame_id = frame.frame_id();
-                if self.rendered_frame_id == Some(frame_id) {
-                    return;
-                }
-
-                if let Err(err) = self.pointer_input.try_send(PointerInput {
-                    gesture: frame.gesture.clone(),
-                }) {
-                    tracing::debug!("controller pointer input dropped: {err}");
-                }
-                let Some(renderer) = self.renderer.as_mut() else {
-                    return;
-                };
-                if let Err(err) = pollster::block_on(renderer.consume(&frame)) {
-                    self.set_error(event_loop, err);
-                    return;
-                }
-                if let Err(err) = pollster::block_on(self.sinks.consume(&frame)) {
-                    self.set_error(event_loop, err);
-                    return;
-                }
-
-                self.rendered_frame_id = Some(frame_id);
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
                 }
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(pointer_changed) = self.drain_pointer_output(event_loop) else {
+            return;
+        };
+        let Some(frame_processed) = self.process_next_frame(event_loop) else {
+            return;
+        };
+        if pointer_changed && !frame_processed {
+            self.request_redraw_if_visible();
         }
     }
 }

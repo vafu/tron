@@ -14,18 +14,20 @@ use crate::pipeline::{ControllerFrame, Tick};
 use crate::renderer::Renderer;
 
 pub type ComboSink = tron_core::sink::ComboSink<dyn for<'a> Sink<&'a ControllerFrame<'a>>>;
+pub type PointerSink = tron_core::sink::ComboSink<dyn Sink<PointerOutput>>;
 
 pub fn run<T>(
     ticker: T,
     pointer: EventProducerChannels<PointerInput, PointerOutput>,
     sinks: ComboSink,
+    pointer_sinks: PointerSink,
 ) -> Result<()>
 where
     T: Tick,
 {
     let event_loop = EventLoop::new().context("create winit event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = WindowApp::new(ticker, pointer, sinks);
+    let mut app = WindowApp::new(ticker, pointer, sinks, pointer_sinks);
     event_loop.run_app(&mut app).context("run winit app")?;
     app.result
 }
@@ -36,6 +38,7 @@ struct WindowApp<T> {
     pointer_output: mpsc::Receiver<PointerOutput>,
     _pointer_task: JoinHandle<Result<()>>,
     sinks: ComboSink,
+    pointer_sinks: PointerSink,
     rendered_frame_id: Option<u64>,
     window_id: Option<WindowId>,
     window: Option<Arc<winit::window::Window>>,
@@ -48,6 +51,7 @@ impl<T> WindowApp<T> {
         ticker: T,
         pointer: EventProducerChannels<PointerInput, PointerOutput>,
         sinks: ComboSink,
+        pointer_sinks: PointerSink,
     ) -> Self {
         Self {
             ticker,
@@ -55,6 +59,7 @@ impl<T> WindowApp<T> {
             pointer_output: pointer.output,
             _pointer_task: pointer.task,
             sinks,
+            pointer_sinks,
             rendered_frame_id: None,
             window_id: None,
             window: None,
@@ -68,13 +73,27 @@ impl<T> WindowApp<T> {
         event_loop.exit();
     }
 
-    fn drain_pointer_output(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return true;
-        };
-        while let Ok(event) = self.pointer_output.try_recv() {
-            if let Err(err) = pollster::block_on(renderer.consume(event)) {
+    fn consume_pointer_output(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        output: PointerOutput,
+    ) -> bool {
+        if let Some(renderer) = self.renderer.as_mut() {
+            if let Err(err) = pollster::block_on(renderer.consume(output)) {
                 self.set_error(event_loop, err);
+                return false;
+            }
+        }
+        if let Err(err) = pollster::block_on(self.pointer_sinks.consume(output)) {
+            self.set_error(event_loop, err);
+            return false;
+        }
+        true
+    }
+
+    fn drain_pointer_output(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        while let Ok(event) = self.pointer_output.try_recv() {
+            if !self.consume_pointer_output(event_loop, event) {
                 return false;
             }
         }
@@ -190,20 +209,14 @@ where
                     return;
                 }
 
-                let Some(renderer) = self.renderer.as_mut() else {
-                    return;
-                };
                 if let Err(err) = self.pointer_input.try_send(PointerInput {
                     gesture: frame.gesture.clone(),
                 }) {
                     tracing::debug!("controller pointer input dropped: {err}");
                 }
-                while let Ok(event) = self.pointer_output.try_recv() {
-                    if let Err(err) = pollster::block_on(renderer.consume(event)) {
-                        self.set_error(event_loop, err);
-                        return;
-                    }
-                }
+                let Some(renderer) = self.renderer.as_mut() else {
+                    return;
+                };
                 if let Err(err) = pollster::block_on(renderer.consume(&frame)) {
                     self.set_error(event_loop, err);
                     return;

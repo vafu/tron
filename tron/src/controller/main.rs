@@ -17,6 +17,7 @@ use tron_core::roi::mediapipe::{MediaPipeHandLandmarkConfig, MediaPipeRoiConfig}
 use tron_core::transform::{FpsThrottledFrameSource, MirroredFrameSource};
 
 mod capture;
+mod linux_pointer;
 mod pipeline;
 mod pointer_sink;
 mod renderer;
@@ -64,6 +65,14 @@ struct Cli {
     /// Pointer producer used by the controller demo.
     #[arg(long, value_enum, default_value = "absolute")]
     pointer_mode: PointerMode,
+
+    /// Emit pointer events through a Linux uinput virtual mouse.
+    #[arg(long)]
+    linux_pointer: bool,
+
+    /// Scale normalized pointer delta to Linux relative pointer units.
+    #[arg(long, default_value_t = 1400.0)]
+    linux_pointer_units_per_delta: f64,
 
     /// Limit controller frame processing to this FPS.
     #[arg(long)]
@@ -150,7 +159,16 @@ fn run(cli: Cli) -> Result<()> {
     if let Some(path) = cli.capture_dir {
         sinks.push_box(Box::new(capture::FrameImageCaptureSink::new(path)?));
     }
-    window::run(pipeline, pointer, sinks)
+    let mut pointer_sinks = window::PointerSink::new();
+    if cli.linux_pointer {
+        pointer_sinks.push_box(Box::new(linux_pointer::LinuxPointerSink::new(
+            linux_pointer::LinuxPointerConfig {
+                units_per_delta: cli.linux_pointer_units_per_delta,
+            },
+        )?));
+    }
+
+    window::run(pipeline, pointer, sinks, pointer_sinks)
 }
 
 fn rgb_request(cli: &Cli) -> CameraOpenRequest {

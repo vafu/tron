@@ -8,8 +8,8 @@ use tron_api::{
 
 #[derive(Clone, Copy, Debug)]
 pub struct RelativePointerProducer {
-    pub pinch_down_strength: f32,
-    pub pinch_up_strength: f32,
+    pub clutch_down_strength: f32,
+    pub clutch_up_strength: f32,
     pub deadzone: f64,
     pub sensitivity: f64,
 }
@@ -17,8 +17,8 @@ pub struct RelativePointerProducer {
 impl Default for RelativePointerProducer {
     fn default() -> Self {
         Self {
-            pinch_down_strength: 0.55,
-            pinch_up_strength: 0.35,
+            clutch_down_strength: 0.65,
+            clutch_up_strength: 0.45,
             deadzone: 0.015,
             sensitivity: 1.0,
         }
@@ -67,31 +67,29 @@ impl RelativePointerState {
             return self.cancel(timestamp, config);
         }
 
-        let pinch = match input.gesture.gesture {
-            HandGesture::Pinch { strength, position } => {
+        let clutch = match input.gesture.gesture {
+            HandGesture::Clutch { strength, position } => {
                 Some((strength, position.clamp(Point2d::ZERO, Point2d::ONE)))
             }
             _ => None,
         };
-        if let Some((_, position)) = pinch {
+        if let Some((_, position)) = clutch {
             self.current_position = Some(position);
         }
 
         let mut events = Vec::new();
-        match (self.primary_down, pinch) {
-            (false, Some((strength, position))) if strength >= config.pinch_down_strength => {
+        match (self.primary_down, clutch) {
+            (false, Some((strength, position))) if strength >= config.clutch_down_strength => {
                 self.primary_down = true;
                 self.anchor_position = Some(position);
                 self.current_position = Some(position);
                 self.last_offset = Point2d::ZERO;
-                events.push(PointerOutput::Event(PointerEvent::Down { timestamp }));
             }
-            (true, Some((strength, _))) if strength <= config.pinch_up_strength => {
+            (true, Some((strength, _))) if strength <= config.clutch_up_strength => {
                 self.primary_down = false;
                 self.anchor_position = None;
                 self.current_position = None;
                 self.last_offset = Point2d::ZERO;
-                events.push(PointerOutput::Event(PointerEvent::Up { timestamp }));
             }
             (true, Some((_, position))) => {
                 if let Some(anchor) = self.anchor_position {
@@ -112,7 +110,6 @@ impl RelativePointerState {
                 self.anchor_position = None;
                 self.current_position = None;
                 self.last_offset = Point2d::ZERO;
-                events.push(PointerOutput::Event(PointerEvent::Up { timestamp }));
             }
             _ => {}
         }
@@ -126,16 +123,11 @@ impl RelativePointerState {
         timestamp: std::time::Instant,
         config: RelativePointerProducer,
     ) -> Vec<PointerOutput> {
-        let was_down = self.primary_down;
         self.anchor_position = None;
         self.current_position = None;
         self.last_offset = Point2d::ZERO;
         self.primary_down = false;
-        let mut events = vec![self.visualization(timestamp, config)];
-        if was_down {
-            events.push(PointerOutput::Event(PointerEvent::Up { timestamp }));
-        }
-        events
+        vec![self.visualization(timestamp, config)]
     }
 
     fn visualization(
@@ -187,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn relative_pointer_uses_pinch_home_as_origin() {
+    fn relative_pointer_uses_clutch_home_as_origin_without_button_down() {
         let mut state = RelativePointerState::default();
         let config = RelativePointerProducer {
             deadzone: 0.0,
@@ -197,7 +189,7 @@ mod tests {
         let events = state.update_input(
             input(
                 Point2d::new(0.5, 0.5),
-                HandGesture::Pinch {
+                HandGesture::Clutch {
                     strength: 0.8,
                     position: Point2d::new(0.52, 0.48),
                 },
@@ -206,13 +198,13 @@ mod tests {
         );
         assert!(matches!(
             events[0],
-            PointerOutput::Event(PointerEvent::Down { .. })
+            PointerOutput::Visualization(PointerVisualization::Joystick(_))
         ));
 
         let events = state.update_input(
             input(
                 Point2d::new(0.5, 0.5),
-                HandGesture::Pinch {
+                HandGesture::Clutch {
                     strength: 0.8,
                     position: Point2d::new(0.62, 0.43),
                 },
@@ -231,7 +223,7 @@ mod tests {
         let events = state.update_input(
             input(
                 Point2d::new(0.5, 0.5),
-                HandGesture::Pinch {
+                HandGesture::Clutch {
                     strength: 0.8,
                     position: Point2d::new(0.57, 0.46),
                 },
@@ -245,13 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn relative_pointer_releases_when_pinch_strength_drops() {
+    fn relative_pointer_disengages_without_button_up() {
         let mut state = RelativePointerState::default();
         let config = RelativePointerProducer::default();
         state.update_input(
             input(
                 Point2d::new(0.5, 0.5),
-                HandGesture::Pinch {
+                HandGesture::Clutch {
                     strength: 0.8,
                     position: Point2d::new(0.5, 0.5),
                 },
@@ -263,7 +255,7 @@ mod tests {
             state.update_input(input(Point2d::new(0.5, 0.5), HandGesture::OpenPalm), config);
         assert!(matches!(
             events[0],
-            PointerOutput::Event(PointerEvent::Up { .. })
+            PointerOutput::Visualization(PointerVisualization::Joystick(_))
         ));
     }
 

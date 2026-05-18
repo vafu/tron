@@ -1,4 +1,5 @@
 use crate::{FrameMeta, NoContext, Point2d, Point3d, Processor, Size};
+use glam::{DMat3, DVec3};
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CheckerboardSpec {
@@ -33,7 +34,7 @@ pub struct CheckerboardSample {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct CameraCalibration {
     pub image_size: Size,
-    pub camera_matrix: [[f64; 3]; 3],
+    pub camera_matrix: DMat3,
     pub distortion: Vec<f64>,
     pub reprojection_error: f64,
 }
@@ -44,10 +45,10 @@ pub struct CheckerboardStereoCalibration {
     pub sample_count: usize,
     pub left: CameraCalibration,
     pub right: CameraCalibration,
-    pub rotation: [[f64; 3]; 3],
-    pub translation: [f64; 3],
-    pub essential: [[f64; 3]; 3],
-    pub fundamental: [[f64; 3]; 3],
+    pub rotation: DMat3,
+    pub translation: DVec3,
+    pub essential: DMat3,
+    pub fundamental: DMat3,
     pub stereo_reprojection_error: f64,
     pub per_view_errors: Vec<f64>,
 }

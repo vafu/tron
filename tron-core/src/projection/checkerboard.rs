@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use glam::{DMat3, DVec3};
 use opencv::calib3d;
 use opencv::core::{Mat, Point2f, Point3f, Vector};
 use opencv::prelude::*;
@@ -117,7 +118,7 @@ fn project_left_pixels(
     let rotation = mat3(calibration.rotation)?;
     let mut rvec = Mat::default();
     calib3d::rodrigues_def(&rotation, &mut rvec).context("convert stereo rotation to rvec")?;
-    let tvec = mat_vec(&calibration.translation)?;
+    let tvec = mat_vec3(calibration.translation)?;
     let right_camera = mat3(calibration.right.camera_matrix)?;
     let right_dist = mat_vec(&calibration.right.distortion)?;
     let mut projected = Vector::<Point2f>::new();
@@ -142,9 +143,19 @@ fn point_in_size(x: f64, y: f64, width: f64, height: f64) -> bool {
     (0.0..=width).contains(&x) && (0.0..=height).contains(&y)
 }
 
-fn mat3(values: [[f64; 3]; 3]) -> Result<Mat> {
-    let mat = Mat::from_slice_2d(&values).context("create OpenCV 3x3 matrix")?;
+fn mat3(values: DMat3) -> Result<Mat> {
+    let rows = [
+        [values.x_axis.x, values.y_axis.x, values.z_axis.x],
+        [values.x_axis.y, values.y_axis.y, values.z_axis.y],
+        [values.x_axis.z, values.y_axis.z, values.z_axis.z],
+    ];
+    let mat = Mat::from_slice_2d(&rows).context("create OpenCV 3x3 matrix")?;
     mat.try_clone().context("clone OpenCV 3x3 matrix")
+}
+
+fn mat_vec3(values: DVec3) -> Result<Mat> {
+    let values = values.to_array();
+    mat_vec(&values)
 }
 
 fn mat_vec(values: &[f64]) -> Result<Mat> {

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use tron_api::{DepthPointProjection, OrientedBoundingBox, Point2d, Rect, RoiResult, Size};
+use glam::Vec2;
+use tron_api::{DepthPointProjection, OrientedBoundingBox, Rect, RoiResult, Size};
 
 pub fn project_roi_at_depth<P>(
     projection: &P,
@@ -35,7 +36,7 @@ where
 
 fn project_corners_at_depth<P>(
     projection: &P,
-    corners: [[f32; 2]; 4],
+    corners: [Vec2; 4],
     target_size: Size,
     depth_mm: f64,
 ) -> Result<Option<RoiResult>>
@@ -50,13 +51,13 @@ where
 
 fn project_corners<P>(
     projection: &P,
-    corners: [[f32; 2]; 4],
+    corners: [Vec2; 4],
     depth_mm: f64,
-) -> Result<Option<[[f32; 2]; 4]>>
+) -> Result<Option<[Vec2; 4]>>
 where
     P: DepthPointProjection,
 {
-    let points = corners.map(|[x, y]| Point2d::new(x as f64, y as f64));
+    let points = corners.map(|point| point.as_dvec2());
     let projected = projection
         .project_points(depth_mm, &points)
         .context("project ROI corners")?;
@@ -66,7 +67,7 @@ where
         projected.len()
     );
 
-    let mut corners = [[0.0; 2]; 4];
+    let mut corners = [Vec2::ZERO; 4];
     for (corner, point) in corners.iter_mut().zip(projected) {
         let Some(point) = point else {
             return Ok(None);
@@ -74,18 +75,18 @@ where
         if !point.x.is_finite() || !point.y.is_finite() {
             return Ok(None);
         }
-        *corner = [point.x as f32, point.y as f32];
+        *corner = point.as_vec2();
     }
     Ok(Some(corners))
 }
 
-fn roi_corners(roi: RoiResult) -> [[f32; 2]; 4] {
+fn roi_corners(roi: RoiResult) -> [Vec2; 4] {
     roi.oriented_box
         .unwrap_or_else(|| rect_to_oriented_box(roi.rect))
         .corners
 }
 
-fn roi_from_corners(corners: [[f32; 2]; 4], target_size: Size) -> Option<RoiResult> {
+fn roi_from_corners(corners: [Vec2; 4], target_size: Size) -> Option<RoiResult> {
     let oriented_box = OrientedBoundingBox { corners };
     let rect = oriented_box.enclosing_rect(target_size)?;
     Some(RoiResult {
@@ -100,20 +101,27 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     let x1 = (rect.x + rect.size.width) as f32;
     let y1 = (rect.y + rect.size.height) as f32;
     OrientedBoundingBox {
-        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        corners: [
+            Vec2::new(x0, y0),
+            Vec2::new(x1, y0),
+            Vec2::new(x1, y1),
+            Vec2::new(x0, y1),
+        ],
     }
 }
 
-fn mirror_corners_x(mut corners: [[f32; 2]; 4], size: Size) -> [[f32; 2]; 4] {
+fn mirror_corners_x(mut corners: [Vec2; 4], size: Size) -> [Vec2; 4] {
     let width = size.width as f32;
-    for [x, _] in &mut corners {
-        *x = width - *x;
+    for corner in &mut corners {
+        corner.x = width - corner.x;
     }
     corners
 }
 
 #[cfg(test)]
 mod tests {
+    use tron_api::Point2d;
+
     use super::*;
 
     struct OffsetProjection {
@@ -174,7 +182,12 @@ mod tests {
         );
         assert_eq!(
             projected.oriented_box.unwrap().corners,
-            [[15.0, 27.0], [26.0, 27.0], [26.0, 40.0], [15.0, 40.0]]
+            [
+                Vec2::new(15.0, 27.0),
+                Vec2::new(26.0, 27.0),
+                Vec2::new(26.0, 40.0),
+                Vec2::new(15.0, 40.0),
+            ]
         );
     }
 

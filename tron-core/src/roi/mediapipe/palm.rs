@@ -209,8 +209,7 @@ impl Detection {
             center + axis_x * half_side - axis_y * half_side,
             center + axis_x * half_side + axis_y * half_side,
             center - axis_x * half_side + axis_y * half_side,
-        ]
-        .map(|corner| corner.to_array());
+        ];
         Some(OrientedBoundingBox { corners })
     }
 
@@ -361,7 +360,12 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     let x1 = (rect.x + rect.size.width) as f32;
     let y1 = (rect.y + rect.size.height) as f32;
     OrientedBoundingBox {
-        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        corners: [
+            Vec2::new(x0, y0),
+            Vec2::new(x1, y0),
+            Vec2::new(x1, y1),
+            Vec2::new(x0, y1),
+        ],
     }
 }
 
@@ -526,10 +530,10 @@ mod tests {
             .unwrap();
         let wrist_y = 0.5 * DEFAULT_INPUT_SIZE as f32;
         // c0, c1 are now the "forward" (fingertips) side.
-        let forward = (box_.corners[0][1] + box_.corners[1][1]) * 0.5 - wrist_y;
-        let back = wrist_y - (box_.corners[2][1] + box_.corners[3][1]) * 0.5;
-        let top_width = (box_.corners[1][0] - box_.corners[0][0]).abs();
-        let side_height = (box_.corners[3][1] - box_.corners[0][1]).abs();
+        let forward = box_.corners[0].midpoint(box_.corners[1]).y - wrist_y;
+        let back = wrist_y - box_.corners[2].midpoint(box_.corners[3]).y;
+        let top_width = box_.corners[1].distance(box_.corners[0]);
+        let side_height = box_.corners[3].distance(box_.corners[0]);
 
         assert!(forward > back * 2.0);
         assert!((top_width - side_height).abs() < 1.0);

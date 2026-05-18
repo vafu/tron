@@ -43,7 +43,7 @@ pub struct HandProjectionOutput {
 pub struct LandmarkDepthEstimate {
     pub anchor_depth_mm: f64,
     pub anchor_landmark: Option<usize>,
-    pub closest_relative_z: Option<f32>,
+    pub closest_relative_z: Option<f64>,
     pub landmark_depths_mm: [Option<f64>; 21],
     pub used_depth_sample: bool,
 }
@@ -195,17 +195,17 @@ where
     if let Some((anchor_landmark, closest_relative_z)) = closest {
         for (index, point) in landmarks.points.iter().enumerate() {
             if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
-                projected_landmarks.points[index].x = f32::NAN;
-                projected_landmarks.points[index].y = f32::NAN;
+                projected_landmarks.points[index].x = f64::NAN;
+                projected_landmarks.points[index].y = f64::NAN;
                 continue;
             }
 
-            let depth_mm = anchor_depth_mm
-                + f64::from(point.z - closest_relative_z) * config.landmark_z_scale_mm;
+            let depth_mm =
+                anchor_depth_mm + (point.z - closest_relative_z) * config.landmark_z_scale_mm;
             let depth_mm = depth_mm.max(0.0);
             landmark_depths_mm[index] = Some(depth_mm);
 
-            let mut source_point = Point2d::new(point.x as f64, point.y as f64);
+            let mut source_point = Point2d::new(point.x, point.y);
             if config.source_mirrored_x {
                 source_point.x = source_size.width as f64 - source_point.x;
             }
@@ -223,13 +223,13 @@ where
                     if config.target_mirrored_x {
                         point.x = target_size.width as f64 - point.x;
                     }
-                    projected_landmarks.points[index].x = point.x as f32;
-                    projected_landmarks.points[index].y = point.y as f32;
+                    projected_landmarks.points[index].x = point.x;
+                    projected_landmarks.points[index].y = point.y;
                     valid_points += 1;
                 }
                 _ => {
-                    projected_landmarks.points[index].x = f32::NAN;
-                    projected_landmarks.points[index].y = f32::NAN;
+                    projected_landmarks.points[index].x = f64::NAN;
+                    projected_landmarks.points[index].y = f64::NAN;
                 }
             }
         }
@@ -258,7 +258,7 @@ where
     ))
 }
 
-fn closest_landmark_z(landmarks: &HandLandmarks) -> Option<(usize, f32)> {
+fn closest_landmark_z(landmarks: &HandLandmarks) -> Option<(usize, f64)> {
     landmarks
         .points
         .iter()
@@ -271,8 +271,8 @@ fn closest_landmark_z(landmarks: &HandLandmarks) -> Option<(usize, f32)> {
 fn mirror_roi_x(mut roi: RoiResult, size: Size) -> RoiResult {
     if let Some(mut oriented_box) = roi.oriented_box {
         let width = size.width as f32;
-        for [x, _] in &mut oriented_box.corners {
-            *x = width - *x;
+        for corner in &mut oriented_box.corners {
+            corner.x = width - corner.x;
         }
         roi.oriented_box = Some(oriented_box);
         roi.rect = oriented_box.enclosing_rect(size).unwrap_or(roi.rect);
@@ -325,17 +325,13 @@ mod tests {
 
     fn landmarks(points: [(usize, f32, f32, f32); 2]) -> HandLandmarks {
         let mut landmarks = HandLandmarks {
-            points: [HandLandmark {
-                x: f32::NAN,
-                y: f32::NAN,
-                z: f32::NAN,
-            }; 21],
+            points: [HandLandmark::splat(f64::NAN); 21],
             presence: 0.9,
             handedness: None,
             timestamp: Instant::now(),
         };
         for (index, x, y, z) in points {
-            landmarks.points[index] = HandLandmark { x, y, z };
+            landmarks.points[index] = HandLandmark::new(x as f64, y as f64, z as f64);
         }
         landmarks
     }

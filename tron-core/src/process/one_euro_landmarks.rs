@@ -98,11 +98,11 @@ impl LandmarkFilterState {
         dt: f64,
         config: OneEuroLandmarkConfig,
     ) -> HandLandmark {
-        HandLandmark {
-            x: self.x.filter(point.x, dt, config),
-            y: self.y.filter(point.y, dt, config),
-            z: self.z.filter(point.z, dt, config),
-        }
+        HandLandmark::new(
+            self.x.filter(point.x, dt, config),
+            self.y.filter(point.y, dt, config),
+            self.z.filter(point.z, dt, config),
+        )
     }
 }
 
@@ -114,18 +114,17 @@ struct OneEuroScalar {
 }
 
 impl OneEuroScalar {
-    fn filter(&mut self, value: f32, dt: f64, config: OneEuroLandmarkConfig) -> f32 {
+    fn filter(&mut self, value: f64, dt: f64, config: OneEuroLandmarkConfig) -> f64 {
         if !value.is_finite() {
             self.reset();
-            return f32::NAN;
+            return f64::NAN;
         }
 
-        let value = f64::from(value);
         let Some(previous_raw) = self.previous_raw else {
             self.previous_raw = Some(value);
             self.previous_filtered = Some(value);
             self.previous_derivative = Some(0.0);
-            return value as f32;
+            return value;
         };
 
         let derivative = (value - previous_raw) / dt;
@@ -144,7 +143,7 @@ impl OneEuroScalar {
         self.previous_raw = Some(value);
         self.previous_filtered = Some(filtered);
         self.previous_derivative = Some(filtered_derivative);
-        filtered as f32
+        filtered
     }
 
     fn reset(&mut self) {
@@ -169,7 +168,7 @@ mod tests {
 
     fn landmarks(x: f32, timestamp: Instant) -> HandLandmarks {
         let mut points = [HandLandmark::default(); HAND_LANDMARKS];
-        points[0] = HandLandmark { x, y: 2.0, z: 0.0 };
+        points[0] = HandLandmark::new(x as f64, 2.0, 0.0);
         HandLandmarks {
             points,
             presence: 1.0,

@@ -9,17 +9,17 @@ const HAND_LANDMARKS: usize = 21;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct HandLandmarkVelocity {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
 }
 
 impl HandLandmarkVelocity {
     fn nan() -> Self {
         Self {
-            x: f32::NAN,
-            y: f32::NAN,
-            z: f32::NAN,
+            x: f64::NAN,
+            y: f64::NAN,
+            z: f64::NAN,
         }
     }
 }
@@ -115,20 +115,14 @@ fn landmark_velocity(
     current: HandLandmark,
     dt: f32,
 ) -> HandLandmarkVelocity {
-    if !previous.x.is_finite()
-        || !previous.y.is_finite()
-        || !previous.z.is_finite()
-        || !current.x.is_finite()
-        || !current.y.is_finite()
-        || !current.z.is_finite()
-    {
+    if !previous.is_finite() || !current.is_finite() {
         return HandLandmarkVelocity::nan();
     }
 
     HandLandmarkVelocity {
-        x: (current.x - previous.x) / dt,
-        y: (current.y - previous.y) / dt,
-        z: (current.z - previous.z) / dt,
+        x: (current.x - previous.x) / f64::from(dt),
+        y: (current.y - previous.y) / f64::from(dt),
+        z: (current.z - previous.z) / f64::from(dt),
     }
 }
 
@@ -155,11 +149,7 @@ mod tests {
         let output = processor
             .process(
                 Some(landmarks(
-                    HandLandmark {
-                        x: 10.0,
-                        y: 20.0,
-                        z: 0.5,
-                    },
+                    HandLandmark::new(10.0, 20.0, 0.5),
                     Instant::now(),
                 )),
                 NoContext,
@@ -179,14 +169,7 @@ mod tests {
         let timestamp = Instant::now();
         processor
             .process(
-                Some(landmarks(
-                    HandLandmark {
-                        x: 10.0,
-                        y: 20.0,
-                        z: 0.5,
-                    },
-                    timestamp,
-                )),
+                Some(landmarks(HandLandmark::new(10.0, 20.0, 0.5), timestamp)),
                 NoContext,
             )
             .unwrap();
@@ -194,11 +177,7 @@ mod tests {
         let output = processor
             .process(
                 Some(landmarks(
-                    HandLandmark {
-                        x: 14.0,
-                        y: 12.0,
-                        z: 1.5,
-                    },
+                    HandLandmark::new(14.0, 12.0, 1.5),
                     timestamp + Duration::from_millis(100),
                 )),
                 NoContext,
@@ -206,9 +185,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(output.velocities[0].x, 40.0);
-        assert_eq!(output.velocities[0].y, -80.0);
-        assert_eq!(output.velocities[0].z, 10.0);
+        assert!((output.velocities[0].x - 40.0).abs() < 1.0e-5);
+        assert!((output.velocities[0].y - -80.0).abs() < 1.0e-5);
+        assert!((output.velocities[0].z - 10.0).abs() < 1.0e-5);
         assert!((output.dt_secs - 0.1).abs() < f32::EPSILON);
     }
 
@@ -227,11 +206,7 @@ mod tests {
         let output = processor
             .process(
                 Some(landmarks(
-                    HandLandmark {
-                        x: 100.0,
-                        y: 0.0,
-                        z: 0.0,
-                    },
+                    HandLandmark::new(100.0, 0.0, 0.0),
                     timestamp + Duration::from_millis(100),
                 )),
                 NoContext,

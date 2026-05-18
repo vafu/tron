@@ -24,7 +24,33 @@ pub struct Rect {
     pub size: Size,
 }
 
+impl Size {
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    pub const fn as_uvec2(self) -> glam::UVec2 {
+        glam::UVec2::new(self.width, self.height)
+    }
+
+    pub const fn from_uvec2(size: glam::UVec2) -> Self {
+        Self::new(size.x, size.y)
+    }
+}
+
 impl Rect {
+    pub const fn new(x: u32, y: u32, size: Size) -> Self {
+        Self { x, y, size }
+    }
+
+    pub const fn as_uvec4(self) -> glam::UVec4 {
+        glam::UVec4::new(self.x, self.y, self.size.width, self.size.height)
+    }
+
+    pub const fn from_uvec4(rect: glam::UVec4) -> Self {
+        Self::new(rect.x, rect.y, Size::new(rect.z, rect.w))
+    }
+
     pub fn clamp_to(self, bounds: Size) -> Self {
         let width = self.size.width.min(bounds.width).max(1);
         let height = self.size.height.min(bounds.height).max(1);

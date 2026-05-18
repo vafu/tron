@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use glam::{DMat3, DVec3};
 use opencv::boxed_ref::BoxedRef;
 use opencv::calib3d;
 use opencv::core::{self, Mat, Point2f, Point3f, Size as CvSize, TermCriteria, Vector};
@@ -420,40 +421,40 @@ fn cv_image_points(
     all
 }
 
-fn mat3(mat: &Mat) -> Result<[[f64; 3]; 3]> {
+fn mat3(mat: &Mat) -> Result<DMat3> {
     anyhow::ensure!(
         mat.rows() == 3 && mat.cols() == 3,
         "expected 3x3 matrix, got {}x{}",
         mat.rows(),
         mat.cols()
     );
-    Ok([
-        [
+    Ok(DMat3::from_cols(
+        DVec3::new(
             *mat.at_2d::<f64>(0, 0)?,
-            *mat.at_2d::<f64>(0, 1)?,
-            *mat.at_2d::<f64>(0, 2)?,
-        ],
-        [
             *mat.at_2d::<f64>(1, 0)?,
-            *mat.at_2d::<f64>(1, 1)?,
-            *mat.at_2d::<f64>(1, 2)?,
-        ],
-        [
             *mat.at_2d::<f64>(2, 0)?,
+        ),
+        DVec3::new(
+            *mat.at_2d::<f64>(0, 1)?,
+            *mat.at_2d::<f64>(1, 1)?,
             *mat.at_2d::<f64>(2, 1)?,
+        ),
+        DVec3::new(
+            *mat.at_2d::<f64>(0, 2)?,
+            *mat.at_2d::<f64>(1, 2)?,
             *mat.at_2d::<f64>(2, 2)?,
-        ],
-    ])
+        ),
+    ))
 }
 
-fn mat_vec3(mat: &Mat) -> Result<[f64; 3]> {
+fn mat_vec3(mat: &Mat) -> Result<DVec3> {
     let values = mat_vec(mat)?;
     anyhow::ensure!(
         values.len() == 3,
         "expected 3-vector, got {} values",
         values.len()
     );
-    Ok([values[0], values[1], values[2]])
+    Ok(DVec3::new(values[0], values[1], values[2]))
 }
 
 fn mat_vec(mat: &Mat) -> Result<Vec<f64>> {

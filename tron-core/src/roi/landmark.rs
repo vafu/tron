@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{NoContext, OrientedBoundingBox, Processor, Rect, RoiResult, Size};
 
 use crate::process::landmark_velocity::{HandLandmarkMotion, HandLandmarkVelocity};
@@ -99,12 +100,12 @@ fn average_landmark_displacement(
     for index in ROI_MOTION_LANDMARKS {
         let velocity = motion.velocities[index];
         if finite_velocity(velocity) {
-            dx += velocity.x * motion.dt_secs * prediction_scale;
-            dy += velocity.y * motion.dt_secs * prediction_scale;
+            dx += velocity.x * f64::from(motion.dt_secs) * f64::from(prediction_scale);
+            dy += velocity.y * f64::from(motion.dt_secs) * f64::from(prediction_scale);
             count += 1;
         }
     }
-    (count > 0).then_some([dx / count as f32, dy / count as f32])
+    (count > 0).then_some([(dx / count as f64) as f32, (dy / count as f64) as f32])
 }
 
 fn finite_velocity(velocity: HandLandmarkVelocity) -> bool {
@@ -137,7 +138,9 @@ fn translate_oriented_box(
     dy: f32,
 ) -> OrientedBoundingBox {
     OrientedBoundingBox {
-        corners: oriented_box.corners.map(|[x, y]| [x + dx, y + dy]),
+        corners: oriented_box
+            .corners
+            .map(|corner| corner + Vec2::new(dx, dy)),
     }
 }
 
@@ -175,7 +178,12 @@ mod tests {
                 },
             },
             oriented_box: Some(OrientedBoundingBox {
-                corners: [[10.0, 20.0], [60.0, 20.0], [60.0, 80.0], [10.0, 80.0]],
+                corners: [
+                    Vec2::new(10.0, 20.0),
+                    Vec2::new(60.0, 20.0),
+                    Vec2::new(60.0, 80.0),
+                    Vec2::new(10.0, 80.0),
+                ],
             }),
         }
     }
@@ -230,7 +238,12 @@ mod tests {
         assert_eq!(output.rect.y, 18);
         assert_eq!(
             output.oriented_box.unwrap().corners,
-            [[13.0, 18.0], [63.0, 18.0], [63.0, 78.0], [13.0, 78.0],]
+            [
+                Vec2::new(13.0, 18.0),
+                Vec2::new(63.0, 18.0),
+                Vec2::new(63.0, 78.0),
+                Vec2::new(13.0, 78.0),
+            ]
         );
     }
 

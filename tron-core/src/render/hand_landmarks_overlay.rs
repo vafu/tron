@@ -117,11 +117,11 @@ fn push_segment(
         return;
     }
     vertices.push(LineVertex {
-        position: project_frame_point([a.x, a.y], frame_size, rect, target_size),
+        position: project_frame_point([a.x as f32, a.y as f32], frame_size, rect, target_size),
         color,
     });
     vertices.push(LineVertex {
-        position: project_frame_point([b.x, b.y], frame_size, rect, target_size),
+        position: project_frame_point([b.x as f32, b.y as f32], frame_size, rect, target_size),
         color,
     });
 }
@@ -139,16 +139,8 @@ fn push_cross(
     }
     let radius = 3.0;
     push_segment(
-        HandLandmark {
-            x: point.x - radius,
-            y: point.y,
-            z: point.z,
-        },
-        HandLandmark {
-            x: point.x + radius,
-            y: point.y,
-            z: point.z,
-        },
+        HandLandmark::new(point.x - radius, point.y, point.z),
+        HandLandmark::new(point.x + radius, point.y, point.z),
         frame_size,
         rect,
         target_size,
@@ -156,16 +148,8 @@ fn push_cross(
         vertices,
     );
     push_segment(
-        HandLandmark {
-            x: point.x,
-            y: point.y - radius,
-            z: point.z,
-        },
-        HandLandmark {
-            x: point.x,
-            y: point.y + radius,
-            z: point.z,
-        },
+        HandLandmark::new(point.x, point.y - radius, point.z),
+        HandLandmark::new(point.x, point.y + radius, point.z),
         frame_size,
         rect,
         target_size,

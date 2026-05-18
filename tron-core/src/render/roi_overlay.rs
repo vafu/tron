@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{OrientedBoundingBox, Rect, Sink, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
@@ -64,7 +65,7 @@ fn roi_vertices(
 ) -> [LineVertex; 8] {
     let [c0, c1, c2, c3] = roi
         .corners
-        .map(|corner| project_frame_point(corner, frame_size, rect, target_size));
+        .map(|corner| project_frame_point(corner.to_array(), frame_size, rect, target_size));
     [
         LineVertex {
             position: c0,
@@ -108,6 +109,11 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     let y1 = (rect.y + rect.size.height) as f32;
     // Corners in a loop: TL, TR, BR, BL
     OrientedBoundingBox {
-        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        corners: [
+            Vec2::new(x0, y0),
+            Vec2::new(x1, y0),
+            Vec2::new(x1, y1),
+            Vec2::new(x0, y1),
+        ],
     }
 }

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use glam::{Affine2, Vec2};
+use glam::{Affine2, DVec2, DVec3, Vec2};
 use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
 use ort::value::TensorRef;
 use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
@@ -51,19 +51,7 @@ pub struct MediaPipeHandLandmarkInput<'a> {
     pub roi: Option<RoiResult>,
 }
 
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
-pub struct HandLandmark {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
-
-impl HandLandmark {
-    fn xy(self) -> Option<Vec2> {
-        let point = Vec2::new(self.x, self.y);
-        point.is_finite().then_some(point)
-    }
-}
+pub type HandLandmark = DVec3;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct HandLandmarks {
@@ -156,7 +144,7 @@ fn landmark_tracking_roi(
 
     let rect_points = MEDIAPIPE_LANDMARK_RECT_INDICES
         .iter()
-        .map(|&index| points[index].xy())
+        .map(|&index| landmark_xy(points[index]))
         .collect::<Option<Vec<_>>>()?;
     let rotation = mediapipe_landmark_rect_rotation(points)?;
     let reverse_angle = normalize_radians(-rotation);
@@ -214,8 +202,7 @@ fn landmark_tracking_roi(
             center + x_axis - y_axis,
             center + x_axis + y_axis,
             center - x_axis + y_axis,
-        ]
-        .map(|corner| corner.to_array()),
+        ],
     };
     let rect = oriented_box.enclosing_rect(frame_size)?;
 
@@ -226,10 +213,10 @@ fn landmark_tracking_roi(
 }
 
 fn mediapipe_landmark_rect_rotation(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<f32> {
-    let wrist = points[WRIST_LANDMARK].xy()?;
-    let index_mcp = points[INDEX_MCP_LANDMARK].xy()?;
-    let middle_mcp = points[MIDDLE_MCP_LANDMARK].xy()?;
-    let ring_mcp = points[RING_MCP_LANDMARK].xy()?;
+    let wrist = landmark_xy(points[WRIST_LANDMARK])?;
+    let index_mcp = landmark_xy(points[INDEX_MCP_LANDMARK])?;
+    let middle_mcp = landmark_xy(points[MIDDLE_MCP_LANDMARK])?;
+    let ring_mcp = landmark_xy(points[RING_MCP_LANDMARK])?;
     let finger_center = ((index_mcp + ring_mcp) * 0.5 + middle_mcp) * 0.5;
     let rotation = MEDIAPIPE_LANDMARK_TARGET_ANGLE
         - (-(finger_center.y - wrist.y)).atan2(finger_center.x - wrist.x);
@@ -248,7 +235,7 @@ fn pinky_edge_margins(
     x0: f32,
     x1: f32,
 ) -> Option<(f32, f32)> {
-    let pinky = points[PINKY_MCP_LANDMARK].xy()?;
+    let pinky = landmark_xy(points[PINKY_MCP_LANDMARK])?;
     let palm_width = distance(points[INDEX_MCP_LANDMARK], points[PINKY_MCP_LANDMARK])?;
     let extra = palm_width * PINKY_MCP_EDGE_EXTRA_MARGIN_OF_PALM_WIDTH;
     if extra <= 0.0 || !extra.is_finite() {
@@ -280,7 +267,7 @@ fn landmark_silhouette_margin(points: &[HandLandmark; HAND_LANDMARKS]) -> Option
 }
 
 fn distance(a: HandLandmark, b: HandLandmark) -> Option<f32> {
-    Some((a.xy()? - b.xy()?).length())
+    Some(landmark_xy(a)?.distance(landmark_xy(b)?))
 }
 
 fn landmark_bounds(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<(Vec2, Vec2)> {
@@ -288,13 +275,20 @@ fn landmark_bounds(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<(Vec2, Vec
     let mut max = Vec2::splat(f32::NEG_INFINITY);
     let mut found = false;
     for point in *points {
-        if let Some(point) = point.xy() {
+        if let Some(point) = landmark_xy(point) {
             min = min.min(point);
             max = max.max(point);
             found = true;
         }
     }
     found.then_some((min, max))
+}
+
+fn landmark_xy(point: HandLandmark) -> Option<Vec2> {
+    let point = DVec2::new(point.x, point.y);
+    point
+        .is_finite()
+        .then(|| Vec2::new(point.x as f32, point.y as f32))
 }
 
 pub struct MediaPipeHandLandmarkProcessor {
@@ -421,42 +415,33 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
         let mut crop_points = [None; HAND_LANDMARKS];
         for i in 0..HAND_LANDMARKS {
             let base = i * LANDMARK_COORDS;
-            let x = landmarks[base];
-            let y = landmarks[base + 1];
-            let z = landmarks[base + 2];
-            let (nx, ny, nz) = if raw_max < 2.0 {
-                (x, y, z)
+            let raw = HandLandmark::new(
+                landmarks[base] as f64,
+                landmarks[base + 1] as f64,
+                landmarks[base + 2] as f64,
+            );
+            let crop_point = if raw_max < 2.0 {
+                raw
             } else {
-                (
-                    x / input_size as f32,
-                    y / input_size as f32,
-                    z / input_size as f32,
-                )
+                raw / input_size as f64
             };
+            let crop_xy = crop_point.truncate().as_vec2();
 
             // Filter out points that are exactly at the origin (0, 0) in crop space.
             // These are usually invalid/uninitialized points from the model.
-            if nx.abs() < f32::EPSILON && ny.abs() < f32::EPSILON {
-                points[i] = HandLandmark {
-                    x: f32::NAN,
-                    y: f32::NAN,
-                    z: f32::NAN,
-                };
+            if crop_xy.abs().max_element() < f32::EPSILON {
+                points[i] = HandLandmark::splat(f64::NAN);
                 continue;
             }
 
-            crop_points[i] = Some(Vec2::new(nx, ny));
-            let [frame_x, frame_y] = crop.transform_point2(Vec2::new(nx, ny)).to_array();
-            points[i] = HandLandmark {
-                x: frame_x,
-                y: frame_y,
-                z: nz,
-            };
+            crop_points[i] = Some(crop_xy);
+            let frame_xy = crop.transform_point2(crop_xy).as_dvec2();
+            points[i] = frame_xy.extend(crop_point.z);
             tracing::trace!(
                 "landmark {}: crop=({:.4}, {:.4}), frame=({:.1}, {:.1})",
                 i,
-                nx,
-                ny,
+                crop_xy.x,
+                crop_xy.y,
                 points[i].x,
                 points[i].y
             );
@@ -567,32 +552,27 @@ fn classify_outputs(session: &Session) -> Result<HandLandmarkOutputSpec> {
 }
 
 fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Affine2 {
+    let frame_max = Vec2::new(frame_size.width as f32, frame_size.height as f32);
     let Some(roi) = roi else {
         return Affine2::from_cols(
-            Vec2::new(frame_size.width as f32, 0.0),
-            Vec2::new(0.0, frame_size.height as f32),
+            Vec2::new(frame_max.x, 0.0),
+            Vec2::new(0.0, frame_max.y),
             Vec2::ZERO,
         );
     };
     if let Some(oriented_box) = roi.oriented_box {
-        let [c0, c1, _, c3] = oriented_box.corners.map(Vec2::from_array);
+        let [c0, c1, _, c3] = oriented_box.corners;
         return Affine2::from_cols(c1 - c0, c3 - c0, c0);
     }
 
-    let frame_w = frame_size.width.max(1) as f32;
-    let frame_h = frame_size.height.max(1) as f32;
-    let cx = roi.rect.x as f32 + roi.rect.size.width as f32 * 0.5;
-    let cy = roi.rect.y as f32 + roi.rect.size.height as f32 * 0.5;
+    let rect_min = Vec2::new(roi.rect.x as f32, roi.rect.y as f32);
+    let rect_size = Vec2::new(roi.rect.size.width as f32, roi.rect.size.height as f32);
+    let center = rect_min + rect_size * 0.5;
     let half = roi.rect.size.width.max(roi.rect.size.height) as f32 * 0.5;
-    let x0 = (cx - half).clamp(0.0, frame_w);
-    let y0 = (cy - half).clamp(0.0, frame_h);
-    let x1 = (cx + half).clamp(0.0, frame_w);
-    let y1 = (cy + half).clamp(0.0, frame_h);
-    Affine2::from_cols(
-        Vec2::new(x1 - x0, 0.0),
-        Vec2::new(0.0, y1 - y0),
-        Vec2::new(x0, y0),
-    )
+    let min = (center - Vec2::splat(half)).clamp(Vec2::ZERO, frame_max);
+    let max = (center + Vec2::splat(half)).clamp(Vec2::ZERO, frame_max);
+    let size = max - min;
+    Affine2::from_cols(Vec2::new(size.x, 0.0), Vec2::new(0.0, size.y), min)
 }
 
 #[cfg(test)]
@@ -601,16 +581,8 @@ mod tests {
 
     #[test]
     fn landmarks_bounding_roi_uses_points() {
-        let mut points = [HandLandmark {
-            x: 10.2,
-            y: 20.8,
-            z: 0.0,
-        }; 21];
-        points[1] = HandLandmark {
-            x: 30.1,
-            y: 40.2,
-            z: 0.0,
-        };
+        let mut points = [HandLandmark::new(10.2, 20.8, 0.0); 21];
+        points[1] = HandLandmark::new(30.1, 40.2, 0.0);
         let landmarks = HandLandmarks {
             points,
             presence: 1.0,
@@ -632,11 +604,7 @@ mod tests {
     #[test]
     fn degenerate_landmark_roi_is_present() {
         let landmarks = HandLandmarks {
-            points: [HandLandmark {
-                x: 10.2,
-                y: 20.8,
-                z: 0.0,
-            }; 21],
+            points: [HandLandmark::new(10.2, 20.8, 0.0); 21],
             presence: 1.0,
             handedness: None,
             timestamp: Instant::now(),

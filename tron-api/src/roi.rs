@@ -1,4 +1,5 @@
 use crate::{NoContext, Processor, Rect, Size};
+use glam::Vec2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RoiCandidate {
@@ -14,38 +15,30 @@ pub struct RoiResult {
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub struct OrientedBoundingBox {
-    pub corners: [[f32; 2]; 4],
+    pub corners: [Vec2; 4],
 }
 
 impl OrientedBoundingBox {
     pub fn enclosing_rect(self, bounds: Size) -> Option<Rect> {
-        let mut x0 = f32::INFINITY;
-        let mut y0 = f32::INFINITY;
-        let mut x1 = f32::NEG_INFINITY;
-        let mut y1 = f32::NEG_INFINITY;
-        for [x, y] in self.corners {
-            if !x.is_finite() || !y.is_finite() {
+        let mut min = Vec2::splat(f32::INFINITY);
+        let mut max = Vec2::splat(f32::NEG_INFINITY);
+        for corner in self.corners {
+            if !corner.is_finite() {
                 return None;
             }
-            x0 = x0.min(x);
-            y0 = y0.min(y);
-            x1 = x1.max(x);
-            y1 = y1.max(y);
+            min = min.min(corner);
+            max = max.max(corner);
         }
-        let x0 = x0.floor().max(0.0).min(bounds.width as f32) as u32;
-        let y0 = y0.floor().max(0.0).min(bounds.height as f32) as u32;
-        let x1 = x1.ceil().max(0.0).min(bounds.width as f32) as u32;
-        let y1 = y1.ceil().max(0.0).min(bounds.height as f32) as u32;
-        let width = x1.saturating_sub(x0);
-        let height = y1.saturating_sub(y0);
+        let bounds = bounds.as_uvec2().as_vec2();
+        let min = min.floor().clamp(Vec2::ZERO, bounds).as_uvec2();
+        let max = max.ceil().clamp(Vec2::ZERO, bounds).as_uvec2();
+        let size = max.saturating_sub(min);
+        let width = size.x;
+        let height = size.y;
         if width == 0 || height == 0 {
             return None;
         }
-        Some(Rect {
-            x: x0,
-            y: y0,
-            size: Size { width, height },
-        })
+        Some(Rect::new(min.x, min.y, Size::from_uvec2(size)))
     }
 }
 

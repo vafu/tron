@@ -7,7 +7,7 @@ use crate::render::wgpu::{NdcRect, project_frame_point};
 use crate::roi::mediapipe::HandLandmark;
 
 const VELOCITY_LANDMARKS: [usize; 6] = [0, 4, 8, 12, 16, 20];
-const VECTOR_SECONDS: f32 = 0.08;
+const VECTOR_SECONDS: f64 = 0.08;
 const VECTOR_COLOR: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
 
 pub struct HandVelocityOverlayView<'frame, 'pass> {
@@ -95,11 +95,21 @@ fn push_velocity(
         point.y + velocity.y * VECTOR_SECONDS,
     ];
     vertices.push(LineVertex {
-        position: project_frame_point([point.x, point.y], frame_size, rect, target_size),
+        position: project_frame_point(
+            [point.x as f32, point.y as f32],
+            frame_size,
+            rect,
+            target_size,
+        ),
         color: VECTOR_COLOR,
     });
     vertices.push(LineVertex {
-        position: project_frame_point(end, frame_size, rect, target_size),
+        position: project_frame_point(
+            [end[0] as f32, end[1] as f32],
+            frame_size,
+            rect,
+            target_size,
+        ),
         color: VECTOR_COLOR,
     });
 }

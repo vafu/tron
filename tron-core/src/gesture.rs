@@ -9,7 +9,15 @@ use crate::roi::mediapipe::HandLandmarks;
 
 const THUMB_TIP: usize = 4;
 const INDEX_TIP: usize = 8;
+const MIDDLE_MCP: usize = 9;
+const MIDDLE_PIP: usize = 10;
+const MIDDLE_TIP: usize = 12;
+const RING_PIP: usize = 14;
+const RING_TIP: usize = 16;
+const PINKY_PIP: usize = 18;
+const PINKY_TIP: usize = 20;
 const PINCH_DISTANCE_OF_PALM: f64 = 0.1;
+const CLUTCH_FOLDED_STRENGTH: f64 = 0.1;
 
 #[derive(Clone, Copy, Debug)]
 pub struct GesturePreprocessorInput<'a> {
@@ -64,6 +72,21 @@ fn trace_gesture_output(output: &GestureFrame) {
                 "gesture preprocessor output"
             );
         }
+        HandGesture::Clutch { strength, position } => {
+            tracing::debug!(
+                target: "tron_core::gesture",
+                gesture = "clutch",
+                clutch_strength = strength,
+                clutch_x = position.x,
+                clutch_y = position.y,
+                palm_center_x = palm_center.map(|point| point.x),
+                palm_center_y = palm_center.map(|point| point.y),
+                palm_extent_x = palm_extent.map(|point| point.x),
+                palm_extent_y = palm_extent.map(|point| point.y),
+                ?output.timestamp,
+                "gesture preprocessor output"
+            );
+        }
         HandGesture::Pointing => {
             tracing::debug!(
                 target: "tron_core::gesture",
@@ -91,6 +114,9 @@ fn classify_gesture(
     let Some(index) = landmark_point(landmarks, INDEX_TIP, frame_size) else {
         return HandGesture::Unknown;
     };
+    if let Some((strength, position)) = clutch(landmarks, palm, frame_size) {
+        return HandGesture::Clutch { strength, position };
+    }
     let palm_extent = palm
         .map(|palm| palm.extent.x.max(palm.extent.y))
         .unwrap_or(1.0)
@@ -107,12 +133,67 @@ fn classify_gesture(
     HandGesture::OpenPalm
 }
 
+fn clutch(
+    landmarks: &HandLandmarks,
+    palm: Option<PalmPose2d>,
+    frame_size: Size,
+) -> Option<(f32, Point2d)> {
+    let wrist = landmark_point(landmarks, 0, frame_size)?;
+    let middle_mcp = landmark_point(landmarks, MIDDLE_MCP, frame_size)?;
+    let palm_axis = middle_mcp - wrist;
+    let palm_axis_len = palm_axis.length();
+    if palm_axis_len <= f64::EPSILON {
+        return None;
+    }
+    let palm_axis = palm_axis / palm_axis_len;
+    let palm_extent = palm
+        .map(|palm| palm.extent.x.max(palm.extent.y))
+        .unwrap_or(palm_axis_len)
+        .max(0.001);
+
+    let middle = folded_strength(
+        landmarks, MIDDLE_PIP, MIDDLE_TIP, frame_size, wrist, palm_axis,
+    );
+    let ring = folded_strength(landmarks, RING_PIP, RING_TIP, frame_size, wrist, palm_axis);
+    let pinky = folded_strength(
+        landmarks, PINKY_PIP, PINKY_TIP, frame_size, wrist, palm_axis,
+    );
+    let strength = middle.min(ring).min(pinky);
+    if strength < CLUTCH_FOLDED_STRENGTH {
+        return None;
+    }
+
+    let position = landmark_point(landmarks, INDEX_TIP, frame_size)
+        .or(palm.map(|palm| palm.center))
+        .unwrap_or(wrist + palm_axis * palm_extent);
+    Some((strength as f32, position.clamp(Point2d::ZERO, Point2d::ONE)))
+}
+
+fn folded_strength(
+    landmarks: &HandLandmarks,
+    pip_index: usize,
+    tip_index: usize,
+    frame_size: Size,
+    wrist: Point2d,
+    palm_axis: Point2d,
+) -> f64 {
+    let Some(pip) = landmark_point(landmarks, pip_index, frame_size) else {
+        return 0.0;
+    };
+    let Some(tip) = landmark_point(landmarks, tip_index, frame_size) else {
+        return 0.0;
+    };
+    let pip_projection = (pip - wrist).dot(palm_axis);
+    let tip_projection = (tip - wrist).dot(palm_axis);
+    ((pip_projection - tip_projection) / pip_projection.abs().max(0.001)).clamp(0.0, 1.0)
+}
+
 fn landmark_point(landmarks: &HandLandmarks, index: usize, frame_size: Size) -> Option<Point2d> {
     let point = landmarks.points[index];
     (point.x.is_finite() && point.y.is_finite()).then(|| {
         Point2d::new(
-            point.x as f64 / frame_size.width.max(1) as f64,
-            point.y as f64 / frame_size.height.max(1) as f64,
+            point.x / frame_size.width.max(1) as f64,
+            point.y / frame_size.height.max(1) as f64,
         )
     })
 }
@@ -120,8 +201,8 @@ fn landmark_point(landmarks: &HandLandmarks, index: usize, frame_size: Size) -> 
 fn palm_pose(roi: RoiResult, frame_size: Size) -> PalmPose2d {
     let center = if let Some(oriented_box) = roi.oriented_box {
         let mut center = Point2d::ZERO;
-        for [x, y] in oriented_box.corners {
-            center += Point2d::new(x as f64, y as f64);
+        for corner in oriented_box.corners {
+            center += corner.as_dvec2();
         }
         center / 4.0
     } else {
@@ -142,9 +223,8 @@ fn palm_pose(roi: RoiResult, frame_size: Size) -> PalmPose2d {
         rotation_radians: roi
             .oriented_box
             .map(|oriented_box| {
-                let [x0, y0] = oriented_box.corners[0];
-                let [x1, y1] = oriented_box.corners[1];
-                f64::from(y1 - y0).atan2(f64::from(x1 - x0))
+                let edge = (oriented_box.corners[1] - oriented_box.corners[0]).as_dvec2();
+                edge.y.atan2(edge.x)
             })
             .unwrap_or(0.0),
         extent,
@@ -160,26 +240,18 @@ mod tests {
 
     fn landmarks(thumb: (f32, f32), index: (f32, f32)) -> HandLandmarks {
         let mut landmarks = HandLandmarks {
-            points: [HandLandmark {
-                x: f32::NAN,
-                y: f32::NAN,
-                z: f32::NAN,
-            }; 21],
+            points: [HandLandmark::splat(f64::NAN); 21],
             presence: 1.0,
             handedness: None,
             timestamp: Instant::now(),
         };
-        landmarks.points[THUMB_TIP] = HandLandmark {
-            x: thumb.0,
-            y: thumb.1,
-            z: 0.0,
-        };
-        landmarks.points[INDEX_TIP] = HandLandmark {
-            x: index.0,
-            y: index.1,
-            z: 0.0,
-        };
+        landmarks.points[THUMB_TIP] = HandLandmark::new(thumb.0 as f64, thumb.1 as f64, 0.0);
+        landmarks.points[INDEX_TIP] = HandLandmark::new(index.0 as f64, index.1 as f64, 0.0);
         landmarks
+    }
+
+    fn set_landmark(landmarks: &mut HandLandmarks, index: usize, x: f32, y: f32) {
+        landmarks.points[index] = HandLandmark::new(x as f64, y as f64, 0.0);
     }
 
     #[test]
@@ -214,5 +286,36 @@ mod tests {
         };
         assert!(position.x > 0.15);
         assert!(position.x < 0.17);
+    }
+
+    #[test]
+    fn detects_clutch_from_middle_ring_pinky_folded() {
+        let mut landmarks = landmarks((220.0, 240.0), (450.0, 260.0));
+        set_landmark(&mut landmarks, 0, 500.0, 700.0);
+        set_landmark(&mut landmarks, MIDDLE_MCP, 500.0, 500.0);
+        set_landmark(&mut landmarks, MIDDLE_PIP, 500.0, 360.0);
+        set_landmark(&mut landmarks, MIDDLE_TIP, 500.0, 650.0);
+        set_landmark(&mut landmarks, RING_PIP, 560.0, 390.0);
+        set_landmark(&mut landmarks, RING_TIP, 540.0, 650.0);
+        set_landmark(&mut landmarks, PINKY_PIP, 620.0, 430.0);
+        set_landmark(&mut landmarks, PINKY_TIP, 570.0, 650.0);
+
+        let gesture = classify_gesture(
+            &landmarks,
+            Some(PalmPose2d {
+                center: Point2d::new(0.5, 0.55),
+                rotation_radians: 0.0,
+                extent: Point2d::splat(0.2),
+            }),
+            Size {
+                width: 1000,
+                height: 1000,
+            },
+        );
+
+        let HandGesture::Clutch { position, .. } = gesture else {
+            panic!("expected clutch");
+        };
+        assert_eq!(position, Point2d::new(0.45, 0.26));
     }
 }

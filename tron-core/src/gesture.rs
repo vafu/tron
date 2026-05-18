@@ -6,23 +6,30 @@ use tron_api::{
     Size,
 };
 
+use crate::process::landmark_velocity::{HandLandmarkMotion, HandLandmarkVelocity};
 use crate::roi::mediapipe::HandLandmarks;
 
 const THUMB_TIP: usize = 4;
+const WRIST: usize = 0;
+const INDEX_MCP: usize = 5;
 const INDEX_TIP: usize = 8;
 const MIDDLE_MCP: usize = 9;
 const MIDDLE_PIP: usize = 10;
 const MIDDLE_TIP: usize = 12;
+const RING_MCP: usize = 13;
 const RING_PIP: usize = 14;
 const RING_TIP: usize = 16;
+const PINKY_MCP: usize = 17;
 const PINKY_PIP: usize = 18;
 const PINKY_TIP: usize = 20;
 const PINCH_DISTANCE_OF_PALM: f64 = 0.1;
 const CLUTCH_FOLDED_STRENGTH: f64 = 0.1;
+const PALM_MOTION_LANDMARKS: [usize; 5] = [WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP];
 
 #[derive(Clone, Copy, Debug)]
 pub struct GesturePreprocessorInput<'a> {
     pub landmarks: Option<&'a HandLandmarks>,
+    pub motion: Option<&'a HandLandmarkMotion>,
     pub palm_roi: Option<RoiResult>,
     pub frame_size: Size,
     pub timestamp: Instant,
@@ -41,7 +48,7 @@ impl Processor<GesturePreprocessorInput<'_>, NoContext> for GesturePreprocessor 
     ) -> Result<Self::Output> {
         let palm = input.palm_roi.map(|roi| palm_pose(roi, input.frame_size));
         let classification = match input.landmarks {
-            Some(landmarks) => classify_gesture(landmarks, palm, input.frame_size),
+            Some(landmarks) => classify_gesture(landmarks, input.motion, palm, input.frame_size),
             None => GestureClassification::no_hand(),
         };
         let output = GestureFrame {
@@ -107,6 +114,7 @@ impl GestureClassification {
 
 fn classify_gesture(
     landmarks: &HandLandmarks,
+    motion: Option<&HandLandmarkMotion>,
     palm: Option<PalmPose2d>,
     frame_size: Size,
 ) -> GestureClassification {
@@ -128,6 +136,7 @@ fn classify_gesture(
             gesture: HandGesture::Clutch,
             strength,
             position,
+            velocity: palm_velocity(motion, frame_size),
         });
     }
     let palm_extent = palm
@@ -142,6 +151,7 @@ fn classify_gesture(
             gesture: HandGesture::Pinch,
             strength,
             position: (thumb + index) * 0.5,
+            velocity: None,
         });
     }
     let gesture = if signals
@@ -165,7 +175,7 @@ fn clutch(
     palm: Option<PalmPose2d>,
     frame_size: Size,
 ) -> Option<(f32, Point2d)> {
-    let wrist = landmark_point(landmarks, 0, frame_size)?;
+    let wrist = landmark_point(landmarks, WRIST, frame_size)?;
     let middle_mcp = landmark_point(landmarks, MIDDLE_MCP, frame_size)?;
     let palm_axis = middle_mcp - wrist;
     let palm_axis_len = palm_axis.length();
@@ -199,6 +209,28 @@ fn clutch(
 
 fn middle_palm_point(wrist: Point2d, middle_mcp: Point2d) -> Option<Point2d> {
     (wrist.is_finite() && middle_mcp.is_finite()).then_some((wrist + middle_mcp) * 0.5)
+}
+
+fn palm_velocity(motion: Option<&HandLandmarkMotion>, frame_size: Size) -> Option<Point2d> {
+    let motion = motion?;
+    let mut sum = Point2d::ZERO;
+    let mut count = 0.0;
+    for index in PALM_MOTION_LANDMARKS {
+        if let Some(velocity) = normalized_velocity(motion.velocities[index], frame_size) {
+            sum += velocity;
+            count += 1.0;
+        }
+    }
+    (count > 0.0).then_some(sum / count)
+}
+
+fn normalized_velocity(velocity: HandLandmarkVelocity, frame_size: Size) -> Option<Point2d> {
+    (velocity.x.is_finite() && velocity.y.is_finite()).then(|| {
+        Point2d::new(
+            velocity.x / frame_size.width.max(1) as f64,
+            velocity.y / frame_size.height.max(1) as f64,
+        )
+    })
 }
 
 fn folded_strength(
@@ -293,6 +325,7 @@ mod tests {
             .process(
                 GesturePreprocessorInput {
                     landmarks: Some(&landmarks((100.0, 100.0), (105.0, 100.0))),
+                    motion: None,
                     palm_roi: Some(RoiResult {
                         rect: Rect {
                             x: 80,
@@ -335,6 +368,7 @@ mod tests {
 
         let classification = classify_gesture(
             &landmarks,
+            None,
             Some(PalmPose2d {
                 center: Point2d::new(0.5, 0.55),
                 rotation_radians: 0.0,
@@ -370,6 +404,7 @@ mod tests {
 
         let classification = classify_gesture(
             &landmarks,
+            None,
             Some(PalmPose2d {
                 center: Point2d::new(0.5, 0.55),
                 rotation_radians: 0.0,

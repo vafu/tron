@@ -124,7 +124,7 @@ where
             NoContext,
         )?;
 
-        // let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
+        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
         let landmark_motion = self
             .landmark_velocity
             .process(landmarks.clone(), NoContext)?;
@@ -140,6 +140,7 @@ where
         let gesture = self.gesture.process(
             GesturePreprocessorInput {
                 landmarks: landmarks.as_ref(),
+                motion: landmark_motion.as_ref(),
                 palm_roi: processing_roi,
                 frame_size: rgb.meta.size,
                 timestamp: rgb.meta.timestamp.received_at,

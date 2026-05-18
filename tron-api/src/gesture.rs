@@ -36,6 +36,8 @@ pub struct GestureSignal {
     pub strength: f32,
     /// Normalized frame-space position, where x/y are expected to be in 0..=1.
     pub position: Point2d,
+    /// Normalized frame-space velocity in units per second.
+    pub velocity: Option<Point2d>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]

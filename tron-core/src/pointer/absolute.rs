@@ -135,6 +135,7 @@ mod tests {
             gesture,
             strength,
             position,
+            velocity: None,
         }
     }
 

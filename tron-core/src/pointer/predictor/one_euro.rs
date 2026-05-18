@@ -26,16 +26,16 @@ impl Default for OneEuroVelocityPointerPredictorConfig {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct OneEuroVelocityPointerPredictor {
-    config: OneEuroVelocityPointerPredictorConfig,
+pub(super) struct OneEuroVelocityEstimator {
+    config: OneEuroConfig,
     velocity_filter: OneEuroPoint2d,
     latest_position: Option<Point2d>,
     latest_timestamp: Option<Instant>,
     filtered_velocity: Option<Point2d>,
 }
 
-impl OneEuroVelocityPointerPredictor {
-    pub fn new(config: OneEuroVelocityPointerPredictorConfig) -> Self {
+impl OneEuroVelocityEstimator {
+    pub(super) fn new(config: OneEuroConfig) -> Self {
         Self {
             config,
             velocity_filter: OneEuroPoint2d::default(),
@@ -45,7 +45,7 @@ impl OneEuroVelocityPointerPredictor {
         }
     }
 
-    fn ingest_latest(&mut self, input: PointerPredictionInput<'_>) -> Option<Point2d> {
+    pub(super) fn estimate(&mut self, input: PointerPredictionInput<'_>) -> Option<Point2d> {
         let latest = input.history.last()?;
         if self.latest_timestamp == Some(latest.timestamp) {
             return self.filtered_velocity;
@@ -74,13 +74,31 @@ impl OneEuroVelocityPointerPredictor {
             .map(|duration| duration.as_secs_f64())
             .filter(|dt| *dt > 0.0 && dt.is_finite())
             .unwrap_or(0.0);
-        self.filtered_velocity = Some(self.velocity_filter.filter(
-            raw_velocity,
-            dt,
-            self.config.one_euro,
-        ))
-        .filter(|velocity| velocity.is_finite());
+        self.filtered_velocity = Some(self.velocity_filter.filter(raw_velocity, dt, self.config))
+            .filter(|velocity| velocity.is_finite());
         self.filtered_velocity
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.velocity_filter.reset();
+        self.latest_position = None;
+        self.latest_timestamp = None;
+        self.filtered_velocity = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OneEuroVelocityPointerPredictor {
+    config: OneEuroVelocityPointerPredictorConfig,
+    velocity: OneEuroVelocityEstimator,
+}
+
+impl OneEuroVelocityPointerPredictor {
+    pub fn new(config: OneEuroVelocityPointerPredictorConfig) -> Self {
+        Self {
+            config,
+            velocity: OneEuroVelocityEstimator::new(config.one_euro),
+        }
     }
 }
 
@@ -98,7 +116,7 @@ impl PointerPredictor for OneEuroVelocityPointerPredictor {
             return Some(latest.position);
         }
 
-        let velocity = self.ingest_latest(input)?;
+        let velocity = self.velocity.estimate(input)?;
         let decay_time = self.config.decay.decay_time.as_secs_f64();
         if decay_time <= 0.0 || !decay_time.is_finite() {
             return Some(latest.position);
@@ -109,10 +127,7 @@ impl PointerPredictor for OneEuroVelocityPointerPredictor {
     }
 
     fn reset(&mut self) {
-        self.velocity_filter.reset();
-        self.latest_position = None;
-        self.latest_timestamp = None;
-        self.filtered_velocity = None;
+        self.velocity.reset();
     }
 }
 

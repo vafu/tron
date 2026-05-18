@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{Sink, Size};
 use wgpu::util::DeviceExt;
 
@@ -13,7 +14,7 @@ pub struct ThickLine {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct ThickLineVertex {
-    position: [f32; 2],
+    position: Vec2,
     color: [f32; 4],
 }
 
@@ -82,7 +83,7 @@ impl ThickLineOverlayRenderer {
             label: Some(&format!("{label}-vertices")),
             contents: bytemuck::cast_slice(
                 &[ThickLineVertex {
-                    position: [0.0, 0.0],
+                    position: Vec2::ZERO,
                     color: [0.0, 0.0, 0.0, 0.0],
                 }; 6],
             ),
@@ -133,22 +134,20 @@ impl<'frame, 'pass> Sink<ThickLineOverlayView<'frame, 'pass>> for ThickLineOverl
 }
 
 fn append_line_quad(vertices: &mut Vec<ThickLineVertex>, line: ThickLine, target_size: Size) {
-    let start = ndc_to_pixel(line.start, target_size);
-    let end = ndc_to_pixel(line.end, target_size);
-    let dx = end[0] - start[0];
-    let dy = end[1] - start[1];
-    let len = (dx * dx + dy * dy).sqrt();
+    let start = ndc_to_pixel(Vec2::from_array(line.start), target_size);
+    let end = ndc_to_pixel(Vec2::from_array(line.end), target_size);
+    let delta = end - start;
+    let len = delta.length();
     if len <= f32::EPSILON {
         return;
     }
 
     let half = line.width_px.max(1.0) * 0.5;
-    let nx = -dy / len * half;
-    let ny = dx / len * half;
-    let p0 = pixel_to_ndc([start[0] + nx, start[1] + ny], target_size);
-    let p1 = pixel_to_ndc([end[0] + nx, end[1] + ny], target_size);
-    let p2 = pixel_to_ndc([end[0] - nx, end[1] - ny], target_size);
-    let p3 = pixel_to_ndc([start[0] - nx, start[1] - ny], target_size);
+    let normal = Vec2::new(-delta.y, delta.x) * (half / len);
+    let p0 = pixel_to_ndc(start + normal, target_size);
+    let p1 = pixel_to_ndc(end + normal, target_size);
+    let p2 = pixel_to_ndc(end - normal, target_size);
+    let p3 = pixel_to_ndc(start - normal, target_size);
 
     vertices.extend_from_slice(&[
         vertex(p0, line.color),
@@ -160,22 +159,22 @@ fn append_line_quad(vertices: &mut Vec<ThickLineVertex>, line: ThickLine, target
     ]);
 }
 
-fn vertex(position: [f32; 2], color: [f32; 4]) -> ThickLineVertex {
+fn vertex(position: Vec2, color: [f32; 4]) -> ThickLineVertex {
     ThickLineVertex { position, color }
 }
 
-fn ndc_to_pixel(position: [f32; 2], target_size: Size) -> [f32; 2] {
-    [
-        (position[0] + 1.0) * 0.5 * target_size.width as f32,
-        (1.0 - position[1]) * 0.5 * target_size.height as f32,
-    ]
+fn ndc_to_pixel(position: Vec2, target_size: Size) -> Vec2 {
+    Vec2::new(
+        (position.x + 1.0) * 0.5 * target_size.width as f32,
+        (1.0 - position.y) * 0.5 * target_size.height as f32,
+    )
 }
 
-fn pixel_to_ndc(position: [f32; 2], target_size: Size) -> [f32; 2] {
-    [
-        position[0] / target_size.width as f32 * 2.0 - 1.0,
-        1.0 - position[1] / target_size.height as f32 * 2.0,
-    ]
+fn pixel_to_ndc(position: Vec2, target_size: Size) -> Vec2 {
+    Vec2::new(
+        position.x / target_size.width as f32 * 2.0 - 1.0,
+        1.0 - position.y / target_size.height as f32 * 2.0,
+    )
 }
 
 const SHADER: &str = r#"

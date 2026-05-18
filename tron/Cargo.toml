@@ -9,6 +9,7 @@ async-trait.workspace = true
 bytemuck.workspace = true
 clap.workspace = true
 evdev.workspace = true
+glam.workspace = true
 pollster.workspace = true
 rustix.workspace = true
 serde.workspace = true

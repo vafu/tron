@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{Frame, PixelFormat, Sink, Size};
 use wgpu::util::DeviceExt;
 
@@ -38,8 +39,8 @@ impl NdcRect {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    position: [f32; 2],
-    uv: [f32; 2],
+    position: Vec2,
+    uv: Vec2,
 }
 
 const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -345,11 +346,11 @@ impl WgpuFrameRenderer {
     }
 }
 
-pub fn project_frame_point(point: [f32; 2], frame: Size, rect: NdcRect, target: Size) -> [f32; 2] {
+pub fn project_frame_point(point: Vec2, frame: Size, rect: NdcRect, target: Size) -> Vec2 {
     let [x0, y0, x1, y1] = letterbox(frame, rect, target);
-    let fx = point[0] / frame.width.max(1) as f32;
-    let fy = point[1] / frame.height.max(1) as f32;
-    [lerp(x0, x1, fx), lerp(y1, y0, fy)]
+    let fx = point.x / frame.width.max(1) as f32;
+    let fy = point.y / frame.height.max(1) as f32;
+    Vec2::new(lerp(x0, x1, fx), lerp(y1, y0, fy))
 }
 
 pub fn letterbox(frame: Size, rect: NdcRect, target: Size) -> [f32; 4] {
@@ -385,28 +386,28 @@ fn quad(x0: f32, y0: f32, x1: f32, y1: f32, flip_x: bool, flip_y: bool) -> [Vert
     let [v0, v1] = if flip_y { [1.0, 0.0] } else { [0.0, 1.0] };
     [
         Vertex {
-            position: [x0, y1],
-            uv: [u0, v0],
+            position: Vec2::new(x0, y1),
+            uv: Vec2::new(u0, v0),
         },
         Vertex {
-            position: [x0, y0],
-            uv: [u0, v1],
+            position: Vec2::new(x0, y0),
+            uv: Vec2::new(u0, v1),
         },
         Vertex {
-            position: [x1, y0],
-            uv: [u1, v1],
+            position: Vec2::new(x1, y0),
+            uv: Vec2::new(u1, v1),
         },
         Vertex {
-            position: [x0, y1],
-            uv: [u0, v0],
+            position: Vec2::new(x0, y1),
+            uv: Vec2::new(u0, v0),
         },
         Vertex {
-            position: [x1, y0],
-            uv: [u1, v1],
+            position: Vec2::new(x1, y0),
+            uv: Vec2::new(u1, v1),
         },
         Vertex {
-            position: [x1, y1],
-            uv: [u1, v0],
+            position: Vec2::new(x1, y1),
+            uv: Vec2::new(u1, v0),
         },
     ]
 }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{Sink, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
@@ -117,11 +118,21 @@ fn push_segment(
         return;
     }
     vertices.push(LineVertex {
-        position: project_frame_point([a.x as f32, a.y as f32], frame_size, rect, target_size),
+        position: project_frame_point(
+            Vec2::new(a.x as f32, a.y as f32),
+            frame_size,
+            rect,
+            target_size,
+        ),
         color,
     });
     vertices.push(LineVertex {
-        position: project_frame_point([b.x as f32, b.y as f32], frame_size, rect, target_size),
+        position: project_frame_point(
+            Vec2::new(b.x as f32, b.y as f32),
+            frame_size,
+            rect,
+            target_size,
+        ),
         color,
     });
 }

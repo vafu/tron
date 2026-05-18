@@ -1,11 +1,12 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::Sink;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LineVertex {
-    pub position: [f32; 2],
+    pub position: Vec2,
     pub color: [f32; 4],
 }
 
@@ -72,7 +73,7 @@ impl LineOverlayRenderer {
             label: Some(&format!("{label}-vertices")),
             contents: bytemuck::cast_slice(
                 &[LineVertex {
-                    position: [0.0, 0.0],
+                    position: Vec2::ZERO,
                     color: [0.0, 0.0, 0.0, 0.0],
                 }; 2],
             ),

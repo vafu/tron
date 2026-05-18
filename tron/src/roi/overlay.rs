@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{Rect, Sink, Size};
 use tron_core::render::wgpu::NdcRect;
 use wgpu::util::DeviceExt;
@@ -6,7 +7,7 @@ use wgpu::util::DeviceExt;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    position: [f32; 2],
+    position: Vec2,
     color: [f32; 4],
 }
 
@@ -73,7 +74,7 @@ impl RoiOverlayRenderer {
             label: Some("tron-roi-overlay-vertices"),
             contents: bytemuck::cast_slice(
                 &[Vertex {
-                    position: [0.0, 0.0],
+                    position: Vec2::ZERO,
                     color: [0.0, 0.0, 0.0, 0.0],
                 }; 8],
             ),
@@ -112,35 +113,35 @@ fn roi_vertices(roi: Rect, frame_size: Size, rect: NdcRect, target_size: Size) -
     let color = [0.1, 0.9, 1.0, 1.0];
     [
         Vertex {
-            position: [left, top],
+            position: Vec2::new(left, top),
             color,
         },
         Vertex {
-            position: [right, top],
+            position: Vec2::new(right, top),
             color,
         },
         Vertex {
-            position: [right, top],
+            position: Vec2::new(right, top),
             color,
         },
         Vertex {
-            position: [right, bottom],
+            position: Vec2::new(right, bottom),
             color,
         },
         Vertex {
-            position: [right, bottom],
+            position: Vec2::new(right, bottom),
             color,
         },
         Vertex {
-            position: [left, bottom],
+            position: Vec2::new(left, bottom),
             color,
         },
         Vertex {
-            position: [left, bottom],
+            position: Vec2::new(left, bottom),
             color,
         },
         Vertex {
-            position: [left, top],
+            position: Vec2::new(left, top),
             color,
         },
     ]

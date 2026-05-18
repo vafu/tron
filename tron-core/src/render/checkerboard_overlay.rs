@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{CheckerboardDetection, Sink, Size};
 
 use crate::render::line_overlay::{LineOverlayRenderer, LineOverlayView, LineVertex};
@@ -117,10 +118,10 @@ fn project_corner(
     rect: NdcRect,
     target_size: Size,
     index: usize,
-) -> [f32; 2] {
+) -> Vec2 {
     let corner = detection.corners[index];
     project_frame_point(
-        [corner.x as f32, corner.y as f32],
+        Vec2::new(corner.x as f32, corner.y as f32),
         detection.frame_size,
         rect,
         target_size,

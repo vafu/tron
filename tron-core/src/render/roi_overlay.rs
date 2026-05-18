@@ -27,7 +27,7 @@ impl RoiOverlayRenderer {
         Self {
             lines: LineOverlayRenderer::new(device, surface_format, "tron-roi-overlay"),
             vertices: [LineVertex {
-                position: [0.0, 0.0],
+                position: Vec2::ZERO,
                 color: [0.0, 0.0, 0.0, 0.0],
             }; 8],
         }
@@ -65,7 +65,7 @@ fn roi_vertices(
 ) -> [LineVertex; 8] {
     let [c0, c1, c2, c3] = roi
         .corners
-        .map(|corner| project_frame_point(corner.to_array(), frame_size, rect, target_size));
+        .map(|corner| project_frame_point(corner, frame_size, rect, target_size));
     [
         LineVertex {
             position: c0,

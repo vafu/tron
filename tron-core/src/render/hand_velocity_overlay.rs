@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use tron_api::{Sink, Size};
 
 use crate::process::landmark_velocity::{HandLandmarkMotion, HandLandmarkVelocity};
@@ -90,26 +91,14 @@ fn push_velocity(
     {
         return;
     }
-    let end = [
-        point.x + velocity.x * VECTOR_SECONDS,
-        point.y + velocity.y * VECTOR_SECONDS,
-    ];
+    let start = point.truncate().as_vec2();
+    let end = start + Vec2::new(velocity.x as f32, velocity.y as f32) * VECTOR_SECONDS as f32;
     vertices.push(LineVertex {
-        position: project_frame_point(
-            [point.x as f32, point.y as f32],
-            frame_size,
-            rect,
-            target_size,
-        ),
+        position: project_frame_point(start, frame_size, rect, target_size),
         color: VECTOR_COLOR,
     });
     vertices.push(LineVertex {
-        position: project_frame_point(
-            [end[0] as f32, end[1] as f32],
-            frame_size,
-            rect,
-            target_size,
-        ),
+        position: project_frame_point(end, frame_size, rect, target_size),
         color: VECTOR_COLOR,
     });
 }

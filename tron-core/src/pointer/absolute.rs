@@ -76,10 +76,11 @@ impl AbsolutePointerState {
             delta,
         }];
 
-        let pinch_strength = match input.gesture.gesture {
-            HandGesture::Pinch { strength, .. } => strength,
-            _ => 0.0,
-        };
+        let pinch_strength = input
+            .gesture
+            .signal(HandGesture::Pinch)
+            .map(|signal| signal.strength)
+            .unwrap_or(0.0);
         if !self.primary_down && pinch_strength >= config.pinch_down_strength {
             self.primary_down = true;
             events.push(PointerEvent::Down { timestamp });
@@ -110,11 +111,11 @@ impl AbsolutePointerState {
 mod tests {
     use std::time::Instant;
 
-    use tron_api::{GestureFrame, PalmPose2d};
+    use tron_api::{GestureFrame, GestureSignal, PalmPose2d};
 
     use super::*;
 
-    fn input(position: Point2d, gesture: HandGesture) -> PointerInput {
+    fn input(position: Point2d, gesture: HandGesture, signals: Vec<GestureSignal>) -> PointerInput {
         PointerInput {
             gesture: GestureFrame {
                 timestamp: Instant::now(),
@@ -123,8 +124,17 @@ mod tests {
                     rotation_radians: 0.0,
                     extent: Point2d::splat(0.1),
                 }),
+                signals,
                 gesture,
             },
+        }
+    }
+
+    fn signal(gesture: HandGesture, strength: f32, position: Point2d) -> GestureSignal {
+        GestureSignal {
+            gesture,
+            strength,
+            position,
         }
     }
 
@@ -132,7 +142,7 @@ mod tests {
     fn absolute_pointer_emits_move_delta_and_down() {
         let mut state = AbsolutePointerState::default();
         let events = state.update(
-            input(Point2d::new(0.25, 0.5), HandGesture::OpenPalm),
+            input(Point2d::new(0.25, 0.5), HandGesture::OpenPalm, vec![]),
             AbsolutePointerProducer::default(),
         );
         assert!(matches!(events[0], PointerEvent::Move { .. }));
@@ -140,10 +150,8 @@ mod tests {
         let events = state.update(
             input(
                 Point2d::new(0.30, 0.5),
-                HandGesture::Pinch {
-                    strength: 0.8,
-                    position: Point2d::new(0.30, 0.5),
-                },
+                HandGesture::Pinch,
+                vec![signal(HandGesture::Pinch, 0.8, Point2d::new(0.30, 0.5))],
             ),
             AbsolutePointerProducer::default(),
         );

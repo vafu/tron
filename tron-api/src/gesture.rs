@@ -7,7 +7,17 @@ pub struct GestureFrame {
     #[serde(skip)]
     pub timestamp: Instant,
     pub palm: Option<PalmPose2d>,
+    pub signals: Vec<GestureSignal>,
     pub gesture: HandGesture,
+}
+
+impl GestureFrame {
+    pub fn signal(&self, gesture: HandGesture) -> Option<GestureSignal> {
+        self.signals
+            .iter()
+            .copied()
+            .find(|signal| signal.gesture == gesture)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
@@ -21,12 +31,20 @@ pub struct PalmPose2d {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+pub struct GestureSignal {
+    pub gesture: HandGesture,
+    pub strength: f32,
+    /// Normalized frame-space position, where x/y are expected to be in 0..=1.
+    pub position: Point2d,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandGesture {
     NoHand,
     OpenPalm,
-    Clutch { strength: f32, position: Point2d },
-    Pinch { strength: f32, position: Point2d },
+    Clutch,
+    Pinch,
     Pointing,
     Unknown,
 }

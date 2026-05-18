@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use tron_api::{
-    GestureFrame, HandGesture, NoContext, PalmPose2d, Point2d, Processor, RoiResult, Size,
+    GestureFrame, GestureSignal, HandGesture, NoContext, PalmPose2d, Point2d, Processor, RoiResult,
+    Size,
 };
 
 use crate::roi::mediapipe::HandLandmarks;
@@ -39,14 +40,15 @@ impl Processor<GesturePreprocessorInput<'_>, NoContext> for GesturePreprocessor 
         _context: NoContext,
     ) -> Result<Self::Output> {
         let palm = input.palm_roi.map(|roi| palm_pose(roi, input.frame_size));
-        let gesture = match input.landmarks {
+        let classification = match input.landmarks {
             Some(landmarks) => classify_gesture(landmarks, palm, input.frame_size),
-            None => HandGesture::NoHand,
+            None => GestureClassification::no_hand(),
         };
         let output = GestureFrame {
             timestamp: input.timestamp,
             palm,
-            gesture,
+            signals: classification.signals,
+            gesture: classification.gesture,
         };
         trace_gesture_output(&output);
         Ok(output)
@@ -56,37 +58,22 @@ impl Processor<GesturePreprocessorInput<'_>, NoContext> for GesturePreprocessor 
 fn trace_gesture_output(output: &GestureFrame) {
     let palm_center = output.palm.map(|palm| palm.center);
     let palm_extent = output.palm.map(|palm| palm.extent);
+    for signal in &output.signals {
+        tracing::debug!(
+            target: "tron_core::gesture",
+            gesture = ?signal.gesture,
+            gesture_strength = signal.strength,
+            gesture_x = signal.position.x,
+            gesture_y = signal.position.y,
+            palm_center_x = palm_center.map(|point| point.x),
+            palm_center_y = palm_center.map(|point| point.y),
+            palm_extent_x = palm_extent.map(|point| point.x),
+            palm_extent_y = palm_extent.map(|point| point.y),
+            ?output.timestamp,
+            "gesture preprocessor output"
+        );
+    }
     match output.gesture {
-        HandGesture::Pinch { strength, position } => {
-            tracing::debug!(
-                target: "tron_core::gesture",
-                gesture = "pinch",
-                pinch_strength = strength,
-                pinch_x = position.x,
-                pinch_y = position.y,
-                palm_center_x = palm_center.map(|point| point.x),
-                palm_center_y = palm_center.map(|point| point.y),
-                palm_extent_x = palm_extent.map(|point| point.x),
-                palm_extent_y = palm_extent.map(|point| point.y),
-                ?output.timestamp,
-                "gesture preprocessor output"
-            );
-        }
-        HandGesture::Clutch { strength, position } => {
-            tracing::debug!(
-                target: "tron_core::gesture",
-                gesture = "clutch",
-                clutch_strength = strength,
-                clutch_x = position.x,
-                clutch_y = position.y,
-                palm_center_x = palm_center.map(|point| point.x),
-                palm_center_y = palm_center.map(|point| point.y),
-                palm_extent_x = palm_extent.map(|point| point.x),
-                palm_extent_y = palm_extent.map(|point| point.y),
-                ?output.timestamp,
-                "gesture preprocessor output"
-            );
-        }
         HandGesture::Pointing => {
             tracing::debug!(
                 target: "tron_core::gesture",
@@ -103,19 +90,45 @@ fn trace_gesture_output(output: &GestureFrame) {
     }
 }
 
+#[derive(Clone, Debug)]
+struct GestureClassification {
+    signals: Vec<GestureSignal>,
+    gesture: HandGesture,
+}
+
+impl GestureClassification {
+    fn no_hand() -> Self {
+        Self {
+            signals: Vec::new(),
+            gesture: HandGesture::NoHand,
+        }
+    }
+}
+
 fn classify_gesture(
     landmarks: &HandLandmarks,
     palm: Option<PalmPose2d>,
     frame_size: Size,
-) -> HandGesture {
+) -> GestureClassification {
     let Some(thumb) = landmark_point(landmarks, THUMB_TIP, frame_size) else {
-        return HandGesture::Unknown;
+        return GestureClassification {
+            signals: Vec::new(),
+            gesture: HandGesture::Unknown,
+        };
     };
     let Some(index) = landmark_point(landmarks, INDEX_TIP, frame_size) else {
-        return HandGesture::Unknown;
+        return GestureClassification {
+            signals: Vec::new(),
+            gesture: HandGesture::Unknown,
+        };
     };
+    let mut signals = Vec::new();
     if let Some((strength, position)) = clutch(landmarks, palm, frame_size) {
-        return HandGesture::Clutch { strength, position };
+        signals.push(GestureSignal {
+            gesture: HandGesture::Clutch,
+            strength,
+            position,
+        });
     }
     let palm_extent = palm
         .map(|palm| palm.extent.x.max(palm.extent.y))
@@ -125,12 +138,26 @@ fn classify_gesture(
     let normalized_distance = distance / palm_extent;
     if normalized_distance <= PINCH_DISTANCE_OF_PALM {
         let strength = (1.0 - normalized_distance / PINCH_DISTANCE_OF_PALM).clamp(0.0, 1.0) as f32;
-        return HandGesture::Pinch {
+        signals.push(GestureSignal {
+            gesture: HandGesture::Pinch,
             strength,
             position: (thumb + index) * 0.5,
-        };
+        });
     }
-    HandGesture::OpenPalm
+    let gesture = if signals
+        .iter()
+        .any(|signal| signal.gesture == HandGesture::Pinch)
+    {
+        HandGesture::Pinch
+    } else if signals
+        .iter()
+        .any(|signal| signal.gesture == HandGesture::Clutch)
+    {
+        HandGesture::Clutch
+    } else {
+        HandGesture::OpenPalm
+    };
+    GestureClassification { signals, gesture }
 }
 
 fn clutch(
@@ -163,10 +190,15 @@ fn clutch(
         return None;
     }
 
-    let position = landmark_point(landmarks, INDEX_TIP, frame_size)
-        .or(palm.map(|palm| palm.center))
-        .unwrap_or(wrist + palm_axis * palm_extent);
+    let position = middle_palm_point(wrist, middle_mcp).unwrap_or_else(|| {
+        palm.map(|palm| palm.center)
+            .unwrap_or(wrist + palm_axis * palm_extent)
+    });
     Some((strength as f32, position.clamp(Point2d::ZERO, Point2d::ONE)))
+}
+
+fn middle_palm_point(wrist: Point2d, middle_mcp: Point2d) -> Option<Point2d> {
+    (wrist.is_finite() && middle_mcp.is_finite()).then_some((wrist + middle_mcp) * 0.5)
 }
 
 fn folded_strength(
@@ -281,9 +313,10 @@ mod tests {
                 NoContext,
             )
             .unwrap();
-        let HandGesture::Pinch { position, .. } = output.gesture else {
-            panic!("expected pinch");
+        let Some(signal) = output.signal(HandGesture::Pinch) else {
+            panic!("expected pinch signal");
         };
+        let position = signal.position;
         assert!(position.x > 0.15);
         assert!(position.x < 0.17);
     }
@@ -300,7 +333,7 @@ mod tests {
         set_landmark(&mut landmarks, PINKY_PIP, 620.0, 430.0);
         set_landmark(&mut landmarks, PINKY_TIP, 570.0, 650.0);
 
-        let gesture = classify_gesture(
+        let classification = classify_gesture(
             &landmarks,
             Some(PalmPose2d {
                 center: Point2d::new(0.5, 0.55),
@@ -313,9 +346,53 @@ mod tests {
             },
         );
 
-        let HandGesture::Clutch { position, .. } = gesture else {
-            panic!("expected clutch");
+        let Some(signal) = classification
+            .signals
+            .iter()
+            .find(|signal| signal.gesture == HandGesture::Clutch)
+        else {
+            panic!("expected clutch signal");
         };
-        assert_eq!(position, Point2d::new(0.45, 0.26));
+        assert_eq!(signal.position, Point2d::new(0.5, 0.6));
+    }
+
+    #[test]
+    fn pinch_and_clutch_can_coexist() {
+        let mut landmarks = landmarks((500.0, 600.0), (505.0, 600.0));
+        set_landmark(&mut landmarks, 0, 500.0, 700.0);
+        set_landmark(&mut landmarks, MIDDLE_MCP, 500.0, 500.0);
+        set_landmark(&mut landmarks, MIDDLE_PIP, 500.0, 360.0);
+        set_landmark(&mut landmarks, MIDDLE_TIP, 500.0, 650.0);
+        set_landmark(&mut landmarks, RING_PIP, 560.0, 390.0);
+        set_landmark(&mut landmarks, RING_TIP, 540.0, 650.0);
+        set_landmark(&mut landmarks, PINKY_PIP, 620.0, 430.0);
+        set_landmark(&mut landmarks, PINKY_TIP, 570.0, 650.0);
+
+        let classification = classify_gesture(
+            &landmarks,
+            Some(PalmPose2d {
+                center: Point2d::new(0.5, 0.55),
+                rotation_radians: 0.0,
+                extent: Point2d::splat(0.2),
+            }),
+            Size {
+                width: 1000,
+                height: 1000,
+            },
+        );
+
+        assert!(
+            classification
+                .signals
+                .iter()
+                .any(|signal| signal.gesture == HandGesture::Pinch)
+        );
+        assert!(
+            classification
+                .signals
+                .iter()
+                .any(|signal| signal.gesture == HandGesture::Clutch)
+        );
+        assert_eq!(classification.gesture, HandGesture::Pinch);
     }
 }

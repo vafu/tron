@@ -35,7 +35,7 @@ impl<'view> Sink<&'view ControllerFrame<'view>> for FrameImageCaptureSink {
             return Ok(());
         }
 
-        let pinch = matches!(frame.gesture.gesture, HandGesture::Pinch { .. });
+        let pinch = frame.gesture.signal(HandGesture::Pinch).is_some();
         let should_capture = self
             .last_pinch_state
             .is_some_and(|previous| previous != pinch);

@@ -88,12 +88,12 @@ impl JoystickPointerState {
 
         self.tracking = true;
 
-        let pinch = match input.gesture.gesture {
-            HandGesture::Pinch { strength, position } => {
-                Some((strength, position.clamp(Point2d::ZERO, Point2d::ONE)))
-            }
-            _ => None,
-        };
+        let pinch = input.gesture.signal(HandGesture::Pinch).map(|signal| {
+            (
+                signal.strength,
+                signal.position.clamp(Point2d::ZERO, Point2d::ONE),
+            )
+        });
         if let Some((_, position)) = pinch {
             self.current_position = Some(position);
         }
@@ -185,11 +185,11 @@ impl JoystickPointerState {
 mod tests {
     use std::time::Instant;
 
-    use tron_api::{GestureFrame, PalmPose2d};
+    use tron_api::{GestureFrame, GestureSignal, PalmPose2d};
 
     use super::*;
 
-    fn input(position: Point2d, gesture: HandGesture) -> PointerInput {
+    fn input(position: Point2d, gesture: HandGesture, signals: Vec<GestureSignal>) -> PointerInput {
         PointerInput {
             gesture: GestureFrame {
                 timestamp: Instant::now(),
@@ -198,8 +198,17 @@ mod tests {
                     rotation_radians: 0.0,
                     extent: Point2d::splat(0.1),
                 }),
+                signals,
                 gesture,
             },
+        }
+    }
+
+    fn signal(gesture: HandGesture, strength: f32, position: Point2d) -> GestureSignal {
+        GestureSignal {
+            gesture,
+            strength,
+            position,
         }
     }
 
@@ -211,10 +220,8 @@ mod tests {
         let events = state.update_input(
             input(
                 Point2d::new(0.5, 0.5),
-                HandGesture::Pinch {
-                    strength: 0.8,
-                    position: Point2d::new(0.52, 0.48),
-                },
+                HandGesture::Pinch,
+                vec![signal(HandGesture::Pinch, 0.8, Point2d::new(0.52, 0.48))],
             ),
             config,
         );
@@ -237,10 +244,8 @@ mod tests {
         let events = state.update_input(
             input(
                 Point2d::new(0.65, 0.5),
-                HandGesture::Pinch {
-                    strength: 0.8,
-                    position: Point2d::new(0.70, 0.48),
-                },
+                HandGesture::Pinch,
+                vec![signal(HandGesture::Pinch, 0.8, Point2d::new(0.70, 0.48))],
             ),
             config,
         );
@@ -276,16 +281,16 @@ mod tests {
         state.update_input(
             input(
                 Point2d::new(0.5, 0.5),
-                HandGesture::Pinch {
-                    strength: 0.8,
-                    position: Point2d::new(0.5, 0.5),
-                },
+                HandGesture::Pinch,
+                vec![signal(HandGesture::Pinch, 0.8, Point2d::new(0.5, 0.5))],
             ),
             config,
         );
 
-        let events =
-            state.update_input(input(Point2d::new(0.5, 0.5), HandGesture::OpenPalm), config);
+        let events = state.update_input(
+            input(Point2d::new(0.5, 0.5), HandGesture::OpenPalm, vec![]),
+            config,
+        );
         assert_eq!(events.len(), 2);
         assert!(matches!(
             events[0],

@@ -93,7 +93,7 @@ pub use frame::{
     CaptureFormat, Frame, FrameId, FrameMeta, FrameMut, FrameSource, FrameTimestamp,
     IterableFrameSource, OwnedFrame, PixelFormat, SensorKind, TimestampSource,
 };
-pub use gesture::{GestureFrame, HandGesture, PalmPose2d};
+pub use gesture::{GestureFrame, GestureSignal, HandGesture, PalmPose2d};
 pub use pointer::{
     PointerCancelReason, PointerEvent, PointerInput, PointerJoystickVisualization, PointerOutput,
     PointerSink, PointerVisualization,

@@ -147,7 +147,7 @@ where
             NoContext,
         )?;
         if landmarks.is_some() {
-            let pinch = matches!(gesture.gesture, HandGesture::Pinch { .. });
+            let pinch = gesture.signal(HandGesture::Pinch).is_some();
             let should_dump = self
                 .last_pinch_state
                 .is_some_and(|previous| previous != pinch);

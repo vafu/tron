@@ -124,7 +124,7 @@ where
             NoContext,
         )?;
 
-        let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
+        // let landmarks = self.landmark_filter.process(landmarks, NoContext)?;
         let landmark_motion = self
             .landmark_velocity
             .process(landmarks.clone(), NoContext)?;

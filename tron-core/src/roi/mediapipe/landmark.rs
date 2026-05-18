@@ -3,12 +3,13 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use glam::{Affine2, Vec2};
-use ort::session::Session;
-use ort::value::{TensorRef, ValueType};
+use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
+use ort::value::TensorRef;
 use tron_api::{Frame, NoContext, PixelFormat, Processor, Rect, RoiResult, Size};
 
 use super::{
-    ModelInputLayout, crop_inverse_affine, dump_landmark_overlay, model_input_spec, preprocess_bgra,
+    ModelInputSpec, crop_inverse_affine, dump_landmark_overlay, fallback_input_spec,
+    model_input_spec, output_summary, preprocess_bgra, tensor_num_elements,
 };
 
 const DEFAULT_INPUT_SIZE: usize = 256;
@@ -22,7 +23,7 @@ const PINKY_MCP_LANDMARK: usize = 17;
 const MEDIAPIPE_LANDMARK_SCALE: f32 = 1.0;
 const MEDIAPIPE_LANDMARK_TARGET_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
 const MEDIAPIPE_LANDMARK_TRACKING_SHIFT_Y: f32 = -0.1;
-const MEDIAPIPE_LANDMARK_TRACKING_SCALE: f32 = 2.0;
+const MEDIAPIPE_LANDMARK_TRACKING_SCALE: f32 = 2.2;
 const MEDIAPIPE_LANDMARK_RECT_INDICES: [usize; 12] = [0, 1, 2, 3, 5, 6, 9, 10, 13, 14, 17, 18];
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_WIDTH: f32 = 0.20;
 const LANDMARK_SILHOUETTE_MARGIN_OF_PALM_LENGTH: f32 = 0.10;
@@ -299,12 +300,9 @@ fn landmark_bounds(points: &[HandLandmark; HAND_LANDMARKS]) -> Option<(Vec2, Vec
 pub struct MediaPipeHandLandmarkProcessor {
     session: Session,
     config: MediaPipeHandLandmarkConfig,
-    input_name: String,
-    input_size: usize,
-    input_layout: ModelInputLayout,
-    landmarks_output: usize,
-    presence_output: Option<usize>,
-    handedness_output: Option<usize>,
+    input_spec: ModelInputSpec,
+    outputs: HandLandmarkOutputSpec,
+    run_options: RunOptions<HasSelectedOutputs>,
     input: Vec<f32>,
     last_debug_frame_id: Option<u64>,
     last_debug_crop_points: [Option<Vec2>; HAND_LANDMARKS],
@@ -324,19 +322,17 @@ impl MediaPipeHandLandmarkProcessor {
             .inputs()
             .first()
             .context("MediaPipe hand landmark model has no inputs")?;
-        let input_name = input.name().to_owned();
-        let (input_size, input_layout) =
-            model_input_spec(input.dtype()).unwrap_or((DEFAULT_INPUT_SIZE, ModelInputLayout::Nchw));
-        let (landmarks_output, presence_output, handedness_output) = classify_outputs(&session)?;
+        let input_spec = model_input_spec(input)
+            .unwrap_or_else(|| fallback_input_spec(input, DEFAULT_INPUT_SIZE));
+        let outputs = classify_outputs(&session)?;
+        let run_options = outputs.run_options()?;
+        let input_size = input_spec.size;
         Ok(Self {
             session,
             config,
-            input_name,
-            input_size,
-            input_layout,
-            landmarks_output,
-            presence_output,
-            handedness_output,
+            input_spec,
+            outputs,
+            run_options,
             input: vec![0.0; 3 * input_size * input_size],
             last_debug_frame_id: None,
             last_debug_crop_points: [None; HAND_LANDMARKS],
@@ -354,8 +350,8 @@ impl MediaPipeHandLandmarkProcessor {
 
         dump_landmark_overlay(
             frame_id,
-            self.input_size,
-            self.input_layout,
+            self.input_spec.size,
+            self.input_spec.layout,
             &self.input,
             &self.last_debug_crop_points,
         )
@@ -377,25 +373,28 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
         );
         self.last_debug_frame_id = None;
         let crop = crop_from_roi(input.roi, input.frame.meta.size);
+        let input_size = self.input_spec.size;
         let transform = crop_inverse_affine(
             input.frame.meta.size,
             crop,
-            self.input_size,
+            input_size,
             input.frame.buffer.is_horizontally_mirrored(),
             input.frame.buffer.is_vertically_mirrored(),
         )?;
         preprocess_bgra(
             input.frame,
-            self.input_size,
-            self.input_layout,
+            input_size,
+            self.input_spec.layout,
             &transform,
             "landmark",
             &mut self.input,
         )?;
-        let tensor =
-            TensorRef::from_array_view((self.input_layout.shape(self.input_size), &*self.input))?;
-        let outputs = self.session.run(vec![(self.input_name.as_str(), tensor)])?;
-        let (_, landmarks) = outputs[self.landmarks_output]
+        let tensor = TensorRef::from_array_view((self.input_spec.shape(), &*self.input))?;
+        let outputs = self.session.run_with_options(
+            vec![(self.input_spec.name.as_str(), tensor)],
+            &self.run_options,
+        )?;
+        let (_, landmarks) = outputs[self.outputs.landmarks_name.as_str()]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe hand landmarks")?;
         if landmarks.len() < HAND_LANDMARKS * LANDMARK_COORDS {
@@ -403,8 +402,11 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
         }
 
         let presence = self
-            .presence_output
-            .and_then(|index| outputs[index].try_extract_tensor::<f32>().ok())
+            .outputs
+            .presence_name
+            .as_deref()
+            .and_then(|name| outputs.get(name))
+            .and_then(|output| output.try_extract_tensor::<f32>().ok())
             .and_then(|(_, values)| values.first().copied())
             .unwrap_or(1.0);
         if presence < self.config.min_presence {
@@ -426,9 +428,9 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
                 (x, y, z)
             } else {
                 (
-                    x / self.input_size as f32,
-                    y / self.input_size as f32,
-                    z / self.input_size as f32,
+                    x / input_size as f32,
+                    y / input_size as f32,
+                    z / input_size as f32,
                 )
             };
 
@@ -463,8 +465,11 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
         self.last_debug_crop_points = crop_points;
 
         let handedness = self
-            .handedness_output
-            .and_then(|index| outputs[index].try_extract_tensor::<f32>().ok())
+            .outputs
+            .handedness_name
+            .as_deref()
+            .and_then(|name| outputs.get(name))
+            .and_then(|output| output.try_extract_tensor::<f32>().ok())
             .and_then(|(_, values)| values.first().copied())
             .map(|score| {
                 if score > 0.5 {
@@ -483,7 +488,27 @@ impl Processor<MediaPipeHandLandmarkInput<'_>> for MediaPipeHandLandmarkProcesso
     }
 }
 
-fn classify_outputs(session: &Session) -> Result<(usize, Option<usize>, Option<usize>)> {
+#[derive(Clone, Debug)]
+struct HandLandmarkOutputSpec {
+    landmarks_name: String,
+    presence_name: Option<String>,
+    handedness_name: Option<String>,
+}
+
+impl HandLandmarkOutputSpec {
+    fn run_options(&self) -> Result<RunOptions<HasSelectedOutputs>> {
+        let mut selector = OutputSelector::no_default().with(self.landmarks_name.clone());
+        if let Some(name) = &self.presence_name {
+            selector = selector.with(name.clone());
+        }
+        if let Some(name) = &self.handedness_name {
+            selector = selector.with(name.clone());
+        }
+        Ok(RunOptions::new()?.with_outputs(selector))
+    }
+}
+
+fn classify_outputs(session: &Session) -> Result<HandLandmarkOutputSpec> {
     let mut landmarks_output = None;
     let mut presence_output = None;
     let mut handedness_output = None;
@@ -493,10 +518,7 @@ fn classify_outputs(session: &Session) -> Result<(usize, Option<usize>, Option<u
     // 1. Try to find by name (MediaPipe/TFLite-to-ONNX conventions)
     for (i, output) in outputs.iter().enumerate() {
         let name = output.name().to_ascii_lowercase();
-        let elements = match output.dtype() {
-            ValueType::Tensor { shape, .. } => shape.num_elements(),
-            _ => 0,
-        };
+        let elements = tensor_num_elements(output.dtype());
 
         if landmarks_output.is_none()
             && (name.contains("landmark") || name.contains("identity"))
@@ -520,35 +542,28 @@ fn classify_outputs(session: &Session) -> Result<(usize, Option<usize>, Option<u
 
     // 2. Fallback to shape-based signatures if names were generic/missing
     if landmarks_output.is_none() {
-        landmarks_output = outputs.iter().position(
-            |o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 63),
-        );
+        landmarks_output = outputs
+            .iter()
+            .position(|o| tensor_num_elements(o.dtype()) == HAND_LANDMARKS * LANDMARK_COORDS);
     }
     if presence_output.is_none() {
-        presence_output = outputs.iter().position(
-            |o| matches!(o.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == 1),
-        );
+        presence_output = outputs
+            .iter()
+            .position(|o| tensor_num_elements(o.dtype()) == 1);
     }
 
     let Some(landmarks_output) = landmarks_output else {
-        let outputs = outputs
-            .iter()
-            .enumerate()
-            .map(|(i, output)| {
-                let shape = match output.dtype() {
-                    ValueType::Tensor { shape, .. } => format!("{shape:?}"),
-                    _ => "not a tensor".to_string(),
-                };
-                format!("{i}:{}:{shape}", output.name())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let outputs = output_summary(outputs);
         anyhow::bail!(
             "MediaPipe hand landmark model has no 21x3 landmark output tensor; outputs: {outputs}"
         );
     };
 
-    Ok((landmarks_output, presence_output, handedness_output))
+    Ok(HandLandmarkOutputSpec {
+        landmarks_name: outputs[landmarks_output].name().to_owned(),
+        presence_name: presence_output.map(|index| outputs[index].name().to_owned()),
+        handedness_name: handedness_output.map(|index| outputs[index].name().to_owned()),
+    })
 }
 
 fn crop_from_roi(roi: Option<RoiResult>, frame_size: Size) -> Affine2 {

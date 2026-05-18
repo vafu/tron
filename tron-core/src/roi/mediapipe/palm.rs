@@ -2,13 +2,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use glam::Vec2;
-use ort::session::Session;
-use ort::value::{TensorRef, ValueType};
+use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
+use ort::value::TensorRef;
 use tron_api::{
     Frame, NoContext, OrientedBoundingBox, PixelFormat, Processor, Rect, RoiResult, Size,
 };
 
-use super::{ModelInputLayout, letterbox_inverse_affine, model_input_spec, preprocess_bgra};
+use super::{
+    ModelInputLayout, ModelInputSpec, fallback_input_spec, letterbox_inverse_affine,
+    model_input_spec, output_summary, preprocess_bgra, tensor_last_dim, tensor_num_elements,
+};
 
 const DEFAULT_INPUT_SIZE: usize = 256;
 const SCORE_CLIP: f32 = 100.0;
@@ -36,11 +39,9 @@ impl Default for MediaPipeRoiConfig {
 pub struct MediaPipeRoiProcessor {
     session: Session,
     config: MediaPipeRoiConfig,
-    input_name: String,
-    input_size: usize,
-    input_layout: ModelInputLayout,
-    coords_output: usize,
-    scores_output: usize,
+    input_spec: ModelInputSpec,
+    outputs: PalmOutputSpec,
+    run_options: RunOptions<HasSelectedOutputs>,
     input: Vec<f32>,
     anchors: Vec<Anchor>,
 }
@@ -54,18 +55,18 @@ impl MediaPipeRoiProcessor {
             .inputs()
             .first()
             .context("MediaPipe hand detector model has no inputs")?;
-        let input_name = input.name().to_owned();
-        let (input_size, input_layout) =
-            model_input_spec(input.dtype()).unwrap_or((DEFAULT_INPUT_SIZE, ModelInputLayout::Nchw));
-        let (coords_output, scores_output, anchor_count) = classify_outputs(&session)?;
+        let input_spec = model_input_spec(input)
+            .unwrap_or_else(|| fallback_input_spec(input, DEFAULT_INPUT_SIZE));
+        let outputs = classify_outputs(&session)?;
+        let run_options = outputs.run_options()?;
+        let input_size = input_spec.size;
+        let anchor_count = outputs.anchor_count;
         Ok(Self {
             session,
             config,
-            input_name,
-            input_size,
-            input_layout,
-            coords_output,
-            scores_output,
+            input_spec,
+            outputs,
+            run_options,
             input: vec![0.0; 3 * input_size * input_size],
             anchors: generate_palm_anchors(input_size, anchor_count),
         })
@@ -81,15 +82,18 @@ impl Processor<Frame<'_>> for MediaPipeRoiProcessor {
             "MediaPipe ROI processor expects BGRA8 RGB frames, got {:?}",
             input.format
         );
+        let input_size = self.input_spec.size;
         let resize =
-            preprocess_palm_bgra(input, self.input_size, self.input_layout, &mut self.input)?;
-        let tensor =
-            TensorRef::from_array_view((self.input_layout.shape(self.input_size), &*self.input))?;
-        let outputs = self.session.run(vec![(self.input_name.as_str(), tensor)])?;
-        let (_, coords) = outputs[self.coords_output]
+            preprocess_palm_bgra(input, input_size, self.input_spec.layout, &mut self.input)?;
+        let tensor = TensorRef::from_array_view((self.input_spec.shape(), &*self.input))?;
+        let outputs = self.session.run_with_options(
+            vec![(self.input_spec.name.as_str(), tensor)],
+            &self.run_options,
+        )?;
+        let (_, coords) = outputs[self.outputs.coords_name.as_str()]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe box_coords")?;
-        let (_, scores) = outputs[self.scores_output]
+        let (_, scores) = outputs[self.outputs.scores_name.as_str()]
             .try_extract_tensor::<f32>()
             .context("extract MediaPipe box_scores")?;
 
@@ -98,14 +102,14 @@ impl Processor<Frame<'_>> for MediaPipeRoiProcessor {
             scores,
             &self.anchors,
             self.config.min_score,
-            self.input_size,
+            input_size,
         );
 
         Ok(detection.map(|detection| {
             let oriented_box = detection.to_oriented_box(
                 resize,
                 input.meta.size,
-                self.input_size,
+                input_size,
                 self.config.box_scale,
             );
 
@@ -115,7 +119,7 @@ impl Processor<Frame<'_>> for MediaPipeRoiProcessor {
                     detection.to_frame_rect(
                         resize,
                         input.meta.size,
-                        self.input_size,
+                        input_size,
                         self.config.box_scale,
                     )
                 })
@@ -245,6 +249,23 @@ struct Anchor {
     height: f32,
 }
 
+#[derive(Clone, Debug)]
+struct PalmOutputSpec {
+    coords_name: String,
+    scores_name: String,
+    anchor_count: usize,
+}
+
+impl PalmOutputSpec {
+    fn run_options(&self) -> Result<RunOptions<HasSelectedOutputs>> {
+        Ok(RunOptions::new()?.with_outputs(
+            OutputSelector::no_default()
+                .with(self.coords_name.clone())
+                .with(self.scores_name.clone()),
+        ))
+    }
+}
+
 fn preprocess_palm_bgra(
     frame: Frame<'_>,
     input_size: usize,
@@ -344,14 +365,15 @@ fn rect_to_oriented_box(rect: Rect) -> OrientedBoundingBox {
     }
 }
 
-fn classify_outputs(session: &Session) -> Result<(usize, usize, usize)> {
+fn classify_outputs(session: &Session) -> Result<PalmOutputSpec> {
     let outputs = session.outputs();
     let mut coords_output = None;
     let mut scores_output = None;
 
     for (i, output) in outputs.iter().enumerate() {
         let name = output.name().to_ascii_lowercase();
-        let (elements, last_dim) = output_tensor_shape(output.dtype());
+        let elements = tensor_num_elements(output.dtype());
+        let last_dim = tensor_last_dim(output.dtype());
         if coords_output.is_none()
             && (name.contains("box_coords")
                 || name.contains("regressor")
@@ -372,18 +394,7 @@ fn classify_outputs(session: &Session) -> Result<(usize, usize, usize)> {
     }
 
     let Some((coords_output, anchor_count)) = coords_output else {
-        let outputs = outputs
-            .iter()
-            .enumerate()
-            .map(|(i, output)| {
-                let shape = match output.dtype() {
-                    ValueType::Tensor { shape, .. } => format!("{shape:?}"),
-                    _ => "not a tensor".to_string(),
-                };
-                format!("{i}:{}:{shape}", output.name())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let outputs = output_summary(outputs);
         anyhow::bail!(
             "MediaPipe hand detector model has no box coordinate output; outputs: {outputs}"
         );
@@ -393,19 +404,19 @@ fn classify_outputs(session: &Session) -> Result<(usize, usize, usize)> {
             .iter()
             .enumerate()
             .find_map(|(i, output)| {
-                matches!(output.dtype(), ValueType::Tensor { shape, .. } if shape.num_elements() == anchor_count)
-                    .then_some(i)
+                (tensor_num_elements(output.dtype()) == anchor_count).then_some(i)
             })
-            .unwrap_or(coords_output.saturating_add(1).min(outputs.len().saturating_sub(1)))
+            .unwrap_or(
+                coords_output
+                    .saturating_add(1)
+                    .min(outputs.len().saturating_sub(1)),
+            )
     });
-    Ok((coords_output, scores_output, anchor_count))
-}
-
-fn output_tensor_shape(value_type: &ValueType) -> (usize, Option<i64>) {
-    match value_type {
-        ValueType::Tensor { shape, .. } => (shape.num_elements(), shape.last().copied()),
-        _ => (0, None),
-    }
+    Ok(PalmOutputSpec {
+        coords_name: outputs[coords_output].name().to_owned(),
+        scores_name: outputs[scores_output].name().to_owned(),
+        anchor_count,
+    })
 }
 
 fn generate_palm_anchors(input_size: usize, anchor_count: usize) -> Vec<Anchor> {

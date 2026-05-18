@@ -7,7 +7,7 @@ use glam::{Affine2, Vec2};
 use opencv::core::{self, Mat, Vec4b};
 use opencv::imgproc;
 use opencv::prelude::*;
-use ort::value::ValueType;
+use ort::value::{Outlet, ValueType};
 use tron_api::{Frame, PixelFormat, Size};
 
 mod landmark;
@@ -51,69 +51,90 @@ pub(super) enum ModelInputLayout {
     Nhwc,
 }
 
-trait TensorLayout {
-    fn shape(input_size: usize) -> [usize; 4];
-
-    fn offset(channel: usize, y: usize, x: usize, input_size: usize) -> usize;
-}
-
-struct NchwLayout;
-struct NhwcLayout;
-
 // TODO cleanup!
-impl TensorLayout for NchwLayout {
-    fn shape(input_size: usize) -> [usize; 4] {
-        [1, MODEL_INPUT_CHANNELS, input_size, input_size]
-    }
 
-    fn offset(channel: usize, y: usize, x: usize, input_size: usize) -> usize {
-        channel * input_size * input_size + y * input_size + x
-    }
-}
-
-impl TensorLayout for NhwcLayout {
-    fn shape(input_size: usize) -> [usize; 4] {
-        [1, input_size, input_size, MODEL_INPUT_CHANNELS]
-    }
-
-    fn offset(channel: usize, y: usize, x: usize, input_size: usize) -> usize {
-        (y * input_size + x) * MODEL_INPUT_CHANNELS + channel
-    }
+#[derive(Clone, Debug)]
+pub(super) struct ModelInputSpec {
+    pub(super) name: String,
+    pub(super) size: usize,
+    pub(super) layout: ModelInputLayout,
 }
 
 impl ModelInputLayout {
     pub(super) fn shape(self, input_size: usize) -> [usize; 4] {
         match self {
-            Self::Nchw => NchwLayout::shape(input_size),
-            Self::Nhwc => NhwcLayout::shape(input_size),
-        }
-    }
-
-    fn offset(self, channel: usize, y: usize, x: usize, input_size: usize) -> usize {
-        match self {
-            Self::Nchw => NchwLayout::offset(channel, y, x, input_size),
-            Self::Nhwc => NhwcLayout::offset(channel, y, x, input_size),
+            Self::Nchw => [1, MODEL_INPUT_CHANNELS, input_size, input_size],
+            Self::Nhwc => [1, input_size, input_size, MODEL_INPUT_CHANNELS],
         }
     }
 }
 
-pub(super) fn model_input_spec(value_type: &ValueType) -> Option<(usize, ModelInputLayout)> {
-    let ValueType::Tensor { shape, .. } = value_type else {
-        return None;
-    };
+impl ModelInputSpec {
+    pub(super) fn shape(&self) -> [usize; 4] {
+        self.layout.shape(self.size)
+    }
+}
+
+pub(super) fn model_input_spec(input: &Outlet) -> Option<ModelInputSpec> {
+    let shape = input.dtype().tensor_shape()?;
     let c = *shape.get(1)?;
     let h = *shape.get(2)?;
     let w = *shape.get(3)?;
     if c == 3 && h > 0 && h == w {
-        return Some((h as usize, ModelInputLayout::Nchw));
+        return Some(ModelInputSpec {
+            name: input.name().to_owned(),
+            size: h as usize,
+            layout: ModelInputLayout::Nchw,
+        });
     }
     let h = *shape.get(1)?;
     let w = *shape.get(2)?;
     let c = *shape.get(3)?;
     if c == 3 && h > 0 && h == w {
-        return Some((h as usize, ModelInputLayout::Nhwc));
+        return Some(ModelInputSpec {
+            name: input.name().to_owned(),
+            size: h as usize,
+            layout: ModelInputLayout::Nhwc,
+        });
     }
     None
+}
+
+pub(super) fn fallback_input_spec(input: &Outlet, size: usize) -> ModelInputSpec {
+    ModelInputSpec {
+        name: input.name().to_owned(),
+        size,
+        layout: ModelInputLayout::Nchw,
+    }
+}
+
+pub(super) fn tensor_num_elements(value_type: &ValueType) -> usize {
+    value_type
+        .tensor_shape()
+        .map(|shape| shape.num_elements())
+        .unwrap_or(0)
+}
+
+pub(super) fn tensor_last_dim(value_type: &ValueType) -> Option<i64> {
+    value_type
+        .tensor_shape()
+        .and_then(|shape| shape.last().copied())
+}
+
+pub(super) fn output_summary(outputs: &[Outlet]) -> String {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(i, output)| {
+            let shape = output
+                .dtype()
+                .tensor_shape()
+                .map(|shape| format!("{shape:?}"))
+                .unwrap_or_else(|| "not a tensor".to_string());
+            format!("{i}:{}:{shape}", output.name())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(super) fn preprocess_bgra(
@@ -263,12 +284,42 @@ fn bgra_mat_to_tensor(
             let g = bytes[offset + 1];
             let r = bytes[offset + 2];
 
-            output[layout.offset(0, y, x, input_size)] = r as f32 / 255.0;
-            output[layout.offset(1, y, x, input_size)] = g as f32 / 255.0;
-            output[layout.offset(2, y, x, input_size)] = b as f32 / 255.0;
+            write_tensor_rgb(
+                layout,
+                output,
+                input_size,
+                y,
+                x,
+                [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+            );
         }
     }
     Ok(())
+}
+
+fn write_tensor_rgb(
+    layout: ModelInputLayout,
+    tensor: &mut [f32],
+    input_size: usize,
+    y: usize,
+    x: usize,
+    rgb: [f32; 3],
+) {
+    match layout {
+        ModelInputLayout::Nchw => {
+            let plane = input_size * input_size;
+            let pixel = y * input_size + x;
+            tensor[pixel] = rgb[0];
+            tensor[plane + pixel] = rgb[1];
+            tensor[2 * plane + pixel] = rgb[2];
+        }
+        ModelInputLayout::Nhwc => {
+            let pixel = (y * input_size + x) * MODEL_INPUT_CHANNELS;
+            tensor[pixel] = rgb[0];
+            tensor[pixel + 1] = rgb[1];
+            tensor[pixel + 2] = rgb[2];
+        }
+    }
 }
 
 pub(super) fn dump_landmark_overlay(
@@ -316,18 +367,37 @@ fn tensor_to_rgb(input_size: usize, layout: ModelInputLayout, tensor: &[f32]) ->
     for y in 0..input_size {
         for x in 0..input_size {
             let dst = (y * input_size + x) * MODEL_INPUT_CHANNELS;
-            rgb[dst] = tensor[layout.offset(0, y, x, input_size)]
-                .mul_add(255.0, 0.0)
-                .clamp(0.0, 255.0) as u8;
-            rgb[dst + 1] = tensor[layout.offset(1, y, x, input_size)]
-                .mul_add(255.0, 0.0)
-                .clamp(0.0, 255.0) as u8;
-            rgb[dst + 2] = tensor[layout.offset(2, y, x, input_size)]
-                .mul_add(255.0, 0.0)
-                .clamp(0.0, 255.0) as u8;
+            let [r, g, b] = read_tensor_rgb(layout, tensor, input_size, y, x);
+            rgb[dst] = r.mul_add(255.0, 0.0).clamp(0.0, 255.0) as u8;
+            rgb[dst + 1] = g.mul_add(255.0, 0.0).clamp(0.0, 255.0) as u8;
+            rgb[dst + 2] = b.mul_add(255.0, 0.0).clamp(0.0, 255.0) as u8;
         }
     }
     Ok(rgb)
+}
+
+fn read_tensor_rgb(
+    layout: ModelInputLayout,
+    tensor: &[f32],
+    input_size: usize,
+    y: usize,
+    x: usize,
+) -> [f32; 3] {
+    match layout {
+        ModelInputLayout::Nchw => {
+            let plane = input_size * input_size;
+            let pixel = y * input_size + x;
+            [
+                tensor[pixel],
+                tensor[plane + pixel],
+                tensor[2 * plane + pixel],
+            ]
+        }
+        ModelInputLayout::Nhwc => {
+            let pixel = (y * input_size + x) * MODEL_INPUT_CHANNELS;
+            [tensor[pixel], tensor[pixel + 1], tensor[pixel + 2]]
+        }
+    }
 }
 
 fn write_rgb_ppm(path: &PathBuf, input_size: usize, rgb: &[u8]) -> Result<()> {
